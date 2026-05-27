@@ -6,29 +6,50 @@
   <title>Tokenproxy Stage One System Design Spec</title>
   <style>
     /* Self-contained Tailwind-style utility subset used by this report. */
-    html { color: #111; background: #fff; }
-    body { margin: 0; font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif; }
+    *, ::before, ::after { box-sizing: border-box; }
+    html { color: #111; background: #fff; width: 100%; max-width: 100%; overflow-x: hidden; }
+    body { margin: 0; width: 100%; max-width: 100%; min-width: 0; overflow-x: hidden; font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif; }
+    main { width: 100%; max-width: min(56rem, 100vw); min-width: 0; }
     code, pre, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    code { overflow-wrap: anywhere; }
+    pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+    pre code { overflow-wrap: normal; }
+    a, em { overflow-wrap: anywhere; word-break: break-word; }
     a { color: #111; text-decoration: underline; text-underline-offset: 2px; }
     h1, h2, h3 { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     p { margin: 0; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #111; padding: 0.45rem 0.55rem; vertical-align: top; }
+    table { border-collapse: collapse; width: 100%; max-width: 100%; table-layout: fixed; }
+    th, td { border: 1px solid #111; padding: 0.45rem 0.55rem; vertical-align: top; overflow-wrap: anywhere; }
     th { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 700; text-align: left; }
+    .prose { color: #111; max-width: 65ch; min-width: 0; line-height: 1.75; }
+    .prose :where(p, ul, ol, blockquote, table, pre, details):not(:where(.not-prose, .not-prose *)) { margin-top: 1.25em; margin-bottom: 1.25em; }
+    .prose :where(h1, h2, h3):not(:where(.not-prose, .not-prose *)) { color: #111; font-weight: 700; line-height: 1.25; }
+    .prose :where(h1):not(:where(.not-prose, .not-prose *)) { margin-top: 0; margin-bottom: 0.9em; font-size: 2.25rem; }
+    .prose :where(h2):not(:where(.not-prose, .not-prose *)) { margin-top: 2em; margin-bottom: 1em; font-size: 1.5rem; }
+    .prose :where(h3):not(:where(.not-prose, .not-prose *)) { margin-top: 1.6em; margin-bottom: 0.6em; font-size: 1.25rem; }
+    .prose :where(ul, ol):not(:where(.not-prose, .not-prose *)) { padding-left: 1.5rem; }
+    .prose :where(li):not(:where(.not-prose, .not-prose *)) { margin-top: 0.35em; margin-bottom: 0.35em; }
+    .prose :where(strong):not(:where(.not-prose, .not-prose *)) { font-weight: 700; }
+    .prose :where(code):not(:where(pre code, .not-prose, .not-prose *)) { font-size: 0.875em; font-weight: 600; }
+    .prose :where(pre):not(:where(.not-prose, .not-prose *)) { border: 1px solid #111; padding: 1rem; font-size: 0.875rem; line-height: 1.6; }
+    .prose :where(:first-child):not(:where(.not-prose, .not-prose *)) { margin-top: 0; }
+    .prose :where(:last-child):not(:where(.not-prose, .not-prose *)) { margin-bottom: 0; }
+    .not-prose { max-width: none; }
     .claim { border-left: 4px solid #111; padding-left: 1rem; }
     .caption { font-size: 0.875rem; line-height: 1.45; margin-top: 0.5rem; }
     .viz-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
     .viz-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
-    .viz-box { border: 1px solid #111; padding: 0.75rem; }
-    .metric { border: 1px solid #111; padding: 0.75rem; min-height: 8.5rem; }
-    .module-map { display: inline-block; min-width: 22rem; max-width: 100%; line-height: 1.45; }
+    .viz-grid > *, .viz-grid-3 > * { min-width: 0; }
+    .viz-box { border: 1px solid #111; padding: 0.75rem; min-width: 0; }
+    .metric { border: 1px solid #111; padding: 0.75rem; min-width: 0; min-height: 8.5rem; }
+    .module-map { display: inline-block; min-width: min(22rem, 100%); max-width: 100%; line-height: 1.45; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
     .flow { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: stretch; }
-    .flow span { border: 1px solid #111; padding: 0.35rem 0.5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 0.82rem; }
+    .flow span { border: 1px solid #111; padding: 0.35rem 0.5rem; max-width: 100%; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 0.82rem; }
     .arrow { border: 0 !important; padding: 0.35rem 0 !important; }
     details { border: 1px solid #111; padding: 0.75rem; margin-top: 0.75rem; }
     summary { cursor: pointer; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 700; }
-    svg { max-width: 100%; height: auto; }
+    img, svg, video, canvas { max-width: 100%; height: auto; }
     .smallcaps { font-variant: small-caps; letter-spacing: 0.03em; }
     .mx-auto { margin-left: auto; margin-right: auto; }
     .mt-3 { margin-top: 0.75rem; }
@@ -39,6 +60,7 @@
     .mb-4 { margin-bottom: 1rem; }
     .mb-12 { margin-bottom: 3rem; }
     .max-w-4xl { max-width: 56rem; }
+    .max-w-none { max-width: none; }
     .border { border: 1px solid #111; }
     .border-b { border-bottom: 1px solid #111; }
     .border-t { border-top: 1px solid #111; }
@@ -69,7 +91,8 @@
   </style>
 </head>
 <body>
-  <main class="mx-auto max-w-4xl px-6 py-10 leading-7">
+  <main class="mx-auto max-w-4xl px-6 py-10">
+    <article class="prose max-w-none leading-7">
     <header class="mb-12 border-b border-black pb-8">
       <p class="smallcaps text-sm">Tokenproxy Stage One</p>
       <h1 class="mt-3 text-4xl font-bold leading-tight">A small Rust proxy for OpenAI-compatible agent traffic</h1>
@@ -3811,6 +3834,10 @@ codex exec \
         </thead>
         <tbody>
           <tr>
+            <td>2026-05-27 10:55 AM PDT</td>
+            <td>Applied self-contained Tailwind Typography-style prose defaults with max-width and overflow guards; no evidence values changed.</td>
+          </tr>
+          <tr>
             <td>2026-05-27 5:04 AM PDT</td>
             <td>Re-reviewed graphical UX and local Codex config evidence; added setup, command, SSH tunnel, and Codex profile visuals without changing performance values.</td>
           </tr>
@@ -3869,6 +3896,7 @@ codex exec \
         </tbody>
       </table>
     </section>
+    </article>
   </main>
 </body>
 </html>
