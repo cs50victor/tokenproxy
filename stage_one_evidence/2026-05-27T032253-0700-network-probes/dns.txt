@@ -1,0 +1,10 @@
+# api.openai.com A
+162.159.140.245
+172.66.0.243
+# api.openai.com AAAA
+# status.openai.com A
+cname.vercel-dns.com.
+76.76.21.241
+66.33.60.193
+# status.openai.com AAAA
+cname.vercel-dns.com.

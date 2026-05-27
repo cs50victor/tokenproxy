@@ -79,9 +79,10 @@
       </p>
       <p class="mt-4 text-sm">
         Evidence snapshot: local checkout at <code>/Users/vic8or/dev/tokenproxy</code>,
-        passive probe artifacts through 2026-05-27 03:05:53 PDT / 2026-05-27
-        10:05:53 UTC; official OpenAI docs rechecked through 2026-05-27
-        03:10:50 PDT / 2026-05-27 10:10:51 UTC.
+        passive network probe artifacts through 2026-05-27 03:23:13 PDT /
+        2026-05-27 10:23:13 UTC, endpoint inventory artifacts through 2026-05-27
+        03:27:19 PDT / 2026-05-27 10:27:19 UTC; official OpenAI docs rechecked
+        through 2026-05-27 03:32 PDT / 2026-05-27 10:32 UTC.
       </p>
     </header>
 
@@ -149,9 +150,9 @@
           <strong>Claim 5.</strong> Network path facts are observations, not constants. In this
           checkout, DNS resolved <code>api.openai.com</code> to <code>172.66.0.243</code> and
           <code>162.159.140.245</code>. It resolved <code>status.openai.com</code> through
-          <code>cname.vercel-dns.com</code> to <code>66.33.60.129</code> and <code>76.76.21.22</code>.
+          <code>cname.vercel-dns.com</code> to <code>66.33.60.193</code> and <code>76.76.21.241</code>.
           These values came from
-          <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/dns.txt</code>
+          <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/dns.txt</code>
           and are inputs to the measurement log, not implementation constants.
         </p>
       </div>
@@ -168,6 +169,7 @@
         <li><code>POST /v1/responses</code> with JSON and SSE streaming support.</li>
         <li><code>POST /v1/responses/compact</code> as a thin pass-through for compacting Responses input windows.</li>
         <li><code>GET /v1/responses</code> WebSocket upgrade for Responses WebSocket mode.</li>
+        <li><code>GET /v1/models</code> as a small local compatibility endpoint backed by configured model and account-capability state.</li>
         <li><code>GET /healthz</code> for local process health.</li>
         <li><code>GET /metrics</code> for Prometheus-format counters and histograms.</li>
       </ul>
@@ -194,8 +196,125 @@
         <code>/responses/{response_id}</code>, <code>/responses/{response_id}/cancel</code>, and
         <code>/responses/{response_id}/input_items</code> among many other paths (OpenAI,
         2026a). Tokenproxy stage two implements the two generation endpoints,
-        <code>/responses/compact</code>, and the WebSocket transport path. It does not
-        implement Conversations, Threads, Assistants, Batches, Realtime, Files, or Images.
+        <code>/responses/compact</code>, the WebSocket transport path, and a
+        non-proxying <code>/models</code> compatibility response. It does not implement
+        Conversations, Threads, Assistants, Batches, Realtime, Files, Images, Videos,
+        ChatKit, Containers, Skills, Vector Stores, organization administration, or
+        usage endpoints.
+      </p>
+      <h3 class="mt-8 mb-3 text-xl font-bold">Endpoint inventory from this review</h3>
+      <p>
+        The 2026-05-27 endpoint review separates documented public OpenAI API paths
+        from documented WebSocket behavior and source-observed ChatGPT/Codex backend
+        paths. The official OpenAPI inventory reports OpenAPI <code>3.1.0</code>, API
+        spec version <code>2.3.0</code>, base URL <code>https://api.openai.com/v1</code>,
+        and 172 paths. The local sweep at
+        <code>stage_one_evidence/2026-05-27T032719-0700-endpoint-inventory/endpoint_probe.csv</code>
+        used no credential; it proves only DNS/TLS/HTTP reachability and auth
+        boundaries, not authenticated product availability.
+      </p>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Stage-two decision</th>
+            <th>Endpoint family</th>
+            <th>Documented or observed surface</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Implement the three HTTP routes plus the <code>/v1/responses</code> WebSocket upgrade.</td>
+            <td>Public generation</td>
+            <td><code>POST /v1/chat/completions</code>, <code>POST /v1/responses</code>, <code>POST /v1/responses/compact</code>, and <code>wss://api.openai.com/v1/responses</code>.</td>
+            <td>Official OpenAPI and WebSocket guide; CLIProxyAPI registers the HTTP and WebSocket routes at <code>internal/api/server.go</code> lines 385-399; Codex uses endpoint paths in <code>responses.rs</code> lines 102-104, <code>compact.rs</code> lines 33-54, and <code>responses_websocket.rs</code> lines 376-386.</td>
+          </tr>
+          <tr>
+            <td>Implement a local model catalog response. Do not call upstream while serving the request.</td>
+            <td>Public model catalog</td>
+            <td><code>GET /v1/models</code>.</td>
+            <td>Official OpenAPI <code>/models</code>; CLIProxyAPI registers <code>v1.GET("/models")</code> at <code>internal/api/server.go</code> lines 385-386; Codex uses path <code>models</code> with a 5-second refresh timeout in <code>model-provider/src/models_endpoint.rs</code> lines 31-33 and 81-105.</td>
+          </tr>
+          <tr>
+            <td>Do not implement in stage two.</td>
+            <td>Adjacent public OpenAI paths</td>
+            <td><code>/v1/responses/input_tokens</code>, <code>/v1/responses/{id}</code>, <code>/v1/responses/{id}/cancel</code>, <code>/v1/responses/{id}/input_items</code>, stored Chat Completion listing/retrieval, and the broader 172-path OpenAPI surface.</td>
+            <td>The endpoint probe reached sampled adjacent paths with unauthenticated <code>401</code>. Excluding them avoids response-store, stored-chat, file, admin, and billing semantics that tokenproxy does not own.</td>
+          </tr>
+          <tr>
+            <td>Do not implement in stage two.</td>
+            <td>Realtime</td>
+            <td><code>/v1/realtime/calls</code>, call-control paths, session/client-secret endpoints, and <code>wss://api.openai.com/v1/realtime</code>.</td>
+            <td>Official OpenAPI documents Realtime calls and sessions; Codex source also has Realtime clients at <code>realtime_call.rs</code> lines 60-65 and WebSocket URL tests at <code>realtime_websocket/methods.rs</code> lines 1417-1528. Realtime is an audio/WebRTC/WebSocket product surface, not part of the Chat Completions/Responses proxy boundary.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="mt-4">
+        Source-observed ChatGPT/Codex backend paths are not a public stability
+        contract. Codex defaults the ChatGPT backend base to
+        <code>https://chatgpt.com/backend-api</code> for login/config paths and uses
+        <code>https://chatgpt.com/backend-api/codex</code> as its Codex model-provider
+        base. CLIProxyAPI also exposes local Codex direct aliases under
+        <code>/backend-api/codex</code> for Responses traffic. Stage two may map public
+        tokenproxy routes to these upstream paths only after account routing selects a
+        ChatGPT-backed Codex account; it must not expose ChatGPT backend paths as
+        downstream routes.
+      </p>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Observed backend path</th>
+            <th>Observed role</th>
+            <th>Stage-two decision</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>https://chatgpt.com/backend-api</code></td>
+            <td>Default ChatGPT backend base for login/config/cloud-task code.</td>
+            <td>Use only as a configured upstream base for ChatGPT-account auth and refresh code. Do not expose it downstream.</td>
+            <td><code>login/src/auth/manager.rs</code> lines 94-98; <code>core/src/config/mod.rs</code> lines 3487-3499; <code>cloud-tasks/src/util.rs</code> lines 27-41.</td>
+          </tr>
+          <tr>
+            <td><code>/backend-api/codex/models</code>, <code>/backend-api/codex/responses</code>, <code>/backend-api/codex/responses/compact</code></td>
+            <td>Codex-compatible model catalog, Responses generation, and compact calls against the ChatGPT backend.</td>
+            <td>Use only as account-selected upstream equivalents for public tokenproxy routes.</td>
+            <td><code>model-provider-info/src/lib.rs</code> lines 35-37; Codex provider URL joining in <code>provider.rs</code> lines 52-103; endpoint paths in <code>models.rs</code> lines 31-44, <code>responses.rs</code> lines 102-104, and <code>compact.rs</code> lines 33-54; CLIProxyAPI direct aliases in <code>internal/api/server.go</code> lines 402-408.</td>
+          </tr>
+          <tr>
+            <td><code>/backend-api/codex/realtime/calls</code> and <code>wss://.../realtime</code></td>
+            <td>Codex Realtime audio/call traffic.</td>
+            <td>Exclude from stage two.</td>
+            <td><code>realtime_call.rs</code> lines 60-65 and 367-395; <code>realtime_websocket/methods.rs</code> lines 801-824 and 1417-1528.</td>
+          </tr>
+          <tr>
+            <td><code>/backend-api/wham/environments</code>, <code>/backend-api/wham/environments/by-repo/github/{owner}/{repo}</code>, <code>/backend-api/wham/apps</code></td>
+            <td>Cloud environment discovery and Apps MCP metadata.</td>
+            <td>Do not proxy. Tokenproxy routes model traffic, not Codex cloud-environment or Apps control-plane APIs.</td>
+            <td><code>cloud-tasks/src/env_detect.rs</code> lines 35-75; <code>codex-mcp/src/mcp/mod.rs</code> lines 425-448.</td>
+          </tr>
+          <tr>
+            <td><code>/backend-api/v1/agent/register</code>, <code>/backend-api/v1/agent/{runtime}/task/register</code>, <code>/backend-api/authenticate_app_v2</code>, <code>/backend-api/wham/agent-identities/jwks</code></td>
+            <td>Agent identity registration, app authentication, and JWKS lookup.</td>
+            <td>Do not proxy in stage two. Credential and identity flows stay outside the generation hot path.</td>
+            <td><code>agent-identity/src/lib.rs</code> lines 299-320.</td>
+          </tr>
+          <tr>
+            <td><code>https://auth.openai.com/oauth/token</code> and <code>https://auth.openai.com/oauth/revoke</code></td>
+            <td>ChatGPT OAuth token refresh and revoke.</td>
+            <td>Use only inside account-login/account-refresh implementation. Never expose downstream.</td>
+            <td><code>login/src/auth/manager.rs</code> lines 94-98.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="caption">
+        The unauthenticated endpoint sweep returned <code>401</code> for all sampled
+        <code>api.openai.com/v1</code> paths, <code>401</code> for sampled
+        <code>chatgpt.com/backend-api/codex</code> model/Responses paths, <code>200</code>
+        for the public JWKS path, <code>405</code> for <code>/wham/apps</code> with GET,
+        and <code>403</code> for the bare <code>/backend-api</code> root. Source:
+        <code>stage_one_evidence/2026-05-27T032719-0700-endpoint-inventory/endpoint_probe.csv</code>.
       </p>
       <p class="mt-4">
         <code>POST /v1/responses</code> returns either a JSON <code>Response</code> or a
@@ -203,16 +322,21 @@
         response object includes continuation and orchestration fields that tokenproxy
         must preserve or surface: <code>previous_response_id</code>, <code>reasoning</code>,
         <code>store</code>, <code>text</code>, <code>tool_choice</code>, <code>tools</code>,
-        <code>truncation</code>, <code>usage.input_tokens_details.cached_tokens</code>, and
+        <code>truncation</code>, cached-token usage metadata, and
         <code>usage.output_tokens_details.reasoning_tokens</code> (OpenAI, 2026a).
+        Current OpenAI material shows two cached-token shapes: Responses examples use
+        <code>usage.input_tokens_details.cached_tokens</code>, while Chat Completions examples
+        and the prompt-caching guide use <code>usage.prompt_tokens_details.cached_tokens</code>
+        (OpenAI, 2026a; OpenAI, 2026d). Tokenproxy must read and log either field when
+        present and must forward the upstream <code>usage</code> object without schema rewriting.
       </p>
       <p class="mt-4">
         <code>POST /v1/chat/completions</code> remains supported because clients still use it.
         The OpenAPI summary recommends Responses for new projects and states that Chat
         Completions can return either a JSON chat completion object or streamed chat
         completion chunks (OpenAI, 2026a). Tokenproxy should pass Chat Completions
-        requests through instead of converting them unless a benchmarked client workflow
-        requires conversion.
+        requests through instead of converting them because no current source review or
+        local experiment supports paying conversion complexity in stage two.
       </p>
     </section>
 
@@ -271,6 +395,12 @@
             <td>Non-upgrade GET returns <code>426</code>. Binary frames close with WebSocket code <code>1003</code>.</td>
           </tr>
           <tr>
+            <td><code>GET /v1/models</code></td>
+            <td>No body. Optional client query parameters, including <code>client_version</code>, are accepted and ignored.</td>
+            <td>Return an OpenAI-style <code>{"object":"list","data":[...]}</code> model catalog from local configuration and account capability state. Do not call upstream during this request.</td>
+            <td>Non-GET returns <code>405</code>. Request bodies are ignored after the method check.</td>
+          </tr>
+          <tr>
             <td><code>GET /healthz</code></td>
             <td>No body.</td>
             <td>Return process liveness, version, and enabled account count. Do not expose secrets.</td>
@@ -303,7 +433,7 @@
       </p>
       <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
   "error": {
-    "message": "unsupported route: GET /v1/models",
+    "message": "unsupported route: GET /v1/files",
     "type": "tokenproxy_error",
     "code": "unsupported_route",
     "param": null
@@ -1019,8 +1149,10 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
             <td>Prompt caching</td>
             <td>
               Keep stable prompt/tool prefixes first, dynamic items last, pass through
-              <code>prompt_cache_key</code>, and log cached token counts. For caller-specific
-              cache routing, derive a stable key from caller identity and model family.
+              <code>prompt_cache_key</code>, and log cached token counts from either
+              <code>usage.input_tokens_details.cached_tokens</code> or
+              <code>usage.prompt_tokens_details.cached_tokens</code>. For caller-specific cache
+              routing, derive a stable key from caller identity and model family.
             </td>
             <td>
               OpenAI documents exact prefix matching, 1024-token eligibility,
@@ -1311,40 +1443,42 @@ After compacted window is used:
               curl 8.19.0 on macOS with OpenSSL 3.6.1, nghttp2 1.67.1,
               ngtcp2 1.17.0, nghttp3 1.12.0. Features include HTTP2 and HTTP3.
               Raw environment capture:
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/environment.txt</code>.
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/environment.txt</code>.
             </td>
             <td>Local probe tool can compare HTTP/1.1, HTTP/2, and HTTP/3 where network policy permits.</td>
           </tr>
           <tr>
             <td><code>dig api.openai.com A +short</code></td>
-            <td><code>162.159.140.245</code>, <code>172.66.0.243</code></td>
+            <td><code>172.66.0.243</code>, <code>162.159.140.245</code></td>
             <td>Record resolved IPs in benchmark output, but never pin them in code.</td>
           </tr>
           <tr>
             <td><code>dig status.openai.com A +short</code></td>
-            <td><code>cname.vercel-dns.com.</code>, <code>66.33.60.129</code>, <code>76.76.21.22</code></td>
+            <td><code>cname.vercel-dns.com.</code>, <code>66.33.60.193</code>, <code>76.76.21.241</code></td>
             <td>Status is operational context, not routing substrate.</td>
           </tr>
           <tr>
             <td><code>curl</code> timing and TLS probes</td>
             <td>
-              At 2026-05-27 03:05:53 PDT, five uncredentialed 401 probes per
+              At 2026-05-27 03:23:13 PDT, five uncredentialed 401 probes per
               protocol to <code>https://api.openai.com/v1/responses</code> reached
-              <code>172.66.0.243</code> with zero curl errors. HTTP/2 total seconds:
-              p50 <code>0.098917</code>, p95 <code>0.153814</code>, p99
-              <code>0.153814</code>; run 3 was the sample maximum at <code>0.153814</code>.
-              HTTP/1.1 total seconds: p50 <code>0.099588</code>, p95
-              <code>0.166897</code>, p99 <code>0.166897</code>. HTTP/3 total seconds:
-              p50 <code>0.089513</code>, p95 <code>0.118058</code>, p99
-              <code>0.118058</code>. Raw timings:
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/curl_timings.csv</code>.
+              <code>162.159.140.245</code> with zero curl errors. HTTP/2 total seconds:
+              p50 <code>0.117552</code>, p95 <code>0.175712</code>, p99
+              <code>0.175712</code>. HTTP/1.1 total seconds: p50
+              <code>0.098402</code>, p95 <code>0.184934</code>, p99
+              <code>0.184934</code>. HTTP/3 total seconds: p50
+              <code>0.099130</code>, p95 <code>0.124275</code>, p99
+              <code>0.124275</code>. Raw timings:
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/curl_timings.csv</code>
+              and derived summary
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/curl_stats.txt</code>.
               Command template:
-              <code>curl --http2|--http1.1|--http3-only -sS -o /dev/null -w '%{remote_ip},%{http_version},%{http_code},%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total},%{exitcode},%{errormsg}' https://api.openai.com/v1/responses</code>.
+              <code>curl --http2|--http1.1|--http3-only --connect-timeout 5 --max-time 20 -sS -o /dev/null -w '%{remote_ip},%{http_version},%{http_code},%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total},%{exitcode},%{errormsg}' https://api.openai.com/v1/responses</code>.
               Same-run TLS inspection connected to <code>172.66.0.243</code>,
               negotiated TLS 1.3 with <code>TLS_AES_256_GCM_SHA384</code>, and
               verified certificate CN <code>api.openai.com</code>; the negotiated
               TLS 1.3 group was <code>X25519MLKEM768</code>. Raw TLS capture:
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/tls.txt</code>.
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/tls.txt</code>.
             </td>
             <td>
               The local 401 probe proves route reachability and records current path
@@ -1358,7 +1492,7 @@ After compacted window is used:
               <code>websocat -v -1 -H='Authorization: Bearer invalid_tokenproxy_probe' wss://api.openai.com/v1/responses</code>
               connected TCP to <code>172.66.0.243:443</code> and received
               <code>401 Unauthorized</code> during upgrade. Raw capture:
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/websocket_unauthenticated.txt</code>.
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/websocket_unauthenticated.txt</code>.
             </td>
             <td>
               This shows the route reaches an endpoint that handles WebSocket upgrade
@@ -1369,16 +1503,16 @@ After compacted window is used:
           <tr>
             <td>OpenAI status API</td>
             <td>
-              At the 2026-05-27 03:05 PDT refresh,
+              At the 2026-05-27 03:23 PDT refresh,
               <code>https://status.openai.com/api/v2/status.json</code> reported
               <code>minor</code> status with description <code>Partial System Degradation</code>
               and page update time <code>2026-05-27T05:31:12Z</code>. The summary API
               reported one active monitoring incident, "Login issues for FedRAMP users
               who recently logged out"; <code>Responses</code> and <code>Codex API</code>
               components were marked operational. Raw captures:
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/openai_status_status.json</code>
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/openai_status_status.json</code>
               and
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/openai_status_summary.json</code>.
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/openai_status_summary.json</code>.
               Commands:
               <code>curl -fsS --connect-timeout 5 --max-time 15 https://status.openai.com/api/v2/status.json</code>
               and
@@ -1514,7 +1648,8 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
   "first_event_ms": 0.0,
   "total_ms": 93.182,
   "status": 200,
-  "cached_tokens": 0,
+  "usage_cached_tokens": 0,
+  "usage_cached_tokens_field": "input_tokens_details|prompt_tokens_details|absent",
   "reasoning_tokens": 0,
   "input_bytes": 0,
   "output_bytes": 0,
@@ -1763,6 +1898,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       <ol class="list-decimal pl-6">
         <li>Create a Rust workspace with one binary crate <code>tokenproxy</code> and one internal library crate if tests need it.</li>
         <li>Implement config loading, account model, redaction helpers, and route classifier.</li>
+        <li>Implement local <code>GET /v1/models</code> response from configured models and account capability state.</li>
         <li>Implement non-streaming pass-through for <code>/v1/responses</code> and <code>/v1/chat/completions</code>.</li>
         <li>Add pooled upstream client with per-request auth insertion and connection timeout config.</li>
         <li>Add SSE relay with first-event header delay and Responses event metrics.</li>
@@ -1790,8 +1926,9 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
   http/
     mod.rs
     classify.rs
-    forward.rs
-    sse.rs
+	    forward.rs
+	    models.rs
+	    sse.rs
     sse_repair.rs
   responses/
     mod.rs
@@ -1932,7 +2069,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
       <p>
         These visuals describe what operators and agent clients see when tokenproxy
         behaves correctly. Measured numbers in this section come only from the
-        2026-05-27 03:05 PDT passive probe directory. Unauthenticated 401 probes
+        2026-05-27 03:23 PDT passive probe directory. Unauthenticated 401 probes
         are labeled as reachability data, not as product latency or stream stability.
       </p>
 
@@ -1958,7 +2095,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
               <tr><th>Active incident</th><td>FedRAMP login incident, monitoring</td></tr>
               <tr><th>Responses</th><td><code>operational</code></td></tr>
               <tr><th>Codex API</th><td><code>operational</code></td></tr>
-              <tr><th>Current probe path</th><td><code>172.66.0.243</code>, TLS 1.3, HTTP/1.1, HTTP/2, HTTP/3 reachable with 401</td></tr>
+              <tr><th>Current probe path</th><td><code>162.159.140.245</code> for curl, <code>172.66.0.243</code> for TLS/WebSocket, TLS 1.3, HTTP/1.1, HTTP/2, HTTP/3 reachable with 401</td></tr>
             </tbody>
           </table>
         </div>
@@ -1968,7 +2105,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
         status context. Source: <a href="#network">Network and Status
         Observations</a>, <a href="#performance-review-attestation">Performance-review
         Attestation</a>, and
-        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/openai_status_summary.json</code>.
+        <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/openai_status_summary.json</code>.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Agent-client lifecycle</h3>
@@ -2077,25 +2214,25 @@ warn!("websocket control queue full while replying to ping; closing connection")
           <p class="font-bold">HTTP/2 reachability</p>
           <p class="mono mt-4">samples=5</p>
           <p class="mono">status=401</p>
-          <p class="mono">p50=0.098917s</p>
-          <p class="mono">p95=0.153814s</p>
-          <p class="mono">p99=0.153814s</p>
+          <p class="mono">p50=0.117552s</p>
+          <p class="mono">p95=0.175712s</p>
+          <p class="mono">p99=0.175712s</p>
         </div>
         <div class="metric">
           <p class="font-bold">HTTP/1.1 reachability</p>
           <p class="mono mt-4">samples=5</p>
           <p class="mono">status=401</p>
-          <p class="mono">p50=0.099588s</p>
-          <p class="mono">p95=0.166897s</p>
-          <p class="mono">p99=0.166897s</p>
+          <p class="mono">p50=0.098402s</p>
+          <p class="mono">p95=0.184934s</p>
+          <p class="mono">p99=0.184934s</p>
         </div>
         <div class="metric">
           <p class="font-bold">HTTP/3 reachability</p>
           <p class="mono mt-4">samples=5</p>
           <p class="mono">status=401</p>
-          <p class="mono">p50=0.089513s</p>
-          <p class="mono">p95=0.118058s</p>
-          <p class="mono">p99=0.118058s</p>
+          <p class="mono">p50=0.099130s</p>
+          <p class="mono">p95=0.124275s</p>
+          <p class="mono">p99=0.124275s</p>
         </div>
       </div>
       <svg class="mt-4 border border-black" viewBox="0 0 760 180" role="img" aria-label="Request timeline">
@@ -2105,12 +2242,12 @@ warn!("websocket control queue full while replying to ping; closing connection")
         <text x="10" y="44" font-size="12" font-family="monospace">h2</text>
         <text x="10" y="94" font-size="12" font-family="monospace">h1</text>
         <text x="10" y="144" font-size="12" font-family="monospace">h3</text>
-        <rect x="40" y="28" width="335" height="24" fill="none" stroke="#111"/>
-        <rect x="40" y="78" width="337" height="24" fill="none" stroke="#111"/>
-        <rect x="40" y="128" width="303" height="24" fill="none" stroke="#111"/>
-        <text x="385" y="44" font-size="12" font-family="monospace">p50 total 0.098917s</text>
-        <text x="387" y="94" font-size="12" font-family="monospace">p50 total 0.099588s</text>
-        <text x="353" y="144" font-size="12" font-family="monospace">p50 total 0.089513s</text>
+        <rect x="40" y="28" width="400" height="24" fill="none" stroke="#111"/>
+        <rect x="40" y="78" width="335" height="24" fill="none" stroke="#111"/>
+        <rect x="40" y="128" width="337" height="24" fill="none" stroke="#111"/>
+        <text x="450" y="44" font-size="12" font-family="monospace">p50 total 0.117552s</text>
+        <text x="385" y="94" font-size="12" font-family="monospace">p50 total 0.098402s</text>
+        <text x="387" y="144" font-size="12" font-family="monospace">p50 total 0.099130s</text>
         <text x="40" y="172" font-size="12" font-family="monospace">Scale is comparative only; bars use p50 total from unauthenticated 401 probes.</text>
       </svg>
       <table class="mt-4 text-sm">
@@ -2148,7 +2285,8 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Caption: the summary cards and timeline use only completed local 401 probes.
         The other reliability visuals intentionally omit measured values where no
         tokenproxy implementation or authenticated upstream probe exists. Source:
-        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/curl_timings.csv</code>
+        <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/curl_timings.csv</code>
+        and <code>curl_stats.txt</code>,
         and <a href="#benchmark-method">Benchmark Methodology</a>.
       </p>
 
@@ -2158,7 +2296,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
           <p class="font-bold">DNS and TLS</p>
           <div class="flow mt-4">
             <span>api.openai.com</span><span class="arrow">-&gt;</span>
-            <span>162.159.140.245</span><span>172.66.0.243</span>
+            <span>172.66.0.243</span><span>162.159.140.245</span>
           </div>
           <div class="flow mt-4">
             <span>TLS 1.3</span><span>TLS_AES_256_GCM_SHA384</span><span>X25519MLKEM768</span><span>CN api.openai.com</span>
@@ -2179,7 +2317,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
       <p class="caption">
         Caption: endpoint visuals show run-specific DNS, TLS, HTTP protocol, SSE
         commitment, and WebSocket-upgrade facts. Source:
-        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/dns.txt</code>,
+        <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/dns.txt</code>,
         <code>tls.txt</code>, <code>curl_timings.csv</code>,
         <code>websocket_unauthenticated.txt</code>, and
         <a href="#data-paths">Data Paths</a>.
@@ -2257,7 +2395,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
           </tr>
         </thead>
         <tbody>
-          <tr><td>Routes Chat, Responses, and Responses WebSocket traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
+          <tr><td>Routes Chat, Responses, Responses WebSocket, and local model-catalog traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
           <tr><td>Preserves continuation quality.</td><td><code>responses_state</code></td><td>ordered output-item log, <code>previous_response_id</code>, assistant <code>phase</code></td><td>replay and compaction tests</td><td>OpenAI and CLIProxyAPI rows</td></tr>
           <tr><td>Keeps streams correct under failure.</td><td><code>stream_relay</code></td><td>commit-state enum and SSE repair buffer</td><td>partial-frame and post-commit failure tests</td><td>CLIProxyAPI stream tests</td></tr>
           <tr><td>Limits local overload.</td><td><code>backpressure</code></td><td>bounded per-account and per-session queues</td><td>overflow and head-of-line tests</td><td>Codex and Iggy rows</td></tr>
@@ -2381,6 +2519,16 @@ warn!("websocket control queue full while replying to ping; closing connection")
         <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
       </p>
       <p class="mt-3">
+        Codex. (2026g). <em>codex-rs/codex-api endpoint sources for models, responses,
+        compact, Responses WebSocket, and Realtime</em>. Local submodule
+        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026h). <em>ChatGPT backend, cloud-task, Apps MCP, login, and
+        agent-identity endpoint sources</em>. Local submodule <code>codex</code>,
+        commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
         LiveKit. (2026a). <em>livekit/src/rtc_engine/rtc_session.rs</em>. Local submodule
         <code>rust-sdks</code>, commit <code>1848e77a32ca2f302a58323a7a21858165d81aad</code>.
       </p>
@@ -2389,10 +2537,16 @@ warn!("websocket control queue full while replying to ping; closing connection")
         <code>rust-sdks</code>, commit <code>1848e77a32ca2f302a58323a7a21858165d81aad</code>.
       </p>
       <p class="mt-3">
-        OpenAI. (2026a). <em>OpenAI API endpoint list and Responses/Chat Completions references</em>.
+        OpenAI. (2026a). <em>OpenAI API endpoint list and OpenAPI references for
+        Models, Chat Completions, Responses, Responses compaction, token counting, and Realtime</em>.
         Retrieved through the official OpenAI developer documentation MCP from
-        <a href="https://api.openai.com/v1/responses">https://api.openai.com/v1/responses</a>
-        and <a href="https://api.openai.com/v1/chat/completions">https://api.openai.com/v1/chat/completions</a>.
+        <a href="https://api.openai.com/v1/responses">https://api.openai.com/v1/responses</a>,
+        <a href="https://api.openai.com/v1/responses/compact">https://api.openai.com/v1/responses/compact</a>,
+        <a href="https://api.openai.com/v1/responses/input_tokens">https://api.openai.com/v1/responses/input_tokens</a>,
+        <a href="https://api.openai.com/v1/chat/completions">https://api.openai.com/v1/chat/completions</a>,
+        <a href="https://api.openai.com/v1/models">https://api.openai.com/v1/models</a>, and
+        <a href="https://api.openai.com/v1/realtime/calls">https://api.openai.com/v1/realtime/calls</a>;
+        endpoint set captured with <code>list_api_endpoints</code>.
       </p>
       <p class="mt-3">
         OpenAI. (2026b). <em>Responses API WebSocket mode</em>.
@@ -2438,8 +2592,13 @@ warn!("websocket control queue full while replying to ping; closing connection")
       <p class="mt-3">
         Tokenproxy Stage One. (2026). <em>Local passive network and status probe artifacts</em>.
         Latest complete capture:
-        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>.
-        Intermediate complete capture:
+        <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/</code>.
+        Endpoint inventory capture:
+        <code>stage_one_evidence/2026-05-27T032719-0700-endpoint-inventory/</code>.
+        Prior complete captures:
+        <code>stage_one_evidence/2026-05-27T032310-0700-network-probes/</code>,
+        <code>stage_one_evidence/2026-05-27T032111-0700-network-probes/</code>,
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>, and
         <code>stage_one_evidence/2026-05-27T025959-0700-network-probes/</code>.
         Adjacent blocked capture:
         <code>stage_one_evidence/2026-05-27T030504-0700-network-probes/</code>.
@@ -2452,37 +2611,55 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Before editing this attestation, I re-read this report and ran
         <code>git submodule status --recursive</code> in the current checkout. The raw
         submodule-status capture is
-        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/submodule_status.txt</code>.
+        <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/submodule_status.txt</code>.
         I also reviewed the latest passive network, TLS, unauthenticated WebSocket,
         and status probes; their raw artifacts are in
-        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>.
+        <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/</code>.
+        The unauthenticated endpoint inventory artifact is
+        <code>stage_one_evidence/2026-05-27T032719-0700-endpoint-inventory/</code>.
+        Official OpenAI endpoint and WebSocket documents were rechecked through
+        the OpenAI developer documentation MCP at 2026-05-27 03:32 PDT /
+        2026-05-27 10:32 UTC.
       </p>
       <p class="mt-4">
         No stage-two product code exists in this checkout, so no integration test
         against tokenproxy was run. No Rust performance experiment was run in this
         update. The only current local measurements are passive endpoint probes:
         five unauthenticated 401 curl samples per HTTP protocol, one TLS inspection,
-        one unauthenticated WebSocket upgrade attempt, and OpenAI status API captures.
-        These probes support reachability and operational-context decisions only; they
-        do not prove proxy overhead, model latency, authenticated stream stability, or
-        account-routing performance.
+        one unauthenticated WebSocket upgrade attempt, one unauthenticated endpoint
+        inventory probe per listed OpenAI/ChatGPT path, and OpenAI status API captures.
+        These probes support reachability, endpoint scoping, and operational-context
+        decisions only; they do not prove proxy overhead, model latency, authenticated
+        stream stability, or account-routing performance.
+      </p>
+      <p class="mt-4">
+        The endpoint inventory pass did not use a credential. No supplied API key was
+        placed in a command, environment capture, artifact, or repository file.
+        Authenticated availability, model entitlements, and account-specific ChatGPT
+        backend behavior remain outside the measured-results claims in this report.
       </p>
       <p class="mt-4">
         The repeated probes narrowed the network-path claim. Across captured artifacts,
-        the <code>api.openai.com</code> A-record set repeated; the 2026-05-27T005200
-        curl artifact selected <code>162.159.140.245</code>, while the later complete
-        2026-05-27T025959 and 2026-05-27T030553 curl artifacts selected
-        <code>172.66.0.243</code>; and
-        <code>status.openai.com</code> returned different Vercel A records. Therefore
-        this report treats IPs and endpoint timing distributions as run-specific
-        observations only.
+        the <code>api.openai.com</code> A-record set repeated; the 2026-05-27T005200,
+        2026-05-27T032111, 2026-05-27T032310, and 2026-05-27T032313 curl artifacts
+        selected <code>162.159.140.245</code>,
+        while the 2026-05-27T025959 and 2026-05-27T030553 curl artifacts selected
+        <code>172.66.0.243</code>; the 2026-05-27T032313 TLS and WebSocket probes
+        selected <code>172.66.0.243</code> while curl selected <code>162.159.140.245</code>;
+        <code>status.openai.com</code> returned different Vercel A records; the
+        2026-05-27T032111 HTTP/2 sample included one 10.465344 second total-time
+        outlier after the previous complete run's HTTP/2 maximum was 0.153814 seconds
+        and before adjacent captures returned to <code>0.175712</code> or lower; and
+        the 2026-05-27T032310 HTTP/1.1 sample had a 0.422891 second maximum that did
+        not repeat at 2026-05-27T032313. Therefore this report treats IPs and endpoint
+        timing distributions as run-specific observations only.
       </p>
       <p class="mt-4">
         The 2026-05-27T030504 probe directory is recorded as a blocked probe, not a
         latency sample: <code>dig</code> failed with <code>isc_socket_bind: unexpected error</code>,
         curl returned exit code 6 for every endpoint sample, TLS lookup failed, and the
-        status API could not resolve <code>status.openai.com</code>. The next complete
-        capture at 2026-05-27T030553 is the latest accepted reachability sample.
+        status API could not resolve <code>status.openai.com</code>. The complete
+        capture at 2026-05-27T032313 is the latest accepted reachability sample.
       </p>
       <table class="mt-4 text-sm">
         <thead>
@@ -2498,30 +2675,40 @@ warn!("websocket control queue full while replying to ping; closing connection")
           <tr>
             <td><code>CLIProxyAPI</code><br><code>4b681031bff2acd922c51c34786f20b505b62fd4</code></td>
             <td>
-              <code>internal/api/server.go</code> lines 397-408;
-              <code>sdk/api/handlers/openai/openai_handlers.go</code> lines 458-524;
+              <code>internal/api/server.go</code> lines 385-408;
+              <code>sdk/api/handlers/openai/openai_handlers.go</code> lines 58-124;
+              <code>sdk/api/handlers/openai/openai_responses_handlers.go</code> lines 356-427;
               <code>sdk/api/handlers/openai/openai_responses_handlers_stream_test.go</code>
               lines 35-234;
               <code>sdk/api/handlers/openai/openai_responses_websocket_test.go</code>
               lines 342-494 and 625-909;
               <code>internal/runtime/executor/codex_websockets_executor.go</code>
               lines 678-687 and 1589-1645;
+              <code>internal/runtime/executor/codex_executor.go</code>
+              lines 252-255 and 412-445;
               <code>internal/runtime/executor/codex_executor_cache_test.go</code>
               lines 40-64.
             </td>
             <td>
-              The Go proxy exposes <code>/v1/responses</code>, <code>/v1/responses/compact</code>,
-              and Codex direct aliases; delays SSE header commit until first data or
-              immediate error; repairs missing completed output from output-item events;
-              normalizes Responses WebSocket requests; preserves incremental
+              The Go proxy exposes <code>/v1/models</code>, <code>/v1/chat/completions</code>,
+              <code>/v1/responses</code>, <code>/v1/responses/compact</code>, a
+              Responses WebSocket upgrade, and Codex direct aliases; delays SSE header
+              commit until first data or immediate error; repairs missing completed
+              output from output-item events; normalizes Responses WebSocket requests; preserves incremental
               <code>previous_response_id</code>; repairs tool-call transcript pairs; gates
-              WebSocket execution by downstream transport and auth capability; and
+              WebSocket execution by downstream transport and auth capability; defaults
+              Codex executor traffic to <code>https://chatgpt.com/backend-api/codex</code>
+              when no base URL is supplied and sends compact requests to
+              <code>{base_url}/responses/compact</code>; and
               derives stable <code>prompt_cache_key</code> values from API-key identity.
             </td>
             <td>
-              Implement the same route surface, delayed SSE commit, output-item replay
-              repair, per-session WebSocket transcript/tool cache, capability routing,
-              and stable prompt-cache-key derivation.
+              Implement the same narrow generation/WebSocket surface, add a local
+              <code>/v1/models</code> compatibility response, preserve delayed SSE commit,
+              repair output-item replay, maintain per-session WebSocket transcript/tool
+              cache, keep capability routing, treat ChatGPT Codex aliases as
+              account-selected upstream paths instead of broad public downstream routes,
+              and derive stable prompt-cache-key values.
             </td>
             <td>
               Source and test review only. No CLIProxyAPI benchmark or test command was
@@ -2533,6 +2720,17 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <td>
               <code>codex-rs/responses-api-proxy/src/lib.rs</code> lines 102-107,
               170-178, and 196-228;
+              <code>codex-rs/codex-api/src/provider.rs</code> lines 52-103;
+              <code>codex-rs/codex-api/src/endpoint/models.rs</code> lines 31-44;
+              <code>codex-rs/codex-api/src/endpoint/responses.rs</code> lines 102-104;
+              <code>codex-rs/codex-api/src/endpoint/compact.rs</code> lines 33-54;
+              <code>codex-rs/codex-api/src/endpoint/responses_websocket.rs</code>
+              lines 376-386;
+              <code>codex-rs/model-provider-info/src/lib.rs</code> lines 35-37;
+              <code>codex-rs/login/src/auth/manager.rs</code> lines 94-98;
+              <code>codex-rs/cloud-tasks/src/env_detect.rs</code> lines 35-75;
+              <code>codex-rs/codex-mcp/src/mcp/mod.rs</code> lines 425-448;
+              <code>codex-rs/agent-identity/src/lib.rs</code> lines 299-320;
               <code>codex-rs/app-server-transport/src/transport/websocket.rs</code>
               lines 46-49 and 362-369;
               <code>codex-rs/otel/src/events/session_telemetry.rs</code>
@@ -2543,19 +2741,24 @@ warn!("websocket control queue full while replying to ping; closing connection")
               The local Codex proxy disables reqwest's default timeout for long streams,
               accepts only <code>POST /v1/responses</code>, strips inbound auth and host
               headers before inserting sensitive upstream auth, uses Tokio/Axum/Reqwest
-              and Tokio Tungstenite dependencies, gives outbound WebSocket traffic a
-              bounded channel, closes on control-queue overflow, and records WebSocket
-              connect/request/event metrics with status, duration, error, endpoint,
-              request-id, and Cloudflare Ray labels.
+              and Tokio Tungstenite dependencies, constructs <code>models</code>,
+              <code>responses</code>, <code>responses/compact</code>, and Responses WebSocket
+              paths from the configured provider base URL, records ChatGPT auth/refresh
+              endpoints, separates WHAM environment, Apps MCP, and agent-identity
+              control-plane paths from generation endpoints, gives outbound WebSocket
+              traffic a bounded channel, closes on control-queue overflow, and records WebSocket connect/request/event metrics
+              with status, duration, error, endpoint, request-id, and Cloudflare Ray labels.
             </td>
             <td>
               Keep tokenproxy narrow, avoid global stream read timeouts, isolate upstream
-              auth, use the Tokio ecosystem first, bound WebSocket queues, close on
+              auth, use explicit provider-base path joining for API and ChatGPT Codex
+              accounts, exclude ChatGPT WHAM/Apps/agent-identity paths from downstream
+              proxying, use the Tokio ecosystem first, bound WebSocket queues, close on
               control-plane overload, and emit tagged WebSocket timing metrics.
             </td>
             <td>
               Passive endpoint probes in
-              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>
+              <code>stage_one_evidence/2026-05-27T032313-0700-network-probes/</code>
               support route and protocol reachability only. They do not benchmark Codex
               or tokenproxy overhead.
             </td>
@@ -2800,6 +3003,26 @@ warn!("websocket control queue full while replying to ping; closing connection")
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-27 3:40 AM PDT</td>
+            <td>Re-reviewed documented OpenAI endpoints and source-observed ChatGPT/Codex backend paths; added local /v1/models compatibility to the stage-two route contract and implementation plan.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:32 AM PDT</td>
+            <td>Re-reviewed cached-token field handling and benchmark schema; required logging both Responses and Chat Completions usage shapes.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:30 AM PDT</td>
+            <td>Added endpoint-inventory evidence for public OpenAI paths and source-observed ChatGPT Codex/WHAM paths without widening the stage-two route set.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:26 AM PDT</td>
+            <td>Selected the 2026-05-27T032313 complete probe as latest evidence and kept the 03:21 HTTP/2 outlier only as variance context.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:22 AM PDT</td>
+            <td>Re-ran passive probes and OpenAI docs checks; updated evidence paths and narrowed latency language for the HTTP/2 10.465344 second outlier.</td>
+          </tr>
           <tr>
             <td>2026-05-27 3:10 AM PDT</td>
             <td>Fetched current OpenAI docs for WebSocket mode, GPT-5.5 Responses state handling, prompt caching, and Responses overview; no material mismatch found.</td>

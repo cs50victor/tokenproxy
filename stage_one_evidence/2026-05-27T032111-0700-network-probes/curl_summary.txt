@@ -1,0 +1,3 @@
+http2 samples=5 status=401 errors=0 remote_ip=162.159.140.245 p50=0.103713 p95=10.465344 p99=10.465344 max=10.465344 outlier=run3_total_10.465344
+http1.1 samples=5 status=401 errors=0 remote_ip=162.159.140.245 p50=0.093520 p95=0.156325 p99=0.156325 max=0.156325
+http3 samples=5 status=401 errors=0 remote_ip=162.159.140.245 p50=0.126901 p95=0.167827 p99=0.167827 max=0.167827
