@@ -27,7 +27,15 @@ Stage one is writing the technical report and system design spec for tokenproxy.
 
 Treat `very_detailed_tokenproxy_spec.html` as the project's single self-contained implementation authority. Any engineer should be able to read that file and implement tokenproxy from start to finish. Do not leave unresolved assumptions, "likely" statements, TODO-style placeholders, open questions, or design claims that depend on unstated context. When evidence is missing, run source review, passive network probes, small Rust experiments, or workflow measurements to close the knowledge gap before writing the claim. If a gap cannot be closed because credentials, network policy, missing tooling, platform limits, or absent product code block the work, remove the affected design claim or narrow it to what the evidence supports. Do not leave unanswered questions in the HTML report.
 
-Write the report like a technical research paper. Define the method, cite every external claim inline, and include an APA-style References section after the graphical user-experience section. Place the performance-review attestation after References as the final substantive section. That attestation is an evidence audit, not a narrative summary.
+On every new initial read of `very_detailed_tokenproxy_spec.html`, review it as a research-paper critic. Do not trust a statement because it already appears in the file. Check citations against the cited source, check experiments against their commands and artifacts, and rerun reproducible experiments when the claim depends on current behavior. Under the same documented conditions, repeated runs must produce the same or very similar outputs with a very low error margin. If they do not, narrow or remove the claim and record the mismatch in the performance-review attestation.
+
+Make simplicity a primary design claim. The point of repeated experiments is to discard unneeded complexity. Every new abstraction, primitive, dependency, state machine, queue, cache, retry rule, or background task in the `.html` file must earn its place with strong cited evidence, a completed experiment, a source-backed failure analysis, or a measured downstream effect. Complexity is accepted only when the report proves the simpler design fails, loses reliability, or costs measurable latency under the same conditions. The target is an extremely simple system without avoidable performance tradeoffs.
+
+Treat every line of future tokenproxy code as a maintenance and reliability liability. When comparing multiple solutions, show all experiments run, the exact conditions, and the result distribution, then prefer the simpler solution or abstraction when performance and reliability are equal or nearly equal. Do not add layers because they feel conventional. Most accidental complexity comes from not reading and understanding the APIs, protocols, and components already in the system; the `.html` file must explain the relevant APIs deeply enough that the simpler design is justified.
+
+Research high-performance computing fundamentals before deciding core primitives. For data structures, algorithms, memory layout, queueing, scheduling, I/O, TCP, TLS, HTTP, WebSocket, filesystem, kernel, and runtime choices, inspect mature implementations and papers where relevant, then connect that research to local experiments. Review choices for global optimality across the whole system: total code size, latency distribution, failure behavior, operational load, and downstream effects. Put pressure on every hot code path so one simplification or optimization can improve later paths instead of moving cost elsewhere.
+
+Write the report like a technical research paper. Define the method, cite every external claim inline, and include an APA-style References section after the graphical user-experience section. Place the performance-review attestation after References as the final substantive section. That attestation is an evidence audit, not a narrative summary. Then add a bottom-most Review Log section after the attestation. The Review Log is audit metadata, not substantive design evidence.
 
 Graphical user-experience section requirements:
 
@@ -44,7 +52,7 @@ Graphical user-experience section requirements:
 - Include failure-mode visuals for upstream outage, account throttling, WebSocket drop, partial SSE frame, malformed upstream response, local overload, credential expiration, and status-page incident detection. Each visual must identify the user-visible response and the internal recovery action.
 - Include a compact "correct system at a glance" board that a stage-two engineer can use as a build checklist. It must map UI-visible behavior to concrete implementation modules, data structures, metrics, tests, and evidence artifacts.
 - Source every visual. For each visual that shows performance, correctness, endpoint behavior, or upstream behavior, cite the supporting report section, source line range, benchmark artifact, or network probe artifact.
-- Preserve this final ordering: graphical user-experience section, References, performance-review attestation.
+- Preserve this final ordering: graphical user-experience section, References, performance-review attestation, Review Log.
 
 Performance-review attestation requirements:
 
@@ -56,7 +64,16 @@ Performance-review attestation requirements:
 - Do not replace benchmarks with instructions for how to run benchmarks. A section may describe reproducibility, but every accepted performance decision must also point to a completed local run or a captured upstream artifact that was reviewed.
 - If credentials, network policy, missing tooling, platform limits, or absent product code prevent a benchmark, state that exact blocker and include the failed or skipped command in the attestation. Remove or narrow the related performance claim. Do not convert blocked measurements into design facts or leave them as open questions.
 - Do not write phrases such as "benchmark-backed", "measured", "validated", "reviewed", or "performance-proven" unless the report includes the source line references and benchmark/probe artifacts that justify the word.
-- The attestation must be the final substantive section of the HTML file and must map measured results back to concrete stage-two implementation decisions. If no actual performance experiments were run, the attestation must say so plainly and must not endorse latency-sensitive choices beyond source-backed correctness or complexity observations.
+- The attestation must be the final substantive section of the HTML file and must map measured results back to concrete stage-two implementation decisions. If no actual performance experiments were run, the attestation must say so plainly and must not endorse latency-sensitive choices beyond source-backed correctness or complexity observations. A bottom-most Review Log section must follow the attestation and must contain review metadata only.
+
+Review Log requirements:
+
+- `very_detailed_tokenproxy_spec.html` must end with a Review Log section after the performance-review attestation.
+- The Review Log must use a simple HTML `<table>` with one row per review entry.
+- Each review row must use plain cells for date and one-line summary. Add more columns only when they reduce ambiguity.
+- Every new review pass must add one entry dated `YYYY-MM-DD` with a one-line review summary.
+- Each entry must name what was reviewed and the main result, such as citation drift found, experiment reproduced, claim narrowed, or no material mismatch found.
+- Do not use the Review Log as evidence for a design claim. Cite the source, command, artifact, or attestation row that proves the claim.
 
 Integration-test evidence requirements:
 
