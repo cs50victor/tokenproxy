@@ -1,0 +1,2194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tokenproxy Stage One System Design Spec</title>
+  <style>
+    /* Self-contained Tailwind-style utility subset used by this report. */
+    html { color: #111; background: #fff; }
+    body { margin: 0; font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif; }
+    code, pre, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    a { color: #111; text-decoration: underline; text-underline-offset: 2px; }
+    h1, h2, h3 { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    p { margin: 0; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #111; padding: 0.45rem 0.55rem; vertical-align: top; }
+    th { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 700; text-align: left; }
+    .claim { border-left: 4px solid #111; padding-left: 1rem; }
+    .smallcaps { font-variant: small-caps; letter-spacing: 0.03em; }
+    .mx-auto { margin-left: auto; margin-right: auto; }
+    .mt-3 { margin-top: 0.75rem; }
+    .mt-4 { margin-top: 1rem; }
+    .mt-5 { margin-top: 1.25rem; }
+    .mt-8 { margin-top: 2rem; }
+    .mb-3 { margin-bottom: 0.75rem; }
+    .mb-4 { margin-bottom: 1rem; }
+    .mb-12 { margin-bottom: 3rem; }
+    .max-w-4xl { max-width: 56rem; }
+    .border { border: 1px solid #111; }
+    .border-b { border-bottom: 1px solid #111; }
+    .border-t { border-top: 1px solid #111; }
+    .border-black { border-color: #111; }
+    .px-6 { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .py-10 { padding-top: 2.5rem; padding-bottom: 2.5rem; }
+    .pt-8 { padding-top: 2rem; }
+    .pb-8 { padding-bottom: 2rem; }
+    .p-4 { padding: 1rem; }
+    .pl-6 { padding-left: 1.5rem; }
+    .text-sm { font-size: 0.875rem; }
+    .text-lg { font-size: 1.125rem; }
+    .text-xl { font-size: 1.25rem; }
+    .text-2xl { font-size: 1.5rem; }
+    .text-4xl { font-size: 2.25rem; }
+    .font-bold { font-weight: 700; }
+    .leading-7 { line-height: 1.75rem; }
+    .leading-tight { line-height: 1.25; }
+    .list-disc { list-style-type: disc; }
+    .list-decimal { list-style-type: decimal; }
+    .overflow-x-auto { overflow-x: auto; }
+    @media (max-width: 640px) {
+      .px-6 { padding-left: 1rem; padding-right: 1rem; }
+      .text-4xl { font-size: 2rem; }
+      table { font-size: 0.82rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="mx-auto max-w-4xl px-6 py-10 leading-7">
+    <header class="mb-12 border-b border-black pb-8">
+      <p class="smallcaps text-sm">Tokenproxy Stage One</p>
+      <h1 class="mt-3 text-4xl font-bold leading-tight">A small Rust proxy for OpenAI-compatible agent traffic</h1>
+      <p class="mt-5 text-lg">
+        This file is the implementation authority for stage two. It defines the behavior,
+        architecture, crate choices, failure rules, data paths, and benchmark plan for
+        coding tokenproxy.
+      </p>
+      <p class="mt-4 text-sm">
+        Evidence snapshot: local checkout at <code>/Users/vic8or/dev/tokenproxy</code>,
+        observed through 2026-05-27 00:14:12 PDT and 2026-05-27 07:14:12 UTC.
+      </p>
+    </header>
+
+    <section id="abstract" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Abstract</h2>
+      <p>
+        Tokenproxy should be a deliberately small Rust proxy for OpenAI Chat Completions,
+        OpenAI Responses, and Responses WebSocket traffic. Its job is to accept
+        OpenAI-compatible agent requests, choose a usable upstream account, preserve
+        streaming semantics, and keep the continuation path fast. It is not a gateway
+        platform, an API translator for every provider, or a general QUIC experiment.
+      </p>
+      <p class="mt-4">
+        The central design claim is that the largest latency wins for Codex-like workflows
+        come from keeping the model continuation path short: persistent Responses
+        WebSocket connections, correct <code>previous_response_id</code> usage, prompt-cache-aware
+        request construction, and compact state replay. Rust matters because the proxy
+        should add negligible local overhead and predictable tail latency. Rust alone
+        does not remove upstream model latency, DNS variance, cache misses, account
+        throttling, or OpenAI incidents.
+      </p>
+    </section>
+
+    <section id="claims" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Claims Defended</h2>
+      <div class="claim">
+        <p>
+          <strong>Claim 1.</strong> The first production implementation should use Tokio
+          plus Hyper/Axum-style HTTP primitives, a pooled Reqwest upstream HTTP client,
+          and Tokio Tungstenite for WebSocket legs. It should not start with Pingora,
+          io_uring, or first-party QUIC/H3 code.
+        </p>
+      </div>
+      <div class="claim mt-5">
+        <p>
+          <strong>Claim 2.</strong> The proxy should route by account health, model support,
+          endpoint, and continuation state. It must not retry committed streaming output
+          invisibly. This follows the proxy failure boundary described in Pingora:
+          before downstream response headers, retry or fail over; after headers, log and
+          stop because the client has already seen a response boundary.
+        </p>
+      </div>
+      <div class="claim mt-5">
+        <p>
+          <strong>Claim 3.</strong> Responses WebSocket support is not optional for agentic
+          traffic. OpenAI documents WebSocket mode as a persistent <code>/v1/responses</code>
+          connection that sends repeated <code>response.create</code> events with only new input
+          plus <code>previous_response_id</code>. OpenAI also documents a single in-flight response
+          per socket, no multiplexing, a 60-minute connection limit, and recovery rules
+          for <code>previous_response_not_found</code> (OpenAI, 2026b).
+        </p>
+      </div>
+      <div class="claim mt-5">
+        <p>
+          <strong>Claim 4.</strong> Tokenproxy should preserve Responses output items exactly
+          enough for stateless replay, including assistant <code>phase</code> when present, and
+          should prefer <code>previous_response_id</code> when the upstream supports it. OpenAI's
+          GPT-5.5 guidance requires preserving returned output items for stateless/ZDR
+          flows and preserving <code>phase</code> on assistant output items when manually replaying
+          state (OpenAI, 2026c).
+        </p>
+      </div>
+      <div class="claim mt-5">
+        <p>
+          <strong>Claim 5.</strong> Network path facts are observations, not constants. In this
+          checkout, DNS resolved <code>api.openai.com</code> to <code>172.66.0.243</code> and
+          <code>162.159.140.245</code>. It resolved <code>status.openai.com</code> through
+          <code>cname.vercel-dns.com</code> to <code>76.76.21.241</code> and <code>66.33.60.193</code>.
+          These values are inputs to the measurement log, not implementation constants.
+        </p>
+      </div>
+    </section>
+
+    <section id="scope" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Scope</h2>
+      <p>
+        Stage two should implement one binary named <code>tokenproxy</code>. The public API surface
+        is:
+      </p>
+      <ul class="mt-4 list-disc pl-6">
+        <li><code>POST /v1/chat/completions</code> with JSON and SSE streaming support.</li>
+        <li><code>POST /v1/responses</code> with JSON and SSE streaming support.</li>
+        <li><code>POST /v1/responses/compact</code> as a thin pass-through for compacting Responses input windows.</li>
+        <li><code>GET /v1/responses</code> WebSocket upgrade for Responses WebSocket mode.</li>
+        <li><code>GET /healthz</code> for local process health.</li>
+        <li><code>GET /metrics</code> for Prometheus-format counters and histograms.</li>
+      </ul>
+      <p class="mt-4">
+        The implementation must not expose general proxying. Requests outside the supported
+        route set return <code>403</code> or <code>404</code> with a small JSON error. This mirrors the
+        strictness in Codex's local Responses proxy, which accepts exactly
+        <code>POST /v1/responses</code>, overrides upstream auth and Host, and rejects other
+        requests (Codex, 2026a, lines 31-64; Codex, 2026b, lines 170-178).
+      </p>
+      <p class="mt-4">
+        Tokenproxy is allowed to run benchmark probes and diagnostic commands. It is not
+        allowed to implement unrelated provider APIs, a dashboard, a plugin framework, or
+        a storage engine beyond the account and health state required by routing.
+      </p>
+    </section>
+
+    <section id="external-api" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">OpenAI API Surface</h2>
+      <p>
+        The official endpoint list advertises <code>https://api.openai.com/v1</code> as the base
+        URL and includes <code>/chat/completions</code>, <code>/responses</code>,
+        <code>/responses/compact</code>, <code>/responses/input_tokens</code>,
+        <code>/responses/{response_id}</code>, <code>/responses/{response_id}/cancel</code>, and
+        <code>/responses/{response_id}/input_items</code> among many other paths (OpenAI,
+        2026a). Tokenproxy stage two implements the two generation endpoints,
+        <code>/responses/compact</code>, and the WebSocket transport path. It does not
+        implement Conversations, Threads, Assistants, Batches, Realtime, Files, or Images.
+      </p>
+      <p class="mt-4">
+        <code>POST /v1/responses</code> returns either a JSON <code>Response</code> or a
+        <code>text/event-stream</code> sequence of typed <code>ResponseStreamEvent</code> events. The
+        response object includes continuation and orchestration fields that tokenproxy
+        must preserve or surface: <code>previous_response_id</code>, <code>reasoning</code>,
+        <code>store</code>, <code>text</code>, <code>tool_choice</code>, <code>tools</code>,
+        <code>truncation</code>, <code>usage.input_tokens_details.cached_tokens</code>, and
+        <code>usage.output_tokens_details.reasoning_tokens</code> (OpenAI, 2026a).
+      </p>
+      <p class="mt-4">
+        <code>POST /v1/chat/completions</code> remains supported because clients still use it.
+        The OpenAPI summary recommends Responses for new projects and states that Chat
+        Completions can return either a JSON chat completion object or streamed chat
+        completion chunks (OpenAI, 2026a). Tokenproxy should pass Chat Completions
+        requests through instead of converting them unless a benchmarked client workflow
+        requires conversion.
+      </p>
+    </section>
+
+    <section id="normative-contract" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Normative Stage-two Contract</h2>
+      <p>
+        This section is the implementation contract. Stage two is complete only when
+        these behaviors are implemented and tested. The words <code>must</code>,
+        <code>must not</code>, and <code>should</code> are normative.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Process contract</h3>
+      <ul class="list-disc pl-6">
+        <li>The binary name must be <code>tokenproxy</code>.</li>
+        <li>The default bind address must be <code>127.0.0.1:8787</code>.</li>
+        <li>Binding to a non-loopback address must require <code>server.allow_non_loopback = true</code>.</li>
+        <li>Startup must fail before listening when the config file is invalid, no account is enabled, or an enabled account references a missing token environment variable.</li>
+        <li>Startup must not make credentialed OpenAI requests unless the operator explicitly runs a probe command.</li>
+        <li>Shutdown must stop accepting new sockets, let active HTTP/SSE/WebSocket sessions drain for <code>shutdown_grace_ms</code>, then close remaining sessions with metrics.</li>
+        <li>All timestamps in logs and benchmark artifacts must include timezone offset and UTC.</li>
+      </ul>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Route contract</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Route</th>
+            <th>Accepted request</th>
+            <th>Proxy behavior</th>
+            <th>Unsupported behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>POST /v1/chat/completions</code></td>
+            <td>JSON body. <code>stream</code> may be true or false.</td>
+            <td>Forward opaque JSON. Classify model and stream flag. Do not convert to Responses.</td>
+            <td>Wrong method returns <code>404</code>. Non-JSON body returns <code>400</code>.</td>
+          </tr>
+          <tr>
+            <td><code>POST /v1/responses</code></td>
+            <td>JSON body. <code>stream</code> may be true or false.</td>
+            <td>Forward opaque JSON. Parse routing fields. Capture output items from JSON and SSE when available.</td>
+            <td>Wrong method returns <code>404</code>. Non-JSON body returns <code>400</code>.</td>
+          </tr>
+          <tr>
+            <td><code>POST /v1/responses/compact</code></td>
+            <td>JSON body.</td>
+            <td>Forward as an HTTP-only Responses route. Treat output as opaque compacted state.</td>
+            <td>WebSocket attempts return <code>426</code> or a WebSocket close before upstream dial.</td>
+          </tr>
+          <tr>
+            <td><code>GET /v1/responses</code></td>
+            <td>HTTP Upgrade to WebSocket.</td>
+            <td>Accept JSON text frames for Responses WebSocket mode. Open one upstream socket per downstream session.</td>
+            <td>Non-upgrade GET returns <code>426</code>. Binary frames close with WebSocket code <code>1003</code>.</td>
+          </tr>
+          <tr>
+            <td><code>GET /healthz</code></td>
+            <td>No body.</td>
+            <td>Return process liveness, version, and enabled account count. Do not expose secrets.</td>
+            <td>Non-GET returns <code>405</code>.</td>
+          </tr>
+          <tr>
+            <td><code>GET /metrics</code></td>
+            <td>No body.</td>
+            <td>Return Prometheus text exposition.</td>
+            <td>Non-GET returns <code>405</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Header and body rules</h3>
+      <ul class="list-disc pl-6">
+        <li>Strip incoming <code>Authorization</code> and <code>Host</code>; insert selected account auth and upstream host per request.</li>
+        <li>Strip hop-by-hop headers: <code>Connection</code>, <code>Keep-Alive</code>, <code>Proxy-Authenticate</code>, <code>Proxy-Authorization</code>, <code>TE</code>, <code>Trailer</code>, <code>Transfer-Encoding</code>, and <code>Upgrade</code>.</li>
+        <li>Preserve upstream correlation and rate headers when valid HTTP header values: <code>openai-request-id</code>, <code>x-request-id</code>, <code>cf-ray</code>, <code>retry-after</code>, and <code>x-ratelimit-*</code>.</li>
+        <li>Do not buffer a streaming upstream body after downstream SSE headers are committed. Forward frames as they arrive.</li>
+        <li>Reject compressed request bodies with <code>415</code> in stage two. Supporting decompression requires separate tests for body limits, routing-field parsing, and byte-for-byte replay safety.</li>
+        <li>Hash body dumps with SHA-256 before logging. Raw body dumps are permitted only when <code>request_body_dumps = true</code> and must still redact configured JSON pointer paths.</li>
+      </ul>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Error envelope</h3>
+      <p>
+        Tokenproxy-originated HTTP errors must use the OpenAI-style envelope below.
+        Upstream OpenAI errors must be forwarded unchanged except for redaction of
+        local proxy-only fields.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "error": {
+    "message": "unsupported route: GET /v1/models",
+    "type": "tokenproxy_error",
+    "code": "unsupported_route",
+    "param": null
+  }
+}</code></pre>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Status</th>
+            <th>Meaning</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>unsupported_route</code></td>
+            <td><code>404</code></td>
+            <td>The path is outside the stage-two route set.</td>
+          </tr>
+          <tr>
+            <td><code>unsupported_method</code></td>
+            <td><code>405</code></td>
+            <td>The path exists but the method is not supported.</td>
+          </tr>
+          <tr>
+            <td><code>invalid_json</code></td>
+            <td><code>400</code></td>
+            <td>The body cannot be parsed as JSON before routing fields are read.</td>
+          </tr>
+          <tr>
+            <td><code>body_too_large</code></td>
+            <td><code>413</code></td>
+            <td>The request exceeds <code>server.max_body_bytes</code>.</td>
+          </tr>
+          <tr>
+            <td><code>no_eligible_account</code></td>
+            <td><code>503</code></td>
+            <td>No enabled account can serve the route, model, transport, and continuation constraint.</td>
+          </tr>
+          <tr>
+            <td><code>websocket_in_flight</code></td>
+            <td>WebSocket error frame</td>
+            <td>The client sent another <code>response.create</code> before the prior response reached a terminal event.</td>
+          </tr>
+          <tr>
+            <td><code>websocket_unsupported_message</code></td>
+            <td>WebSocket close <code>1003</code></td>
+            <td>The client sent a binary frame or a JSON text frame outside the supported message contract.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="configuration" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Runtime Configuration</h2>
+      <p>
+        The config surface must stay small because every option adds test
+        combinations. The initial implementation should load one TOML file, apply
+        explicit CLI overrides, validate the final struct, then expose the effective
+        non-secret config in a debug log at startup.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">CLI flags</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Flag</th>
+            <th>Required</th>
+            <th>Behavior</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>--config &lt;path&gt;</code></td>
+            <td>No</td>
+            <td>Load TOML config. Default search order: explicit flag, <code>TOKENPROXY_CONFIG</code>, <code>./tokenproxy.toml</code>.</td>
+          </tr>
+          <tr>
+            <td><code>--bind &lt;addr&gt;</code></td>
+            <td>No</td>
+            <td>Override <code>server.bind</code>.</td>
+          </tr>
+          <tr>
+            <td><code>--dry-run</code></td>
+            <td>No</td>
+            <td>Validate config and exit without listening or contacting upstream.</td>
+          </tr>
+          <tr>
+            <td><code>--probe-network</code></td>
+            <td>No</td>
+            <td>Run passive DNS/TLS/HTTP timing probes and write JSONL to stdout. Credentialed probes require a separate <code>--probe-auth</code> flag.</td>
+          </tr>
+          <tr>
+            <td><code>--log-json</code></td>
+            <td>No</td>
+            <td>Emit one JSON object per log line. Default is compact text for local development.</td>
+          </tr>
+          <tr>
+            <td><code>--version</code></td>
+            <td>No</td>
+            <td>Print binary version, git SHA, Rust version, and submodule snapshot baked into the build.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">TOML schema</h3>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>[server]
+bind = "127.0.0.1:8787"
+allow_non_loopback = false
+max_body_bytes = 10485760
+shutdown_grace_ms = 30000
+
+[timeouts]
+connect_ms = 3000
+request_header_ms = 10000
+stream_idle_ms = 300000
+websocket_connect_ms = 15000
+websocket_idle_ms = 300000
+pool_idle_ms = 90000
+
+[retry]
+max_precommit_retries = 1
+base_backoff_ms = 250
+max_backoff_ms = 30000
+honor_retry_after = true
+
+[observability]
+metrics = true
+request_body_dumps = false
+dump_dir = ""
+account_id_hash_key_env = "TOKENPROXY_ACCOUNT_HASH_KEY"
+
+[[accounts]]
+id = "openai-primary"
+kind = "openai_api_key"
+base_url = "https://api.openai.com/v1"
+token_env = "OPENAI_API_KEY"
+priority = 100
+models = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"]
+supports_chat_completions = true
+supports_responses = true
+supports_responses_ws = true
+supports_compact = true
+service_tiers = ["default", "priority"]
+prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
+      <p class="mt-4">
+        Validation rules are part of the contract: account IDs must be unique;
+        <code>base_url</code> must use <code>https</code> unless
+        <code>allow_insecure_upstream</code> is explicitly enabled for local tests;
+        <code>token_env</code> must be set for enabled accounts; booleans must not be
+        inferred from absent model names; timeout values must be nonzero; and
+        <code>max_precommit_retries</code> must be <code>0</code> or <code>1</code> in stage two.
+      </p>
+    </section>
+
+    <section id="anatomy" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Anatomy of the Proxy</h2>
+      <p>
+        Tokenproxy has five hot-path components. Keep each component small enough to
+        benchmark in isolation.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">1. Listener and request classifier</h3>
+      <p>
+        The listener accepts HTTP/1.1 and HTTP/2 client traffic on a local interface
+        or configured bind address. The request classifier matches method and path,
+        rejects unsupported routes before reading large bodies, and classifies the
+        request as <code>chat_json</code>, <code>chat_sse</code>, <code>responses_json</code>,
+        <code>responses_sse</code>, or <code>responses_ws</code>.
+      </p>
+      <p class="mt-4">
+        The classifier reads no more JSON than needed: method, path, body size,
+        <code>model</code>, <code>stream</code>, <code>store</code>, <code>previous_response_id</code>,
+        <code>prompt_cache_key</code>, <code>service_tier</code>, <code>reasoning.effort</code>, and
+        <code>text.verbosity</code>. Use <code>serde_json</code> for stage two. Consider
+        <code>simd-json</code> only after a local parse benchmark shows body parsing is a top
+        contributor to proxy overhead.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">2. Account router</h3>
+      <p>
+        The router chooses an upstream account by endpoint, model, health, backoff,
+        and continuation constraints. Every account record must include:
+      </p>
+      <ul class="mt-4 list-disc pl-6">
+        <li><code>id</code>: stable local account identifier.</li>
+        <li><code>kind</code>: <code>openai_api_key</code> or later ChatGPT-account adapter kind.</li>
+        <li><code>base_url</code>: default <code>https://api.openai.com/v1</code>.</li>
+        <li><code>models</code>: explicit allowlist or discovered model map.</li>
+        <li><code>supports_responses</code>, <code>supports_chat_completions</code>, <code>supports_responses_ws</code>.</li>
+        <li><code>health</code>: open, throttled, auth_failed, disabled, or unknown.</li>
+        <li><code>next_retry_at</code>: monotonic deadline for retrying throttled accounts.</li>
+        <li><code>prompt_cache_key_seed</code>: stable per caller or per account key material.</li>
+      </ul>
+      <p class="mt-4">
+        The router must never put secret-bearing default headers on a reusable client
+        object. Insert account auth per request so pooled connections cannot carry
+        headers across requests by construction. Codex's local proxy uses an
+        in-memory auth header, marks it sensitive, and overrides Authorization and Host
+        on each forwarded request (Codex, 2026b, lines 196-228).
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">3. HTTP upstream client</h3>
+      <p>
+        Use one shared Reqwest client per upstream origin and TLS policy. Enable
+        connection pooling. Do not set a global read timeout for streaming responses.
+        Codex's local proxy disables Reqwest's default 30-second timeout so long-lived
+        response streams continue flowing (Codex, 2026b, lines 102-107).
+      </p>
+      <p class="mt-4">
+        Pingora's pooling documentation gives the correctness rule to copy: reuse only
+        connections to the exact same peer identity, including IP:port, scheme, SNI,
+        certificate verification settings, and proxy settings; mark errored
+        connections non-reusable (Cloudflare, 2026b, lines 1-22). Reqwest handles the
+        pool internally, but tokenproxy must keep client instances separated by
+        upstream origin and TLS/proxy configuration.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">4. Streaming relay</h3>
+      <p>
+        For SSE, tokenproxy forwards events as bytes and records response lifecycle
+        events by parsing event frames opportunistically. OpenAI Responses streaming
+        uses typed semantic events such as <code>response.created</code>,
+        <code>response.output_text.delta</code>, <code>response.completed</code>, and
+        <code>error</code> (OpenAI, 2026e). CLIProxyAPI already has practical repair code
+        for malformed or incomplete Responses SSE output: it buffers frames, records
+        <code>response.output_item.done</code>, and repairs <code>response.completed.response.output</code>
+        when the completed payload lacks output items (CLIProxyAPI, 2026b, lines
+        48-119; CLIProxyAPI, 2026c, lines 160-220). Tokenproxy should implement the
+        same behavior behind a small tested module named <code>sse_repair</code>.
+      </p>
+      <p class="mt-4">
+        The stream relay must delay committing downstream SSE headers until the first
+        upstream data chunk or terminal upstream error. CLIProxyAPI does this by
+        peeking at the first chunk and returning JSON errors before SSE headers are
+        committed (CLIProxyAPI, 2026a, lines 450-524).
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">5. WebSocket session manager</h3>
+      <p>
+        A downstream Responses WebSocket session maps to one upstream Responses
+        WebSocket session at a time. Do not multiplex unrelated downstream sessions
+        over one upstream socket. OpenAI documents one in-flight response per socket
+        and no multiplexing, so parallel runs need multiple connections (OpenAI,
+        2026b).
+      </p>
+      <p class="mt-4">
+        CLIProxyAPI's Responses WebSocket handler is the closest local reference.
+        It accepts <code>response.create</code> and <code>response.append</code>, retains tool
+        caches, pins upstream auth when incremental input is supported, carries
+        <code>lastRequest</code> and <code>lastResponseOutput</code>, handles <code>generate:false</code>
+        prewarm locally when needed, and falls back to transcript replay when the
+        upstream cannot consume <code>previous_response_id</code> incremental input
+        (CLIProxyAPI, 2026d, lines 208-280; CLIProxyAPI, 2026e, lines 306-429;
+        CLIProxyAPI, 2026f, lines 458-613).
+      </p>
+    </section>
+
+    <section id="crate-choices" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Crate Choices</h2>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Concern</th>
+            <th>Stage-two choice</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Async runtime</td>
+            <td><code>tokio</code></td>
+            <td>
+              The ecosystem fit is stronger for Hyper, Reqwest, Axum, Tokio Tungstenite,
+              tracing, metrics, and existing Codex-style clients. LiveKit's Rust SDK
+              currently requires Tokio (LiveKit, 2026a, line 58), and s2n-quic's examples
+              use Tokio for server/client tasks (AWS, 2026a, lines 45-104).
+            </td>
+          </tr>
+          <tr>
+            <td>HTTP server</td>
+            <td><code>axum</code> on Hyper 1</td>
+            <td>
+              Concise route code and direct access to request bodies, headers, and WebSocket
+              upgrades. If profiling shows framework overhead above the target, replace the
+              listener with Hyper service code without changing routing modules.
+            </td>
+          </tr>
+          <tr>
+            <td>HTTP upstream</td>
+            <td><code>reqwest</code> with rustls TLS</td>
+            <td>
+              Pooled clients, streaming bodies, HTTP/2 support, proxy/TLS configuration, and
+              small code. Codex's local proxy already uses Reqwest and disables global timeout
+              for streams (Codex, 2026b, lines 102-107).
+            </td>
+          </tr>
+          <tr>
+            <td>WebSocket</td>
+            <td><code>tokio-tungstenite</code> upstream, Axum WebSocket downstream</td>
+            <td>
+              Keeps async runtime unified and maps cleanly to OpenAI's JSON text-event
+              WebSocket mode. Codex telemetry already treats WebSocket events as JSON text
+              and rejects unexpected binary/frame cases (Codex, 2026d, lines 696-790).
+            </td>
+          </tr>
+          <tr>
+            <td>JSON</td>
+            <td><code>serde_json</code></td>
+            <td>
+              Correctness and simplicity first. Use byte pass-through for full payloads and
+              parse only fields needed for routing and telemetry. Benchmark before adding
+              <code>simd-json</code>.
+            </td>
+          </tr>
+          <tr>
+            <td>Concurrency maps</td>
+            <td><code>arc-swap</code>, <code>dashmap</code>, <code>tokio::sync</code></td>
+            <td>
+              Account config is read-heavy and hot. Use <code>arc-swap</code> snapshots for
+              routing tables, <code>DashMap</code> only for mutable per-account health, and
+              <code>watch</code> channels for updates.
+            </td>
+          </tr>
+          <tr>
+            <td>Metrics</td>
+            <td><code>metrics</code> plus Prometheus exporter</td>
+            <td>
+              The spec requires explicit p50/p95/p99 path metrics. Codex exposes WebSocket
+              connect, request, event, overhead, TTFT, and token timing metrics in its telemetry
+              names and recorder (Codex, 2026d, lines 574-790).
+            </td>
+          </tr>
+          <tr>
+            <td>CLI/config</td>
+            <td><code>clap</code>, <code>figment</code> or explicit TOML parsing</td>
+            <td>
+              The binary needs a small config surface. Avoid dynamic plugin loading.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Why not Pingora first</h3>
+      <p>
+        Pingora is a strong reference for pooling, health checks, failover, and graceful
+        upgrade. It also brings a larger proxy framework. Stage two needs OpenAI-specific
+        JSON, SSE, and WebSocket continuation logic more than a general reverse-proxy
+        stack. Use Pingora's rules, not its framework, until a benchmark shows the
+        Hyper/Axum implementation misses overhead targets.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Why not io_uring first</h3>
+      <p>
+        Monoio shows the performance appeal of thread-per-core and io_uring for
+        network-bound servers, but it also documents platform constraints, runtime
+        configuration requirements, unstable features, and compatibility costs (Bytedance,
+        2026a, lines 21-31; Bytedance, 2026b, lines 63-87). Tokenproxy's upstream work is
+        TLS, HTTP/2, SSE, and WebSocket heavy; Tokio support is better across the chosen
+        libraries. Use io_uring only after a local Tokio implementation has a measured
+        kernel or scheduler bottleneck.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Why not QUIC/H3 first</h3>
+      <p>
+        Quiche and s2n-quic show that QUIC/H3 is powerful and complex. Quiche provides
+        a low-level QUIC packet API and makes the application provide sockets, an event
+        loop, and timers (Cloudflare, 2026d, lines 8-11). It also requires QUIC flow
+        control, ALPN, TLS configuration, and BoringSSL build machinery (Cloudflare,
+        2026d, lines 81-103; Cloudflare, 2026e, lines 330-343). s2n-quic is extensively
+        tested and provider-driven, but it requires QUIC-specific provider choices and
+        has GSO requirements on older Linux kernels (AWS, 2026a, lines 3-10, 116-118).
+        Tokenproxy should measure HTTP/3 with curl and external probes first. It should
+        not implement custom H3 until repeated measurements from target networks show
+        a durable advantage for OpenAI endpoints.
+      </p>
+    </section>
+
+    <section id="data-paths" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Data Paths</h2>
+
+      <h3 class="mt-6 mb-3 text-xl font-bold">Non-streaming HTTP</h3>
+      <ol class="list-decimal pl-6">
+        <li>Classify route and read body with a configured max size.</li>
+        <li>Parse routing fields only.</li>
+        <li>Select an account whose health permits the endpoint and model.</li>
+        <li>Build upstream URL by appending the exact route to the account base URL.</li>
+        <li>Forward request headers except hop-by-hop headers and incoming Authorization.</li>
+        <li>Insert account Authorization and Host for the upstream origin.</li>
+        <li>Send with pooled Reqwest client.</li>
+        <li>Mirror upstream status, content type, request ID headers, and body.</li>
+      </ol>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">SSE HTTP</h3>
+      <ol class="list-decimal pl-6">
+        <li>Perform the non-streaming steps through upstream send.</li>
+        <li>Read the first upstream event or upstream terminal error before committing downstream SSE headers.</li>
+        <li>If upstream failed before event bytes, return JSON error and mark account health.</li>
+        <li>If upstream produced event bytes, commit SSE headers and forward frames.</li>
+        <li>Parse Responses event types for metrics and output replay state.</li>
+        <li>On client disconnect, cancel upstream request and record cancellation.</li>
+      </ol>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Responses WebSocket</h3>
+      <ol class="list-decimal pl-6">
+        <li>Accept downstream WebSocket only on <code>/v1/responses</code>.</li>
+        <li>Require client messages to be JSON text with <code>type=response.create</code>.</li>
+        <li>On first request, select an account supporting Responses and, when requested, WebSocket continuation.</li>
+        <li>Open upstream <code>wss://api.openai.com/v1/responses</code> or account base equivalent.</li>
+        <li>Forward <code>response.create</code> unchanged except for safe defaults and prohibited transport fields.</li>
+        <li>For later turns, prefer <code>previous_response_id</code> plus only new input when upstream state is valid.</li>
+        <li>If upstream lacks WebSocket continuation, synthesize a full <code>input</code> array from last request, last output, and new input.</li>
+        <li>Forward upstream JSON text events to the downstream in order.</li>
+        <li>Capture <code>response.completed.response.id</code>, output items, and error codes.</li>
+        <li>Close upstream and downstream on either leg closing; do not hide mid-stream failures.</li>
+      </ol>
+    </section>
+
+    <section id="header-body-contract" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Header and Body Contract</h2>
+      <p>
+        Header handling must be mechanical and covered by unit tests. Codex's local
+        Responses proxy provides the model: forward ordinary request headers, replace
+        incoming Authorization, replace Host, and mark the upstream auth header as
+        sensitive (Codex, 2026b, lines 196-228).
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Inbound request handling</h3>
+      <ul class="list-disc pl-6">
+        <li>Reject request bodies larger than <code>server.max_body_bytes</code> before selecting an account.</li>
+        <li>For JSON routes, read the body once into bytes, parse routing fields from those bytes, then forward the original bytes unless a tested transform applies.</li>
+        <li>For WebSocket, accept only text frames containing a JSON object with <code>type = "response.create"</code>.</li>
+        <li>Generate a <code>tokenproxy_request_id</code> for every accepted request and include it in logs and downstream error responses.</li>
+        <li>Do not log raw request bodies unless <code>observability.request_body_dumps</code> is enabled.</li>
+      </ul>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Forwarded request headers</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Header class</th>
+            <th>Rule</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Authorization</td>
+            <td>Always strip inbound value. Insert <code>Bearer &lt;selected account token&gt;</code> per request or per WebSocket handshake.</td>
+          </tr>
+          <tr>
+            <td>Host</td>
+            <td>Always strip inbound value. Insert host from selected account <code>base_url</code>.</td>
+          </tr>
+          <tr>
+            <td>Hop-by-hop headers</td>
+            <td>Strip <code>connection</code>, <code>keep-alive</code>, <code>proxy-authenticate</code>, <code>proxy-authorization</code>, <code>te</code>, <code>trailer</code>, <code>transfer-encoding</code>, and <code>upgrade</code> except during WebSocket handshake construction.</td>
+          </tr>
+          <tr>
+            <td>Content length</td>
+            <td>Let the HTTP client set it from the forwarded body bytes.</td>
+          </tr>
+          <tr>
+            <td>Content type and accept</td>
+            <td>Forward unless invalid. Preserve <code>text/event-stream</code> semantics for streaming responses.</td>
+          </tr>
+          <tr>
+            <td>OpenAI request headers</td>
+            <td>Forward safe client-supplied OpenAI headers, including organization/project headers, when explicitly allowed by config. Default deny for unknown <code>OpenAI-*</code> request headers until tests cover them.</td>
+          </tr>
+          <tr>
+            <td>Proxy diagnostics</td>
+            <td>Add <code>x-tokenproxy-request-id</code>. Do not forward internal account IDs or health state upstream.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Response handling</h3>
+      <ul class="list-disc pl-6">
+        <li>Mirror upstream status and body for upstream responses.</li>
+        <li>Forward <code>content-type</code>, <code>openai-request-id</code>, <code>x-request-id</code>, and rate-limit headers.</li>
+        <li>Strip <code>set-cookie</code> unless a later ChatGPT-account adapter proves it is needed and stores it out of logs.</li>
+        <li>For SSE, do not synthesize semantic events except for tested repair of missing completed output when source events contain enough output-item data.</li>
+        <li>For WebSocket, forward upstream JSON text events in order. Do not reorder deltas for metrics convenience.</li>
+      </ul>
+    </section>
+
+    <section id="account-selection" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Account Selection Algorithm</h2>
+      <p>
+        Selection must be deterministic for identical state so tests and benchmark
+        replays can reproduce routing decisions. Randomness is allowed only as a
+        final tie-breaker when the seed is logged.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Eligibility filters</h3>
+      <ol class="list-decimal pl-6">
+        <li>Account is enabled.</li>
+        <li>Account health is <code>open</code>, <code>unknown</code>, or <code>throttled</code> with <code>now &gt;= next_retry_at</code>.</li>
+        <li>Account supports the requested endpoint.</li>
+        <li>Account model allowlist is empty or contains the requested model after alias normalization.</li>
+        <li>Requested service tier is empty or listed in account <code>service_tiers</code>.</li>
+        <li>WebSocket requests require <code>supports_responses_ws = true</code>.</li>
+        <li>Continuation pinned to an account must use that account unless the failure policy explicitly permits failover and replay can remove stale <code>previous_response_id</code>.</li>
+      </ol>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Scoring</h3>
+      <p>
+        After filtering, sort by this tuple. Lower values win except where noted.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>(
+  continuation_penalty,       // 0 for pinned compatible account, 10 otherwise
+  health_penalty,             // open=0, unknown=20, cooled_down_throttled=40
+  -account.priority,          // higher configured priority wins
+  ewma_connect_ms_bucket,     // coarse bucket, not raw high-cardinality data
+  ewma_first_event_ms_bucket, // coarse bucket per endpoint/model family
+  recent_failure_count,
+  stable_hash(account_id, caller_hash, model_family)
+)</code></pre>
+      <p class="mt-4">
+        The router must log the winning account hash and the first excluded reason
+        for every losing account at debug level. Metrics must count exclusions by
+        reason without exposing raw account IDs.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Health transitions</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Observed event</th>
+            <th>Transition</th>
+            <th>Reset rule</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Successful response headers or WebSocket event</td>
+            <td><code>unknown</code> or <code>throttled</code> to <code>open</code></td>
+            <td>Clear transient failure count for that endpoint/model family.</td>
+          </tr>
+          <tr>
+            <td>401 or 403 from upstream</td>
+            <td><code>auth_failed</code></td>
+            <td>Only manual reload or changed token can reopen the account.</td>
+          </tr>
+          <tr>
+            <td>429 with <code>Retry-After</code></td>
+            <td><code>throttled</code> until parsed retry deadline</td>
+            <td>First success after deadline returns to <code>open</code>.</td>
+          </tr>
+          <tr>
+            <td>429 without <code>Retry-After</code></td>
+            <td><code>throttled</code> with exponential jittered backoff</td>
+            <td>Backoff resets after success or five quiet minutes.</td>
+          </tr>
+          <tr>
+            <td>Connect, DNS, or TLS failure</td>
+            <td>Transient failure count increments</td>
+            <td>Account remains eligible after backoff unless failures exceed configured threshold.</td>
+          </tr>
+          <tr>
+            <td><code>previous_response_not_found</code></td>
+            <td>No account health change by default</td>
+            <td>Mark replay state invalid for that session and retry only with full replay when complete.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="state-machines" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">State Machines</h2>
+      <p>
+        The implementation should use explicit enums for these states. That makes
+        logs readable and keeps retry boundaries testable.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">HTTP JSON state machine</h3>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>Accepted
+  -> BodyRead
+  -> Classified
+  -> AccountSelected
+  -> UpstreamSent
+  -> DownstreamCommitted
+  -> Completed | ClientCancelled | UpstreamFailed</code></pre>
+      <p class="mt-4">
+        Retry is legal only before <code>DownstreamCommitted</code> and only when the
+        original body bytes are still available. Because stage-two HTTP JSON bodies
+        are read into bytes before forwarding, a single retry before commitment is
+        mechanically possible, but it must still obey endpoint and account policy.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">SSE state machine</h3>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>Accepted
+  -> BodyRead
+  -> Classified
+  -> AccountSelected
+  -> UpstreamSent
+  -> WaitingFirstFrame
+  -> DownstreamCommitted
+  -> Relaying
+  -> Completed | ClientCancelled | UpstreamStreamFailed</code></pre>
+      <p class="mt-4">
+        <code>WaitingFirstFrame</code> is the safety boundary. If upstream returns an HTTP
+        error before the first SSE frame, tokenproxy may return a JSON error or retry
+        once. After the first frame reaches the downstream client, tokenproxy must not
+        hide failures by opening a second upstream stream.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">WebSocket state machine</h3>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>Accepted
+  -> WaitingClientCreate
+  -> AccountSelected
+  -> UpstreamConnecting
+  -> UpstreamReady
+  -> InFlight
+  -> UpdatingReplayState
+  -> WaitingClientCreate
+  -> Closing</code></pre>
+      <p class="mt-4">
+        A WebSocket session has exactly one in-flight response. If the downstream
+        client sends a second <code>response.create</code> while the session is in
+        <code>InFlight</code>, tokenproxy must emit a <code>websocket_in_flight</code> error frame
+        and must not forward the second request upstream. OpenAI documents the same
+        single in-flight rule for Responses WebSocket mode (OpenAI, 2026b).
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">WebSocket session record</h3>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>struct WsSessionState {
+  session_id: String,
+  account_id_hash: String,
+  upstream_origin: String,
+  supports_incremental_previous_response_id: bool,
+  supports_compaction_replay: bool,
+  in_flight: bool,
+  last_request_template: serde_json::Value,
+  last_completed_response_id: Option&lt;String&gt;,
+  last_completed_output_items: Vec&lt;serde_json::Value&gt;,
+  replay_generation: u64,
+  last_activity_at: Instant,
+}</code></pre>
+      <p class="mt-4">
+        <code>last_completed_output_items</code> must preserve each item as opaque JSON.
+        Do not deserialize into a lossy enum unless every unknown field is retained.
+        This is required for assistant <code>phase</code> preservation and future output
+        item shapes (OpenAI, 2026c).
+      </p>
+    </section>
+
+    <section id="orchestration" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Responses Orchestration Rules</h2>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>Proxy rule</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>previous_response_id</code></td>
+            <td>
+              Preserve it for HTTP and WebSocket. In WebSocket mode, continue from the
+              most recent completed response on that socket. If an uncached ID fails,
+              replay full context when tokenproxy has it; otherwise return the upstream
+              error unchanged.
+            </td>
+            <td>
+              OpenAI documents connection-local most-recent response cache, <code>store=false</code>
+              behavior, eviction after failed turns, and recovery with full context
+              (OpenAI, 2026b; OpenAI, 2026g).
+            </td>
+          </tr>
+          <tr>
+            <td>Output item replay</td>
+            <td>
+              Store completed output items in session memory until the session closes or
+              the retention cap expires. Use them only for stateless replay or fallback.
+            </td>
+            <td>
+              OpenAI recommends passing returned output items each turn for stateless/ZDR
+              flows (OpenAI, 2026c). CLIProxyAPI repairs missing completed output from
+              streamed output-item events (CLIProxyAPI, 2026c).
+            </td>
+          </tr>
+          <tr>
+            <td>Assistant <code>phase</code></td>
+            <td>
+              Never drop <code>phase</code> from assistant items when replaying output items.
+              Treat output items as opaque JSON unless a tested transform requires a field.
+            </td>
+            <td>
+              OpenAI GPT-5.5 guidance says manually managed Responses state must preserve
+              assistant <code>phase</code> unchanged (OpenAI, 2026c).
+            </td>
+          </tr>
+          <tr>
+            <td>Prompt caching</td>
+            <td>
+              Keep stable prompt/tool prefixes first, dynamic items last, pass through
+              <code>prompt_cache_key</code>, and log cached token counts. For caller-specific
+              cache routing, derive a stable key from caller identity and model family.
+            </td>
+            <td>
+              OpenAI documents exact prefix matching, 1024-token eligibility,
+              <code>prompt_cache_key</code>, cached token logging, and cache overflow around
+              high request rates for the same prefix/key (OpenAI, 2026d). CLIProxyAPI tests
+              a stable key derived from user API key and uses it as <code>Session_id</code>
+              (CLIProxyAPI, 2026g, lines 16-64).
+            </td>
+          </tr>
+          <tr>
+            <td>Reasoning effort</td>
+            <td>
+              Pass through <code>reasoning.effort</code>. Default decisions belong to clients,
+              not tokenproxy. Metrics must bucket by effort because latency and quality
+              shift with effort.
+            </td>
+            <td>
+              OpenAI documents <code>low</code>, <code>medium</code>, <code>high</code>, and <code>xhigh</code>
+              choices, with medium as GPT-5.5 default and low recommended for many
+              latency-sensitive workflows (OpenAI, 2026c).
+            </td>
+          </tr>
+          <tr>
+            <td>Verbosity</td>
+            <td>
+              Pass through <code>text.verbosity</code> and include it in benchmark labels.
+            </td>
+            <td>
+              OpenAI documents verbosity as separate from reasoning quality and recommends
+              intentional use for concise responses (OpenAI, 2026c).
+            </td>
+          </tr>
+          <tr>
+            <td>Tool preambles</td>
+            <td>
+              Preserve preamble output items and assistant state. Do not filter them from
+              streams or replay.
+            </td>
+            <td>
+              OpenAI says preambles improve UX and allow continuation from the same assistant
+              state after tool results arrive (OpenAI, 2026c).
+            </td>
+          </tr>
+          <tr>
+            <td>Compaction</td>
+            <td>
+              For server-side compaction, forward <code>context_management</code> and continue
+              with normal replay rules. For standalone <code>/responses/compact</code>, proxy the
+              HTTP call as a Responses endpoint, treat the returned compacted window as
+              opaque JSON, and start a new WebSocket chain when that compacted window is used.
+            </td>
+            <td>
+              OpenAI documents server-side compaction via <code>context_management</code>, a
+              stateless standalone compact endpoint, and the rule to pass standalone compact
+              output as-is (OpenAI, 2026h).
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="replay-contract" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Replay and WebSocket Wire Contract</h2>
+      <p>
+        Replay code is the highest-risk JSON transform in tokenproxy. It must live in
+        one module, have golden tests, and preserve unknown JSON fields by default.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Accepted WebSocket messages</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Client frame</th>
+            <th>Accepted</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Text JSON object with <code>type = "response.create"</code></td>
+            <td>Yes</td>
+            <td>Normalize, route, and forward as a Responses request event.</td>
+          </tr>
+          <tr>
+            <td>Text JSON object without <code>type</code></td>
+            <td>No</td>
+            <td>Return a WebSocket error frame with <code>websocket_unsupported_message</code>.</td>
+          </tr>
+          <tr>
+            <td><code>response.append</code></td>
+            <td>No for tokenproxy stage two</td>
+            <td>Return a WebSocket error frame. Codex's current executor forces every upstream WebSocket request to <code>response.create</code> with <code>previous_response_id</code> for incremental turns (CLIProxyAPI, 2026h, lines 678-687).</td>
+          </tr>
+          <tr>
+            <td>Binary frame</td>
+            <td>No</td>
+            <td>Close with WebSocket code <code>1003</code>.</td>
+          </tr>
+          <tr>
+            <td>Ping</td>
+            <td>Yes</td>
+            <td>Reply with Pong without touching replay state.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">First turn</h3>
+      <p>
+        The first accepted WebSocket <code>response.create</code> must include a model.
+        Tokenproxy forwards it as JSON text to the upstream socket after account
+        selection and auth insertion. It records a request template after removing
+        transport-only fields and after applying any tested defaults. It records
+        <code>last_completed_response_id</code> and <code>last_completed_output_items</code>
+        only after a terminal <code>response.completed</code> event.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "type": "response.create",
+  "model": "gpt-5.5",
+  "instructions": "You are a concise coding agent.",
+  "tools": [{ "type": "function", "name": "run_test", "parameters": { "type": "object" } }],
+  "input": [{ "type": "message", "role": "user", "content": "Run the fast tests." }],
+  "stream": true
+}</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Incremental fast path</h3>
+      <p>
+        The fast path is allowed only when the session has a completed response ID,
+        the selected account supports WebSocket incremental input, and no prior event
+        invalidated connection-local state. The forwarded request keeps
+        <code>previous_response_id</code> and includes only new input items. OpenAI
+        documents this pattern for long-running tool-call workflows (OpenAI, 2026g).
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "type": "response.create",
+  "previous_response_id": "resp_abc123",
+  "input": [{
+    "type": "function_call_output",
+    "call_id": "call_1",
+    "output": "{\"status\":\"ok\"}"
+  }]
+}</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Full replay fallback</h3>
+      <p>
+        Full replay is required when the upstream account cannot use incremental
+        <code>previous_response_id</code>, when a connection-local previous response is
+        unavailable, or when failover switches to a different account. The transform
+        must apply these steps in order:
+      </p>
+      <ol class="list-decimal pl-6">
+        <li>Start from <code>last_request_template</code>.</li>
+        <li>Remove <code>previous_response_id</code>.</li>
+        <li>Copy missing stable top-level fields from the template: <code>model</code>, <code>instructions</code>, <code>tools</code>, <code>tool_choice</code>, <code>parallel_tool_calls</code>, <code>reasoning</code>, <code>text</code>, <code>truncation</code>, <code>store</code>, and <code>service_tier</code>.</li>
+        <li>Build <code>input</code> as prior input items, then completed output items, then new input items.</li>
+        <li>Preserve output items exactly, including <code>phase</code>, tool-call IDs, annotations, reasoning summaries, and unknown fields.</li>
+        <li>Deduplicate tool-call output items by <code>call_id</code> only when a test proves the same tool output appears in both prior and new input.</li>
+        <li>Set <code>stream = true</code> for WebSocket relay requests.</li>
+      </ol>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "type": "response.create",
+  "model": "gpt-5.5",
+  "instructions": "You are a concise coding agent.",
+  "tools": [{ "type": "function", "name": "run_test", "parameters": { "type": "object" } }],
+  "input": [
+    { "type": "message", "role": "user", "content": "Run the fast tests." },
+    { "type": "function_call", "call_id": "call_1", "name": "run_test", "arguments": "{\"target\":\"fast\"}" },
+    { "type": "function_call_output", "call_id": "call_1", "output": "{\"status\":\"ok\"}" }
+  ],
+  "stream": true
+}</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Compaction reset</h3>
+      <p>
+        After <code>/v1/responses/compact</code> returns a compacted input window, the
+        next WebSocket request using that compacted window must start a new replay
+        generation. Tokenproxy must not prepend stale pre-compaction input or stale
+        output items to that request. The state transition is:
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>Before compaction:
+  replay_generation = 7
+  last_completed_response_id = Some("resp_old")
+  last_completed_output_items = [...]
+
+After compacted window is used:
+  replay_generation = 8
+  last_completed_response_id = None until next completion
+  last_completed_output_items = []
+  last_request_template = compacted request window</code></pre>
+    </section>
+
+    <section id="failure" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Failure Behavior</h2>
+      <p>
+        Failure handling must be deterministic. Hidden retries are allowed only before
+        downstream commitment and only when the upstream request has not sent a body or
+        when replay is explicitly safe.
+      </p>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Failure</th>
+            <th>Action</th>
+            <th>Health update</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>DNS/connect/TLS failure before upstream body</td>
+            <td>Try another eligible account once. Return 502 if none.</td>
+            <td>Mark transient failure; short exponential backoff.</td>
+          </tr>
+          <tr>
+            <td>HTTP 401 or 403</td>
+            <td>Return upstream error. Do not retry another account unless client opted into failover for auth errors.</td>
+            <td>Mark account <code>auth_failed</code>.</td>
+          </tr>
+          <tr>
+            <td>HTTP 429</td>
+            <td>Return upstream error unless a retry-before-commit policy is enabled and body replay is safe.</td>
+            <td>Honor <code>Retry-After</code> when present. Otherwise back off with jitter.</td>
+          </tr>
+          <tr>
+            <td>HTTP 500 or 503 before stream commit</td>
+            <td>Retry another eligible account at most once. Preserve original request ID in logs.</td>
+            <td>Short backoff. Check status page during operator investigation.</td>
+          </tr>
+          <tr>
+            <td>SSE error after first downstream event</td>
+            <td>Forward error event or close stream. Do not retry invisibly.</td>
+            <td>Mark streaming failure with model and account labels.</td>
+          </tr>
+          <tr>
+            <td>WebSocket <code>previous_response_not_found</code></td>
+            <td>Replay full context once if local session state is complete. Otherwise forward error.</td>
+            <td>Do not mark account unhealthy unless repeated outside reconnects.</td>
+          </tr>
+          <tr>
+            <td>WebSocket 60-minute limit</td>
+            <td>Open a new upstream socket and continue with persisted ID or full replay.</td>
+            <td>None.</td>
+          </tr>
+          <tr>
+            <td>Client disconnect</td>
+            <td>Cancel upstream HTTP request or close upstream WebSocket.</td>
+            <td>None.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="mt-4">
+        The non-idempotent retry rule comes from Pingora's failure guide: retrying a
+        POST after the request has already been sent is unsafe unless the upstream
+        semantics make it safe; after downstream headers are sent, the proxy can only
+        log and give up (Cloudflare, 2026c, lines 3-17).
+      </p>
+      <p class="mt-4">
+        OpenAI error guidance requires backoff and rate respect for 429, a brief wait
+        and status-page checks for 500/503, gradual ramp after <code>Slow Down</code>, and
+        special handling for <code>previous_response_not_found</code> and
+        <code>websocket_connection_limit_reached</code> (OpenAI, 2026f).
+      </p>
+    </section>
+
+    <section id="network" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Network and Status Observations</h2>
+      <p>
+        These observations were captured from the local development environment. They do
+        not define stable endpoint facts.
+      </p>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Probe</th>
+            <th>Result</th>
+            <th>Design use</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>curl --version</code></td>
+            <td>
+              curl 8.19.0 on macOS with OpenSSL 3.6.1, nghttp2 1.67.1,
+              ngtcp2 1.17.0, nghttp3 1.12.0. Features include HTTP2 and HTTP3.
+            </td>
+            <td>Local probe tool can compare HTTP/1.1, HTTP/2, and HTTP/3 where network policy permits.</td>
+          </tr>
+          <tr>
+            <td><code>dig api.openai.com A +short</code></td>
+            <td><code>162.159.140.245</code>, <code>172.66.0.243</code></td>
+            <td>Record resolved IPs in benchmark output, but never pin them in code.</td>
+          </tr>
+          <tr>
+            <td><code>dig status.openai.com A +short</code></td>
+            <td><code>cname.vercel-dns.com.</code>, <code>76.76.21.241</code>, <code>66.33.60.193</code></td>
+            <td>Status is operational context, not routing substrate.</td>
+          </tr>
+          <tr>
+            <td><code>curl</code> timing and TLS probes</td>
+            <td>
+              A 2026-05-27 00:14:12 PDT uncredentialed <code>curl</code> refresh
+              to <code>https://api.openai.com/v1/responses</code> reached
+              <code>162.159.140.245</code>. HTTP/2 measured DNS 0.003008 s,
+              connect 0.065906 s, TLS 0.080019 s, TTFB 0.158154 s, total
+              0.158240 s. HTTP/1.1 measured total 0.153534 s. HTTP/3 measured
+              total 0.140877 s. <code>curl</code> to
+              <code>https://status.openai.com/</code> reached <code>66.33.60.193</code>
+              over HTTP/2 with total 0.322172 s. Earlier same-environment TLS
+              inspection negotiated TLS 1.3 with <code>TLS_AES_256_GCM_SHA384</code>
+              and certificate CN <code>api.openai.com</code>.
+            </td>
+            <td>
+              Stage two must run reproducible timing probes from the target deployment
+              networks before any endpoint, HTTP-version, or account-routing claim is
+              accepted.
+            </td>
+          </tr>
+          <tr>
+            <td>WebSocket handshake probe</td>
+            <td>
+              <code>websocat -v -1 -H='Authorization: Bearer invalid_tokenproxy_probe' wss://api.openai.com/v1/responses</code>
+              connected TCP to <code>172.66.0.243:443</code> and received
+              <code>401 Unauthorized</code>. This validates the route reaches a WebSocket
+              endpoint but does not measure authenticated stream stability.
+            </td>
+            <td>
+              Stage two needs credentialed test-project probes for WebSocket event
+              ordering, reconnect behavior, and 60-minute-limit handling.
+            </td>
+          </tr>
+          <tr>
+            <td>OpenAI status history</td>
+            <td>
+              At the 2026-05-27 refresh, the live status page reported an ongoing FedRAMP login
+              incident, API aggregate uptime of 99.98%, ChatGPT aggregate uptime of
+              99.84%, Codex aggregate uptime of 99.98%, and FedRAMP aggregate uptime
+              of 99.95%. The history page also showed recent May 2026 incidents
+              affecting Responses API, Codex, GPT-5.4/GPT-5.5, and Codex rate
+              limits, and states that availability metrics are aggregate across tiers,
+              models, and error types (OpenAI Status, 2026).
+            </td>
+            <td>
+              Account routing and operator diagnostics must include model, endpoint,
+              service tier, and account labels. A global status page cannot identify a
+              single account's current failure cause.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="benchmark-method" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Benchmark Methodology</h2>
+      <p>
+        Benchmarks must be workflow benchmarks, not microbenchmarks alone. Ripgrep's
+        README warns that a single benchmark is never enough and shows performance
+        cliffs where output volume or pattern shape dominates tool differences
+        (BurntSushi, 2026a, lines 47-49; BurntSushi, 2026b, lines 87-108). Uv's
+        benchmark notes separate warm and cold cases and warn that OS, filesystem,
+        package set, and network behavior can change results (Astral, 2026, lines
+        3-13, 18-48). Tokenproxy inherits the same rule: label the environment,
+        distinguish warm/cold connection and cache states, and report tails.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Required environment fields</h3>
+      <ul class="list-disc pl-6">
+        <li>Timestamp with timezone and UTC.</li>
+        <li>Host OS, CPU, RAM, kernel, network type, and region.</li>
+        <li>Tokenproxy git commit and build profile.</li>
+        <li>Submodule commit snapshot when source comparisons are used.</li>
+        <li>curl version, Rust version, OpenSSL/rustls version, and DNS resolver.</li>
+        <li>Resolved IPs, TLS version, ALPN, connect time, TLS time, TTFB, total time.</li>
+        <li>Model, endpoint, transport, service tier, reasoning effort, verbosity, store flag.</li>
+        <li>Prompt-cache fields: key, retention, cached token count, cache hit ratio.</li>
+      </ul>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Required workflow cases</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Case</th>
+            <th>What it measures</th>
+            <th>Acceptance target</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Single non-streaming Chat Completions request</td>
+            <td>Route parse, account selection, upstream round trip, JSON body relay.</td>
+            <td>Local proxy overhead p50 below 1 ms, p99 below 5 ms excluding upstream time.</td>
+          </tr>
+          <tr>
+            <td>Single Responses SSE request</td>
+            <td>SSE header delay, first event latency, frame relay overhead, output item capture.</td>
+            <td>First byte overhead below 1 ms p50 and no event reordering.</td>
+          </tr>
+          <tr>
+            <td>Codex 25 tool-call loop over HTTP Responses</td>
+            <td>Repeated request overhead, prompt cache behavior, output replay size growth.</td>
+            <td>Record TTFT and total time per turn; compare against direct client baseline.</td>
+          </tr>
+          <tr>
+            <td>Codex 25 tool-call loop over Responses WebSocket</td>
+            <td>Persistent connection continuation with <code>previous_response_id</code>.</td>
+            <td>Beat HTTP loop total time when upstream WebSocket support is active; quantify percent.</td>
+          </tr>
+          <tr>
+            <td>Compacted long agent session</td>
+            <td>Context size control, replay correctness, long-tail latency after compaction.</td>
+            <td>No lost tool outputs; request size drops after compaction in stateless replay mode.</td>
+          </tr>
+          <tr>
+            <td>Account failover before stream commit</td>
+            <td>Retry safety and route health updates.</td>
+            <td>One successful retry before downstream headers; no duplicate downstream events.</td>
+          </tr>
+          <tr>
+            <td>Account failure after stream commit</td>
+            <td>Terminal error honesty.</td>
+            <td>No hidden retry; downstream receives error event or clean close with metrics.</td>
+          </tr>
+          <tr>
+            <td>OpenAI status incident window replay</td>
+            <td>Operator visibility and routing labels.</td>
+            <td>Metrics isolate model, endpoint, account, and status class.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Probe commands</h3>
+      <p>
+        These are required during stage two from each target client network. The exact
+        commands are part of the benchmark report, not startup code.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>dig api.openai.com A +short
+dig api.openai.com AAAA +short
+curl -sS -o /dev/null -w 'remote_ip=%{remote_ip} http=%{http_version} dns=%{time_namelookup} connect=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total}\n' https://api.openai.com/v1/responses
+openssl s_client -connect api.openai.com:443 -servername api.openai.com -alpn h2,http/1.1 -brief
+websocat -v wss://api.openai.com/v1/responses</code></pre>
+      <p class="mt-4">
+        If a probe requires credentials, use a zero-data request or an internal test
+        project and redact Authorization, cookies, and response bodies before committing
+        benchmark artifacts.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Benchmark artifact schema</h3>
+      <p>
+        Benchmark tools must write JSONL. One line is one request, stream, WebSocket
+        turn, or network probe. Missing fields are allowed only when not applicable.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "schema": "tokenproxy.benchmark.v1",
+  "timestamp_local": "2026-05-27T00:07:28-07:00",
+  "timestamp_utc": "2026-05-27T07:07:28Z",
+  "case": "responses_ws_25_tool_loop",
+  "mode": "direct|proxy",
+  "endpoint": "/v1/responses",
+  "transport": "http1|http2|http3|sse|websocket",
+  "model": "gpt-5.5",
+  "service_tier": "default|priority|flex|auto|unknown",
+  "reasoning_effort": "none|minimal|low|medium|high|xhigh|unset",
+  "verbosity": "low|medium|high|unset",
+  "store": false,
+  "remote_ip": "172.66.0.243",
+  "dns_ms": 1.464,
+  "connect_ms": 9.631,
+  "tls_ms": 21.938,
+  "ttfb_ms": 93.092,
+  "first_event_ms": 0.0,
+  "total_ms": 93.182,
+  "status": 200,
+  "cached_tokens": 0,
+  "reasoning_tokens": 0,
+  "input_bytes": 0,
+  "output_bytes": 0,
+  "account_id_hash": "sha256:...",
+  "tokenproxy_request_id": "...",
+  "upstream_request_id": "...",
+  "error_code": null
+}</code></pre>
+    </section>
+
+    <section id="metrics" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Metrics</h2>
+      <p>
+        Tokenproxy must emit structured logs and Prometheus metrics. Use low-cardinality
+        labels by default and keep request IDs in logs, not metric labels.
+      </p>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Type</th>
+            <th>Labels</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>tokenproxy_requests_total</code></td>
+            <td>counter</td>
+            <td>endpoint, transport, status_class, model_family</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_request_duration_ms</code></td>
+            <td>histogram</td>
+            <td>endpoint, transport, model_family, stream</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_upstream_connect_duration_ms</code></td>
+            <td>histogram</td>
+            <td>origin, transport</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_first_event_duration_ms</code></td>
+            <td>histogram</td>
+            <td>endpoint, transport, model_family</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_ws_connect_duration_ms</code></td>
+            <td>histogram</td>
+            <td>origin, model_family, reused</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_ws_events_total</code></td>
+            <td>counter</td>
+            <td>event_type, success</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_account_health</code></td>
+            <td>gauge</td>
+            <td>account_id_hash, state</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_cached_input_tokens_total</code></td>
+            <td>counter</td>
+            <td>model_family, endpoint</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_replay_items_total</code></td>
+            <td>counter</td>
+            <td>transport, reason</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="mt-4">
+        Codex telemetry supports this metric shape: it records WebSocket connect
+        duration, request duration, event kind, parse failures, response failures, and
+        timing events (Codex, 2026d, lines 574-790). Iggy provides a benchmark-report
+        example with latency, throughput, p50, p90, p95, p99, p999, and p9999 summaries
+        (Apache Iggy, 2026b, lines 52-105; Apache Iggy, 2026c, lines 143-165).
+      </p>
+    </section>
+
+    <section id="test-matrix" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Required Test Matrix</h2>
+      <p>
+        The implementation is not ready until these tests exist. Keep tests local
+        and deterministic by default. Credentialed upstream probes belong in ignored
+        benchmark artifacts, not in normal unit tests.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Unit tests</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Module</th>
+            <th>Cases</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>config</code></td>
+            <td>Missing token env, duplicate account ID, invalid URL, non-loopback bind without opt-in, zero timeout, invalid retry count.</td>
+          </tr>
+          <tr>
+            <td><code>http/classify</code></td>
+            <td>Supported route matrix, wrong method, WebSocket upgrade detection, JSON stream flag extraction, oversized body.</td>
+          </tr>
+          <tr>
+            <td><code>http/forward</code></td>
+            <td>Authorization replacement, Host replacement, hop-by-hop stripping, request ID insertion, rate-limit header forwarding.</td>
+          </tr>
+          <tr>
+            <td><code>routing/select</code></td>
+            <td>Model allowlist, service tier filter, WebSocket support filter, throttled cooldown, auth failure exclusion, deterministic tie-break.</td>
+          </tr>
+          <tr>
+            <td><code>http/sse</code></td>
+            <td>First-frame commit boundary, JSON error before commit, no retry after commit, client cancellation.</td>
+          </tr>
+          <tr>
+            <td><code>http/sse_repair</code></td>
+            <td>Completed response with output, completed response missing output but prior output-item events exist, malformed SSE frame, unknown event passthrough.</td>
+          </tr>
+          <tr>
+            <td><code>responses/replay</code></td>
+            <td>Incremental fast path, full replay fallback, phase preservation, unknown field preservation, tool-call output dedupe, compaction reset.</td>
+          </tr>
+          <tr>
+            <td><code>responses/websocket</code></td>
+            <td>Text-only acceptance, ping/pong, binary close, one in-flight guard, upstream disconnect, 60-minute reconnect path, <code>previous_response_not_found</code> replay.</td>
+          </tr>
+          <tr>
+            <td><code>metrics</code></td>
+            <td>Low-cardinality labels, request duration buckets, WebSocket event counters, account health gauge, no raw account ID labels.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Integration tests</h3>
+      <ol class="list-decimal pl-6">
+        <li>Run tokenproxy against a local fake OpenAI HTTP server and verify JSON pass-through byte equality except headers.</li>
+        <li>Run tokenproxy against a fake SSE server that delays the first frame, sends a 500 before frames, and fails after frames.</li>
+        <li>Run tokenproxy against a fake WebSocket server that echoes Responses events, rejects binary input, emits <code>previous_response_not_found</code>, and closes mid-response.</li>
+        <li>Run account failover with two fake accounts: first returns 503 before commit, second succeeds. Verify one downstream response and two upstream attempts.</li>
+        <li>Run stream-commit failure with two fake accounts: first emits one SSE frame then fails. Verify no second upstream attempt.</li>
+        <li>Run metrics scrape after each integration case and verify counters changed without secret values.</li>
+      </ol>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Benchmark artifact schema</h3>
+      <p>
+        Every benchmark run must write JSONL records plus one summary JSON file. The
+        schema below is the minimum field set.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "schema_version": "tokenproxy.benchmark.v1",
+  "run_id": "2026-05-27T12-00-00Z-local-macbook",
+  "timestamp_utc": "2026-05-27T12:00:00Z",
+  "environment": {
+    "os": "macOS",
+    "kernel": "...",
+    "cpu": "...",
+    "network": "wifi",
+    "region_hint": "us-west",
+    "tokenproxy_git_sha": "...",
+    "rustc": "...",
+    "curl": "..."
+  },
+  "case": {
+    "name": "codex_25_tool_loop_websocket",
+    "endpoint": "/v1/responses",
+    "transport": "websocket",
+    "model_family": "gpt-5",
+    "service_tier": "priority",
+    "reasoning_effort": "low",
+    "verbosity": "low",
+    "store": false
+  },
+  "network_observation": {
+    "resolved_ips": ["162.159.140.245", "172.66.0.243"],
+    "alpn": "h2",
+    "dns_ms": 0.0,
+    "connect_ms": 0.0,
+    "tls_ms": 0.0,
+    "ttfb_ms": 0.0
+  },
+  "summary": {
+    "samples": 30,
+    "p50_ms": 0.0,
+    "p95_ms": 0.0,
+    "p99_ms": 0.0,
+    "cached_input_tokens": 0,
+    "proxy_overhead_p50_ms": 0.0,
+    "proxy_overhead_p99_ms": 0.0
+  },
+  "decision": "keep websocket fast path enabled for codex tool loops"
+}</code></pre>
+    </section>
+
+    <section id="state" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">State and Concurrency</h2>
+      <p>
+        The hot path should be read-mostly and allocation-conscious.
+      </p>
+      <ul class="mt-4 list-disc pl-6">
+        <li>Use an immutable account routing table behind <code>ArcSwap</code>.</li>
+        <li>Use per-account health cells with atomic state and <code>Instant</code> deadlines.</li>
+        <li>Use bounded channels for WebSocket session events; on overflow, close the session rather than growing unbounded memory.</li>
+        <li>Store WebSocket replay state per session: last request JSON, last response output items, last response ID, account ID, and a compaction flag.</li>
+        <li>Expire closed session replay state immediately unless debug capture is explicitly enabled.</li>
+        <li>Never store raw Authorization in logs, metrics, or debug dumps.</li>
+      </ul>
+      <p class="mt-4">
+        LiveKit's data-channel sender is a useful reference for backpressure: it uses a
+        low-buffer threshold, ordered in-flight packets, and a tiny pending queue so old
+        data does not grow without bound (LiveKit, 2026b, lines 108-146, 177-228).
+        Iggy's shard router gives the corresponding server-side rule: never block the
+        reactor on a full internal channel; record the drop and rely on the protocol
+        recovery path where one exists (Apache Iggy, 2026d, lines 178-227).
+      </p>
+    </section>
+
+    <section id="security" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Security and Secret Handling</h2>
+      <ul class="list-disc pl-6">
+        <li>Bind to loopback by default. Non-loopback bind requires an explicit config flag.</li>
+        <li>Reject unsupported routes. Do not proxy arbitrary URLs.</li>
+        <li>Strip incoming Authorization before upstream forwarding.</li>
+        <li>Attach upstream Authorization only from selected account state.</li>
+        <li>Redact Authorization, cookies, Set-Cookie, account tokens, and refresh tokens in logs.</li>
+        <li>Expose account IDs in logs as stable hashes unless debug mode is enabled.</li>
+        <li>Use constant-time comparison for local admin tokens if an admin endpoint is added.</li>
+        <li>Disable request/response body dumps by default.</li>
+        <li>When dumps are enabled, write JSONL with redacted headers and a max body byte cap.</li>
+      </ul>
+      <p class="mt-4">
+        Codex's local proxy is strict because it is intended to protect an API key held
+        by a privileged process from unprivileged callers. It reads the key from stdin,
+        redacts sensitive dump headers, marks auth header values sensitive, and limits
+        allowed requests (Codex, 2026a, lines 35-67; Codex, 2026a, lines 96-108).
+        Tokenproxy has more account-routing behavior, but the same secret discipline.
+      </p>
+    </section>
+
+    <section id="implementation" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Implementation Plan</h2>
+      <ol class="list-decimal pl-6">
+        <li>Create a Rust workspace with one binary crate <code>tokenproxy</code> and one internal library crate if tests need it.</li>
+        <li>Implement config loading, account model, redaction helpers, and route classifier.</li>
+        <li>Implement non-streaming pass-through for <code>/v1/responses</code> and <code>/v1/chat/completions</code>.</li>
+        <li>Add pooled upstream client with per-request auth insertion and connection timeout config.</li>
+        <li>Add SSE relay with first-event header delay and Responses event metrics.</li>
+        <li>Add SSE output-item capture and completed-payload repair.</li>
+        <li>Add thin pass-through for <code>/v1/responses/compact</code> with request and response body hashing only.</li>
+        <li>Add downstream Responses WebSocket route and upstream WebSocket client.</li>
+        <li>Add WebSocket continuation state, <code>previous_response_id</code> fast path, and full transcript fallback.</li>
+        <li>Add account health transitions, backoff, and retry-before-commit behavior.</li>
+        <li>Add Prometheus metrics and JSON logs.</li>
+        <li>Add benchmark harness with direct-upstream and through-proxy modes.</li>
+        <li>Run workflow benchmarks and update this spec only when measured results require design changes.</li>
+      </ol>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Minimal module map</h3>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>src/
+  main.rs
+  config.rs
+  error.rs
+  redact.rs
+  routing/
+    mod.rs
+    account.rs
+    health.rs
+    select.rs
+  http/
+    mod.rs
+    classify.rs
+    forward.rs
+    sse.rs
+    sse_repair.rs
+  responses/
+    mod.rs
+    state.rs
+    websocket.rs
+    replay.rs
+  metrics.rs
+  bench_probe.rs</code></pre>
+      <p class="mt-4">
+        The implementation should keep JSON transforms in <code>responses/replay.rs</code> and
+        <code>http/sse_repair.rs</code>. Do not scatter <code>serde_json::Value</code> surgery across
+        route handlers.
+      </p>
+    </section>
+
+    <section id="anti-pitch" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Tradeoffs and Anti-pitch Notes</h2>
+      <ul class="list-disc pl-6">
+        <li>Rust cannot make model inference fast. It can keep proxy overhead predictable.</li>
+        <li>WebSocket mode helps long tool-call chains. It adds session state, reconnect logic, and fallback complexity.</li>
+        <li><code>previous_response_id</code> reduces client payload size, but prior input tokens in the chain are still billed (OpenAI, 2026g).</li>
+        <li>Prompt caching can reduce latency, but cache hit rate depends on exact prefixes, routing, request rate, and model cache policy.</li>
+        <li>HTTP/3 support in curl does not prove OpenAI's path is faster over HTTP/3 from a target network.</li>
+        <li>Account failover improves availability before commitment. After stream commitment, transparent failover breaks correctness.</li>
+        <li>Typed request structs improve compile-time clarity but increase churn as OpenAI schemas evolve. Stage two should proxy opaque JSON and parse fields needed for routing.</li>
+        <li>Pingora, Monoio, quiche, and s2n-quic are valuable references. Their code size and domain scope exceed stage-two needs.</li>
+      </ul>
+    </section>
+
+    <section id="mapping" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Measured Results to Implementation Decisions</h2>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Evidence</th>
+            <th>Decision</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>OpenAI WebSocket mode keeps one previous-response state in connection-local memory and supports incremental input with <code>previous_response_id</code>.</td>
+            <td>Implement per-session upstream WebSocket with one in-flight response and continuation state.</td>
+          </tr>
+          <tr>
+            <td>OpenAI documents <code>previous_response_not_found</code> and 60-minute connection limit.</td>
+            <td>Implement reconnect and full-context fallback; expose terminal error when replay state is incomplete.</td>
+          </tr>
+          <tr>
+            <td>CLIProxyAPI repairs missing completed Responses output from output-item events.</td>
+            <td>Add <code>sse_repair</code> module and output-item replay tests.</td>
+          </tr>
+          <tr>
+            <td>Codex proxy disables default stream timeout.</td>
+            <td>Do not use global read timeout for upstream streaming requests.</td>
+          </tr>
+          <tr>
+            <td>Pingora pooling and failover docs define reusable peer identity and retry boundary.</td>
+            <td>Separate upstream clients by origin/TLS/proxy config; retry only before downstream commitment.</td>
+          </tr>
+          <tr>
+            <td>Monoio and Iggy show thread-per-core benefits but also runtime constraints and hot-path backpressure design.</td>
+            <td>Use Tokio first; copy bounded-channel and no-blocking-reactor rules.</td>
+          </tr>
+          <tr>
+            <td>Quiche and s2n-quic show QUIC/H3 complexity and provider/build requirements.</td>
+            <td>Keep QUIC/H3 out of stage-two code until endpoint measurements justify it.</td>
+          </tr>
+          <tr>
+            <td>OpenAI status history shows recent API, Responses, and Codex incidents with aggregate availability reporting.</td>
+            <td>Metrics must label endpoint, model family, transport, account, and status class; operators cannot rely on aggregate status alone.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="source-excerpts" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Local Source Excerpts</h2>
+      <p>
+        These short excerpts are the direct local source facts behind the most
+        important stage-two implementation choices.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Streaming client timeout</h3>
+      <p>
+        Codex's local Responses proxy disables Reqwest's default timeout for
+        long-lived streams (Codex, 2026b, lines 102-107):
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>Client::builder()
+  .timeout(None::&lt;Duration&gt;)
+  .build()</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Per-request auth insertion</h3>
+      <p>
+        The same proxy strips inbound Authorization and Host, then inserts sensitive
+        upstream Authorization and the selected Host (Codex, 2026b, lines 196-228):
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>if lower.as_str() == "authorization" || lower.as_str() == "host" {
+  continue;
+}
+auth_header_value.set_sensitive(true);
+headers.insert(AUTHORIZATION, auth_header_value);
+headers.insert(HOST, config.host_header.clone());</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">WebSocket request shape</h3>
+      <p>
+        CLIProxyAPI's Codex WebSocket executor documents the stage-two rule that
+        follow-up turns remain <code>response.create</code> and continue with
+        <code>previous_response_id</code> plus incremental input (CLIProxyAPI, 2026h,
+        lines 678-681):
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>// every request is `response.create` ...
+// `previous_response_id` + incremental `input`, not `response.append`.</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">WebSocket capability routing</h3>
+      <p>
+        CLIProxyAPI routes Codex traffic to WebSocket only when the downstream
+        transport is WebSocket and the selected auth enables WebSockets
+        (CLIProxyAPI, 2026h, lines 1552-1560; 1589-1602):
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>if DownstreamWebsocket(ctx) &amp;&amp; codexWebsocketsEnabled(auth) {
+  return e.wsExec.ExecuteStream(ctx, auth, req, opts)
+}
+return e.httpExec.ExecuteStream(ctx, auth, req, opts)</code></pre>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Bounded WebSocket backpressure</h3>
+      <p>
+        Codex's app-server WebSocket transport gives downstream WebSocket clients a
+        bounded outbound queue and closes when the control queue is full (Codex,
+        2026e, lines 46-49; 362-369):
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>const WEBSOCKET_OUTBOUND_CHANNEL_CAPACITY: usize = 32 * 1024;
+...
+warn!("websocket control queue full while replying to ping; closing connection");</code></pre>
+    </section>
+
+    <section id="references" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">References</h2>
+      <p class="mt-3">
+        Apache Iggy. (2026a). <em>README.md</em>. Local submodule
+        <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
+      </p>
+      <p class="mt-3">
+        Apache Iggy. (2026b). <em>core/bench/src/analytics/metrics/group.rs</em>.
+        Local submodule <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
+      </p>
+      <p class="mt-3">
+        Apache Iggy. (2026c). <em>core/bench/src/analytics/record.rs</em> and benchmark analytics.
+        Local submodule <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
+      </p>
+      <p class="mt-3">
+        Apache Iggy. (2026d). <em>core/shard/src/router.rs</em>. Local submodule
+        <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
+      </p>
+      <p class="mt-3">
+        Astral. (2026). <em>BENCHMARKS.md</em>. Local submodule <code>uv</code>,
+        commit <code>d190665157a18a288a1a13591793002f1ae767aa</code>.
+      </p>
+      <p class="mt-3">
+        AWS. (2026a). <em>s2n-quic README.md</em>. Local submodule <code>s2n-quic</code>,
+        commit <code>993102359e8bf4f633808a7977a34acbf0f64433</code>.
+      </p>
+      <p class="mt-3">
+        AWS. (2026b). <em>s2n-quic Continuous Integration</em> and TLS offloading example.
+        Local submodule <code>s2n-quic</code>, commit <code>993102359e8bf4f633808a7977a34acbf0f64433</code>.
+      </p>
+      <p class="mt-3">
+        BurntSushi. (2026a). <em>ripgrep README.md</em>. Local submodule
+        <code>ripgrep</code>, commit <code>4857d6fa67db69a95cd4b6f2adda5d807d4d0119</code>.
+      </p>
+      <p class="mt-3">
+        BurntSushi. (2026b). <em>ripgrep README.md performance discussion</em>. Local submodule
+        <code>ripgrep</code>, commit <code>4857d6fa67db69a95cd4b6f2adda5d807d4d0119</code>.
+      </p>
+      <p class="mt-3">
+        Bytedance. (2026a). <em>Monoio README.md</em>. Local submodule <code>monoio</code>,
+        commit <code>2c05c4a257d7a145eb8befb7ae23d8a09b20c6de</code>.
+      </p>
+      <p class="mt-3">
+        Bytedance. (2026b). <em>Monoio configuration and benchmark docs</em>. Local submodule
+        <code>monoio</code>, commit <code>2c05c4a257d7a145eb8befb7ae23d8a09b20c6de</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026a). <em>sdk/api/handlers/openai/openai_handlers.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026b). <em>sdk/api/handlers/openai/openai_responses_handlers.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026c). <em>Responses SSE repair source</em>. Local submodule
+        <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026d). <em>sdk/api/handlers/openai/openai_responses_websocket.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026e). <em>Responses WebSocket auth and execution source</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026f). <em>Responses WebSocket normalization source</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026g). <em>internal/runtime/executor/codex_executor_cache_test.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026h). <em>internal/runtime/executor/codex_websockets_executor.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        Cloudflare. (2026a). <em>Pingora quick start</em>. Local submodule <code>pingora</code>,
+        commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
+      </p>
+      <p class="mt-3">
+        Cloudflare. (2026b). <em>Pingora connection pooling and reuse</em>. Local submodule
+        <code>pingora</code>, commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
+      </p>
+      <p class="mt-3">
+        Cloudflare. (2026c). <em>Pingora handling failures and failover</em>. Local submodule
+        <code>pingora</code>, commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
+      </p>
+      <p class="mt-3">
+        Cloudflare. (2026d). <em>quiche README.md</em>. Local submodule <code>quiche</code>,
+        commit <code>1acc5babb9ed8512457681be4361bcee927583ee</code>.
+      </p>
+      <p class="mt-3">
+        Cloudflare. (2026e). <em>quiche HTTP/3 module source</em>. Local submodule
+        <code>quiche</code>, commit <code>1acc5babb9ed8512457681be4361bcee927583ee</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026a). <em>codex-rs/responses-api-proxy/README.md</em>. Local submodule
+        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026b). <em>codex-rs/responses-api-proxy/src/lib.rs</em>. Local submodule
+        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026c). <em>codex-rs/codex-api/src/common.rs</em>. Local submodule
+        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026d). <em>codex-rs/otel/src/events/session_telemetry.rs</em>. Local submodule
+        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026e). <em>codex-rs/app-server-transport/src/transport/websocket.rs</em>.
+        Local submodule <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        LiveKit. (2026a). <em>rust-sdks README.md and runtime source</em>. Local submodule
+        <code>rust-sdks</code>, commit <code>1848e77a32ca2f302a58323a7a21858165d81aad</code>.
+      </p>
+      <p class="mt-3">
+        LiveKit. (2026b). <em>livekit/src/rtc_engine/dc_sender.rs</em>. Local submodule
+        <code>rust-sdks</code>, commit <code>1848e77a32ca2f302a58323a7a21858165d81aad</code>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026a). <em>OpenAI API endpoint list and Responses/Chat Completions references</em>.
+        Retrieved through the official OpenAI developer documentation MCP from
+        <a href="https://api.openai.com/v1/responses">https://api.openai.com/v1/responses</a>
+        and <a href="https://api.openai.com/v1/chat/completions">https://api.openai.com/v1/chat/completions</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026b). <em>Responses API WebSocket mode</em>.
+        <a href="https://developers.openai.com/api/docs/guides/websocket-mode">https://developers.openai.com/api/docs/guides/websocket-mode</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026c). <em>Using GPT-5.5: reasoning models, prompt caching, tool preambles, phase, compaction</em>.
+        <a href="https://developers.openai.com/api/docs/guides/latest-model#using-reasoning-models">https://developers.openai.com/api/docs/guides/latest-model#using-reasoning-models</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026d). <em>Prompt caching</em>.
+        <a href="https://developers.openai.com/api/docs/guides/prompt-caching">https://developers.openai.com/api/docs/guides/prompt-caching</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026e). <em>Streaming API responses</em>.
+        <a href="https://developers.openai.com/api/docs/guides/streaming-responses">https://developers.openai.com/api/docs/guides/streaming-responses</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026f). <em>Error codes</em>.
+        <a href="https://developers.openai.com/api/docs/guides/error-codes#websocket-mode-errors">https://developers.openai.com/api/docs/guides/error-codes#websocket-mode-errors</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026g). <em>Conversation state: previous_response_id in WebSocket mode</em>.
+        <a href="https://developers.openai.com/api/docs/guides/conversation-state#previous_response_id-in-websocket-mode">https://developers.openai.com/api/docs/guides/conversation-state#previous_response_id-in-websocket-mode</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026h). <em>Compaction</em>.
+        <a href="https://developers.openai.com/api/docs/guides/compaction">https://developers.openai.com/api/docs/guides/compaction</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI. (2026i). <em>API deployment checklist: Use WebSocket mode</em>.
+        <a href="https://developers.openai.com/api/docs/guides/deployment-checklist#use-websocket-mode">https://developers.openai.com/api/docs/guides/deployment-checklist#use-websocket-mode</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI Status. (2026). <em>Status dashboard and history</em>.
+        <a href="https://status.openai.com/">https://status.openai.com/</a> and
+        <a href="https://status.openai.com/history">https://status.openai.com/history</a>.
+      </p>
+    </section>
+
+    <section id="performance-review-attestation" class="mb-12 border-t border-black pt-8">
+      <h2 class="mb-4 text-2xl font-bold">Performance-review Attestation</h2>
+      <p>
+        I reviewed every initialized top-level repository submodule present in this
+        checkout and recorded the design choice each reference supports. Two nested
+        submodules under <code>rust-sdks</code> were not initialized in the checkout and could
+        not be reviewed as source.
+      </p>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Submodule</th>
+            <th>Reviewed references</th>
+            <th>Supported implementation choices</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>CLIProxyAPI</code><br><code>4b681031bff2acd922c51c34786f20b505b62fd4</code></td>
+            <td>
+              Chat handler, streaming first-chunk logic, Responses SSE repair, Responses
+              WebSocket normalization, account capability checks, prompt-cache-key test.
+            </td>
+            <td>
+              Implement strict route support, delayed SSE header commit, output item repair,
+              WebSocket transcript fallback, auth capability routing, and stable cache-key
+              derivation.
+            </td>
+          </tr>
+          <tr>
+            <td><code>codex</code><br><code>0d37db4b2b10b56991566b3512b0677754733835</code></td>
+            <td>
+              Responses API proxy README and source, WebSocket request structs, telemetry
+              events, feature flags, app-server WebSocket transport.
+            </td>
+            <td>
+              Keep the proxy narrow, protect upstream auth, disable stream read timeout,
+              model WebSocket messages as <code>response.create</code>, and emit WebSocket
+              connect/request/event timing metrics.
+            </td>
+          </tr>
+          <tr>
+            <td><code>iggy</code><br><code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code></td>
+            <td>
+              README architecture and benchmark section, benchmark record and report
+              analytics, shard router no-blocking drop rules.
+            </td>
+            <td>
+              Benchmark real workflows with p99+ tails, include throughput and latency time
+              series, use bounded hot-path channels, and record drops rather than blocking
+              reactor tasks.
+            </td>
+          </tr>
+          <tr>
+            <td><code>monoio</code><br><code>2c05c4a257d7a145eb8befb7ae23d8a09b20c6de</code></td>
+            <td>
+              README design goal, configuration guide, benchmark guide, comparison guide,
+              runtime builder.
+            </td>
+            <td>
+              Do not choose io_uring by default. Treat thread-per-core and zero-copy as
+              benchmark-backed options with platform and compatibility cost.
+            </td>
+          </tr>
+          <tr>
+            <td><code>pingora</code><br><code>c0845a8693b0792a6ccd0626e8475990f7269af2</code></td>
+            <td>
+              Quick start load balancer, pooling guide, failover guide, TCP/HTTP health
+              checks.
+            </td>
+            <td>
+              Copy pooling identity rules, health-threshold ideas, and retry-before-commit
+              boundaries. Do not adopt the framework until Hyper/Axum overhead fails targets.
+            </td>
+          </tr>
+          <tr>
+            <td><code>quiche</code><br><code>1acc5babb9ed8512457681be4361bcee927583ee</code></td>
+            <td>
+              README QUIC/H3 API, HTTP/3 module, app client event-loop setup.
+            </td>
+            <td>
+              Keep custom H3 out of stage two. Measure HTTP/3 externally before accepting
+              QUIC/H3 code complexity.
+            </td>
+          </tr>
+          <tr>
+            <td><code>ripgrep</code><br><code>4857d6fa67db69a95cd4b6f2adda5d807d4d0119</code></td>
+            <td>
+              README benchmark caveats, performance cliffs, reasons not to use ripgrep,
+              and implementation summary.
+            </td>
+            <td>
+              Require multiple workflow benchmarks, label cliffs and output-dominated cases,
+              and include anti-pitch notes.
+            </td>
+          </tr>
+          <tr>
+            <td><code>rust-sdks</code><br><code>1848e77a32ca2f302a58323a7a21858165d81aad</code></td>
+            <td>
+              README, runtime selection source, data-channel backpressure sender.
+            </td>
+            <td>
+              Use Tokio for ecosystem fit and model WebSocket/SSE backpressure with bounded
+              queues, ordered in-flight data, and explicit drain thresholds.
+            </td>
+          </tr>
+          <tr>
+            <td><code>s2n-quic</code><br><code>993102359e8bf4f633808a7977a34acbf0f64433</code></td>
+            <td>
+              README, CI guide, Tokio IO provider, client provider builder, TLS offloading
+              example.
+            </td>
+            <td>
+              Treat QUIC as a specialized transport with provider, TLS, test, simulation,
+              and platform requirements. Use it only after endpoint measurements justify it.
+            </td>
+          </tr>
+          <tr>
+            <td><code>uv</code><br><code>d190665157a18a288a1a13591793002f1ae767aa</code></td>
+            <td>
+              Benchmark methodology and reproduction notes.
+            </td>
+            <td>
+              Separate warm/cold cases, record environment, use repeatable scripts, and
+              document network variance.
+            </td>
+          </tr>
+          <tr>
+            <td><code>rust-sdks/livekit-protocol/protocol</code><br><code>a0e714995ccbf0a2f4c8df29630e4910c8c9a09a</code></td>
+            <td>Not reviewed: recursive submodule is not initialized in this checkout.</td>
+            <td>No stage-two implementation choice depends on this nested submodule.</td>
+          </tr>
+          <tr>
+            <td><code>rust-sdks/yuv-sys/libyuv</code><br><code>917276084a49be726c90292ff0a6b0a3d571a6af</code></td>
+            <td>Not reviewed: recursive submodule is not initialized in this checkout.</td>
+            <td>No stage-two implementation choice depends on this nested submodule.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="mt-4">
+        Attestation result: stage two should implement a minimal Tokio-based proxy,
+        not a general reverse proxy or custom QUIC transport. The selected design is
+        supported by OpenAI's current Responses/WebSocket documentation, CLIProxyAPI's
+        existing OpenAI-compatible proxy behavior, Codex's strict local Responses proxy
+        and telemetry, Pingora's pooling and failure rules, Iggy's benchmark and
+        backpressure patterns, uv and ripgrep benchmark discipline, LiveKit's runtime
+        and backpressure examples, and the QUIC submodules' complexity evidence.
+      </p>
+    </section>
+  </main>
+</body>
+</html>
