@@ -1,0 +1,10 @@
+## main...upstream/main [ahead 4]
+ M very_detailed_tokenproxy_spec.html
+?? stage_one_evidence/2026-05-27T035544-0700-openai-transport-probes/
+?? stage_one_evidence/2026-05-27T035640-0700-network-probes/
+?? stage_one_evidence/2026-05-27T035655-0700-network-probes/
+?? stage_one_evidence/2026-05-27T035805-0700-endpoint-inventory/
+?? stage_one_evidence/2026-05-27T035933-0700-network-probes/
+?? stage_one_evidence/2026-05-27T040928-0700-globalping-openai/
+?? stage_one_evidence/tokenproxy-deep-transport-research.json
+?? stage_one_evidence/tokenproxy-deep-transport-research.md

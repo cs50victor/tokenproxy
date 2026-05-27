@@ -1,0 +1,21 @@
+timestamp=2026-05-27T10:55:44Z
+cwd=/Users/vic8or/dev/tokenproxy
+Darwin mac-5.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64 arm Darwin
+ProductName:		macOS
+ProductVersion:		26.5
+BuildVersion:		25F71
+curl 8.19.0 (aarch64-apple-darwin25.3.0) libcurl/8.19.0 OpenSSL/3.6.1 zlib/1.3.2 brotli/1.1.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 libssh2/1.11.1 nghttp2/1.67.1 ngtcp2/1.17.0 nghttp3/1.12.0 mit-krb5/1.22.1
+Release-Date: 2026-03-11
+Protocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp scp sftp smb smbs smtp smtps telnet tftp
+Features: alt-svc AsynchDNS brotli GSS-API HSTS HTTP2 HTTP3 HTTPS-proxy IDN IPv6 Kerberos Largefile libz NTLM PSL SPNEGO SSL threadsafe TLS-SRP UnixSockets zstd
+OpenSSL 3.6.2 7 Apr 2026 (Library: OpenSSL 3.6.2 7 Apr 2026)
+built on: Tue Apr  7 12:17:57 2026 UTC
+platform: darwin64-arm64-cc
+options:  bn(64,64)
+compiler: clang -fPIC -arch arm64 -O3 -Wall -DL_ENDIAN -DOPENSSL_PIC -D_REENTRANT -DOPENSSL_BUILDING_OPENSSL -DNDEBUG
+OPENSSLDIR: "/opt/homebrew/etc/openssl@3"
+ENGINESDIR: "/opt/homebrew/Cellar/openssl@3/3.6.2/lib/engines-3"
+MODULESDIR: "/opt/homebrew/Cellar/openssl@3/3.6.2/lib/ossl-modules"
+Seeding source: os-specific
+CPUINFO: OPENSSL_armcap=0x987d
+DiG 9.10.6

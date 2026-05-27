@@ -1,0 +1,5 @@
+continent	country	city	network	status	status_code	resolved_address	error
+NA	US	San Francisco	Sonic Telecom	failed			2090108E7F000000:error:0A000410:SSL routines:ssl3_read_bytes:ssl/tls alert handshake failure:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:918:SSL alert number 40
+EU	GB	London	Oracle	failed			C0ACC4F100770000:error:0A000410:SSL routines:ssl3_read_bytes:ssl/tls alert handshake failure:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:918:SSL alert number 40
+AS	JP	Tokyo	xTom	failed			C00C4C554C7F0000:error:0A000410:SSL routines:ssl3_read_bytes:ssl/tls alert handshake failure:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:918:SSL alert number 40
+SA	BR	Sao Paulo	Oracle	failed			10D095D2F3EF0000:error:0A000410:SSL routines:ssl3_read_bytes:ssl/tls alert handshake failure:../deps/openssl/openssl/ssl/record/rec_layer_s3.c:918:SSL alert number 40

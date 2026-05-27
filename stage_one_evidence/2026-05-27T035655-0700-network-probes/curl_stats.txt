@@ -1,0 +1,3 @@
+http1.1 samples=5 status=401 errors=0 remote_ip=162.159.140.245 total_seconds p50=0.105142 p95=0.141364 p99=0.141364 max=0.141364
+http2 samples=5 status=401 errors=0 remote_ip=162.159.140.245 total_seconds p50=0.104206 p95=0.181074 p99=0.181074 max=0.181074
+http3 samples=5 status=401 errors=0 remote_ip=162.159.140.245 total_seconds p50=0.093897 p95=0.134196 p99=0.134196 max=0.134196

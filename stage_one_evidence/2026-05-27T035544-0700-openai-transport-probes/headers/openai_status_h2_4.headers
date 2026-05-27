@@ -1,0 +1,19 @@
+HTTP/2 200
+access-control-allow-headers: X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version
+access-control-allow-methods: GET,OPTIONS,PATCH,DELETE,POST,PUT
+access-control-allow-origin: *
+age: 0
+cache-control: public, max-age=0, must-revalidate
+content-security-policy: connect-src vitals.vercel-insights.com status-page-o64y53fp3-incident-io-team.vercel.app https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com https://*.google.com https://*.google.co.uk https://*.g.doubleclick.net https://global.localizecdn.com https://app.localizejs.com https://*.unbabel.com https://*.bablic.com 'self'; script-src 'unsafe-inline' https: 'self'; style-src 'unsafe-inline' 'self'; report-uri https://o494704.ingest.sentry.io/api/4504554480795648/security?security_key=5d578c0eb4bd4811adf4f2176db9a1c8; frame-ancestors 'self'; img-src data: https://*.google-analytics.com https://*.googletagmanager.com https://*.analytics.google.com https://*.g.doubleclick.net https://*.google.com https://*.google.co.uk https://global.localizecdn.com https://assets.localizecdn.com https://uploads.bablic.com 'self'; report-to https://o494704.ingest.sentry.io/api/4504554480795648/security?security_key=5d578c0eb4bd4811adf4f2176db9a1c8; base-uri 'none'; child-src 'none'; default-src 'self'; font-src 'self'; form-action 'self'; frame-src 'none'; manifest-src 'self'; media-src 'self'; object-src 'none'; worker-src 'self'
+content-type: application/json
+date: Wed, 27 May 2026 10:56:24 GMT
+permissions-policy: clipboard-write=(self), camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()
+referrer-policy: no-referrer
+server: Vercel
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-content-type-options: nosniff
+x-dns-prefetch-control: on
+x-frame-options: SAMEORIGIN
+x-matched-path: /[slug]/api/v2/[endpoint]
+x-vercel-cache: MISS
+x-vercel-id: sfo1::cdg1::qw5gh-1779879384444-dbbbd481f4b0

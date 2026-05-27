@@ -1,0 +1,18 @@
+target	continent	country	city	network	status	answers	total_ms
+api.openai.com	NA	US	San Francisco	Sonic Telecom	finished	162.159.140.245,172.66.0.243	7
+api.openai.com	NA	US	New York	M247	finished	162.159.140.245,172.66.0.243	4
+api.openai.com	EU	GB	London	OVH	finished	172.66.0.243,162.159.140.245	36
+api.openai.com	EU	DE	Frankfurt	Oracle	finished	162.159.140.245,172.66.0.243	6
+api.openai.com	AS	JP	Tokyo	xTom	finished	172.66.0.243,162.159.140.245	3
+api.openai.com	AS	SG	Singapore	LeaseWeb	finished	172.66.0.243,162.159.140.245	12
+api.openai.com	OC	AU	Sydney	Oracle	finished	162.159.140.245,172.66.0.243	6
+api.openai.com	SA	BR	Sao Paulo	Oracle	finished	162.159.140.245,172.66.0.243	4
+target	continent	country	city	network	status	answers	total_ms
+chatgpt.com	NA	US	San Francisco	Comcast Cable Communications	finished	172.64.155.209,104.18.32.47	36
+chatgpt.com	NA	US	New York	M247	finished	172.64.155.209,104.18.32.47	51
+chatgpt.com	EU	GB	London	OVH	finished	172.64.155.209,104.18.32.47	14
+chatgpt.com	EU	DE	Frankfurt	Oracle	finished	104.18.32.47,172.64.155.209	4
+chatgpt.com	AS	JP	Tokyo	xTom	finished	172.64.155.209,104.18.32.47	8
+chatgpt.com	AS	SG	Singapore	LeaseWeb	finished	104.18.32.47,172.64.155.209	16
+chatgpt.com	OC	AU	Sydney	Oracle	finished	172.64.155.209,104.18.32.47	1
+chatgpt.com	SA	BR	Sao Paulo	Oracle	finished	104.18.32.47,172.64.155.209	1

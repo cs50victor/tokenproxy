@@ -1,0 +1,17 @@
+HTTP/2 401
+date: Wed, 27 May 2026 10:58:07 GMT
+content-type: application/json
+content-length: 25
+server: cloudflare
+x-oai-request-id: 02c96377-301b-46e7-b7b0-f96e962f4bc6
+x-openai-proxy-wasm: v0.1
+cf-cache-status: DYNAMIC
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-content-type-options: nosniff
+set-cookie: __cf_bm=Ayrd6E6IhwWw91gCiPuj2XkQWYoDCsSmWQIZp6JZCIY-1779879487.3948276-1.0.1.1-BZoLg9pB4ojKQCSgDvH0_fE9ieMsfcF0YfPVw3HsO2JPplqnchLtvwThDB3Mh03O2sSmA4xx3QH7kaIuD1RLfnX66OaAWpxwF82Fq_W58KU2pET5dM9dFVj86.hR_ZNO; HttpOnly; SameSite=None; Secure; Path=/; Domain=chatgpt.com; Expires=Wed, 27 May 2026 11:28:07 GMT
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=DYwFgzAO9XqULuQRRluoqtGMQSSKE8DBR63vIv1AkKXoy7coyamxyEWzfcq%2FjLVrkOupRTYv0oUPQMSTD1QQEAod%2B15vrX5RtPRoVCXeB7SjUUcuwCijVtQ7R8XC"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.01,"max_age":604800}
+referrer-policy: strict-origin-when-cross-origin
+cross-origin-opener-policy: same-origin-allow-popups
+cf-ray: a02480ac3c797a73-SJC
+alt-svc: h3=":443"; ma=86400

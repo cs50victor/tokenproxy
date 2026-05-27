@@ -1,0 +1,3 @@
+http1.1 samples=5 status=401 errors=0 remote_ip=172.66.0.243 p50=0.099681 p95=0.192624 p99=0.192624 max=0.192624
+http2 samples=5 status=401 errors=0 remote_ip=172.66.0.243 p50=0.115543 p95=0.231397 p99=0.231397 max=0.231397
+http3 samples=5 status=401 errors=0 remote_ip=172.66.0.243 p50=0.106067 p95=0.146693 p99=0.146693 max=0.146693

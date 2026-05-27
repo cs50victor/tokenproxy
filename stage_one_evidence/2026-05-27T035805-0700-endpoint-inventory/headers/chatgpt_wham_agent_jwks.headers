@@ -1,0 +1,19 @@
+HTTP/2 200
+date: Wed, 27 May 2026 10:58:07 GMT
+content-type: application/json
+content-length: 535
+server: cloudflare
+cache-control: public, max-age=300
+x-oai-request-id: e4a012a1-1c0f-4b23-b70e-088da5878b6f
+x-openai-proxy-wasm: v0.1
+cf-cache-status: DYNAMIC
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-content-type-options: nosniff
+nel: {"report_to":"cf-nel","success_fraction":0.01,"max_age":604800}
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=AlrBqIsmjFjQEhtriLemOSgUaRXwo3SjUYoeUFeV7my7NZcDY7iewi27KXu7wV1ssBSTaNgr721u6ry2Wb9epRoM00L6xM9qhrt%2FBh55a5aRPOYzQVmBCzMhzYYa"}]}
+set-cookie: __cf_bm=knVdeUKmm8ItxUuBfw57cB3eFe4haV6x6lurK3E2VR4-1779879487.715508-1.0.1.1-ixuYfo4Q1UaG7rcceKHxCv5c2H082l37sNvPhH2A_kHhyqAqFJ1nQesIUX4VWMt6TIgKIV6t9PZii5Gk4oTA8k3q636czNfiaZ1Wc8wuKSPELZ6d0p5.XOdf.5rGG9Vv; HttpOnly; SameSite=None; Secure; Path=/; Domain=chatgpt.com; Expires=Wed, 27 May 2026 11:28:07 GMT
+set-cookie: __cflb=0pg1SYKGnsmYmStregrZy4go4LoJvA228rvATG3D; HttpOnly; SameSite=None; Secure; Path=/; Expires=Wed, 27 May 2026 11:58:07 GMT
+referrer-policy: strict-origin-when-cross-origin
+cross-origin-opener-policy: same-origin-allow-popups
+cf-ray: a02480ae3a2080fd-SJC
+alt-svc: h3=":443"; ma=86400

@@ -1,0 +1,20 @@
+HTTP/1.1 200 OK
+Access-Control-Allow-Headers: X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version
+Access-Control-Allow-Methods: GET,OPTIONS,PATCH,DELETE,POST,PUT
+Access-Control-Allow-Origin: *
+Age: 0
+Cache-Control: public, max-age=0, must-revalidate
+Content-Security-Policy: connect-src vitals.vercel-insights.com status-page-o64y53fp3-incident-io-team.vercel.app https://*.google-analytics.com https://*.analytics.google.com https://*.googletagmanager.com https://*.google.com https://*.google.co.uk https://*.g.doubleclick.net https://global.localizecdn.com https://app.localizejs.com https://*.unbabel.com https://*.bablic.com 'self'; script-src 'unsafe-inline' https: 'self'; style-src 'unsafe-inline' 'self'; report-uri https://o494704.ingest.sentry.io/api/4504554480795648/security?security_key=5d578c0eb4bd4811adf4f2176db9a1c8; frame-ancestors 'self'; img-src data: https://*.google-analytics.com https://*.googletagmanager.com https://*.analytics.google.com https://*.g.doubleclick.net https://*.google.com https://*.google.co.uk https://global.localizecdn.com https://assets.localizecdn.com https://uploads.bablic.com 'self'; report-to https://o494704.ingest.sentry.io/api/4504554480795648/security?security_key=5d578c0eb4bd4811adf4f2176db9a1c8; base-uri 'none'; child-src 'none'; default-src 'self'; font-src 'self'; form-action 'self'; frame-src 'none'; manifest-src 'self'; media-src 'self'; object-src 'none'; worker-src 'self'
+Content-Type: application/json
+Date: Wed, 27 May 2026 10:56:22 GMT
+Permissions-Policy: clipboard-write=(self), camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=()
+Referrer-Policy: no-referrer
+Server: Vercel
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+X-Content-Type-Options: nosniff
+X-Dns-Prefetch-Control: on
+X-Frame-Options: SAMEORIGIN
+X-Matched-Path: /[slug]/api/v2/[endpoint]
+X-Vercel-Cache: MISS
+X-Vercel-Id: sfo1::cdg1::b42pj-1779879382507-72bb599e843e
+Transfer-Encoding: chunked

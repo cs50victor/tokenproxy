@@ -1,0 +1,2237 @@
+{
+  "run_id": "trun_88393d2a965b464f95e5c7ae6f1bcd12",
+  "interaction_id": "trun_88393d2a965b464f95e5c7ae6f1bcd12",
+  "result_url": "https://platform.parallel.ai/play/deep-research/trun_88393d2a965b464f95e5c7ae6f1bcd12",
+  "status": "completed",
+  "output": {
+    "basis": [
+      {
+        "field": "unreliability_of_direct_ip_connections",
+        "reasoning": "The core claim is that direct-IP connections to OpenAI services are unreliable or not viable, primarily due to TLS/SNI issues and provider policies that block direct IP access. The strongest supporting evidence comes from explicit statements that direct IP access is blocked or discouraged, with mentions of errors like Direct IP Access Not Allowed, which aligns with the described failure mode when using raw IPs without a hostname. Further, explanations of SNI show that without the hostname in the TLS handshake, the correct certificate cannot be presented by multi-tenant CDN services like Cloudflare, leading to handshake failures. Additional Cloudflare guidance indicates using a gateway URL instead of the raw API host, reinforcing that hostname-based access through a gateway is the intended pattern rather than direct IPs. Supporting context about Cloudflare acting as a reverse proxy that hides origin IPs also underscores why direct-IP connections are not appropriate for reliable access. The presence of documentation suggesting transition to gateway-based endpoints for OpenAI services strengthens the conclusion that direct-IP strategies are unsuitable for dependable operation. Finally, supplementary notes about SNI certificate matching reinforce the technical basis for why direct IP connections fail in TLS negotiations. Together, these excerpts substantiate the unreliability and impracticality of direct-IP connections for accessing OpenAI services.",
+        "citations": [
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://www.cloudflare.com/learning/ssl/what-is-sni/",
+            "excerpts": [
+              "SNI, or Server Name Indication, is an addition to the TLS encryption protocol that enables a client device to specify the domain name it is trying to reach in the first step of the TLS handshake, preventing common name mismatch errors."
+            ],
+            "title": "What is SNI? How TLS server name indication works - Cloudflare"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Chat completions endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completion",
+              "esponses endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/responses"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "openai_endpoint_analysis",
+        "reasoning": "The field value describes a shift in OpenAI\u2019s API landscape from older endpoints to newer, more capable ones, noting Codex discontinuation in March 2023, the v1/chat/completions endpoint\u2019s role as legacy, and the recommendation to use v1/responses for new projects with stateful interactions and built-in tools. It also highlights streaming via SSE and the realtime WebSocket API for low-latency bi-directional communication, plus server-to-server interfaces for direct access. The excerpts directly contain: \u2013 confirmation that Codex models were discontinued and Codex-related features are legacy. \u2013 documentation about the chat completions endpoint and its current (backward-compatible) status. \u2013 guidance comparing Chat Completions with the Responses platform and describing the Responses API\u2019s capabilities, including streaming via SSE. \u2013 details about Realtime API with WebSocket for server-to-server communication and the streaming/events model. \u2013 references to the official documentation for OpenAI API platforms and endpoints, including the realtime WebSocket and Responses endpoints. Taken together, these excerpts support a narrative of endpoint evolution, deprecation of older Codex features, the recommended modern alternative (Responses) for new projects, and the availability of realtime/low-latency channels (Realtime WebSocket) for streaming use cases. Specific connections include: the existence and role of the Chat Completions and Responses resources; the deprecation of Codex and its relevance to historical capabilities; and the availability of a dedicated Realtime WebSocket API for low-latency server-to-server interactions, as well as SSE-based streaming in the Responses pathway.",
+        "citations": [
+          {
+            "url": "http://developers.openai.com/api/docs",
+            "excerpts": [
+              "Explore guides, API docs, and examples for the OpenAI API."
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create",
+            "excerpts": [
+              "Starting a new project? We recommend trying Responses to take advantage of the latest OpenAI platform features. Compare Chat Completions with Responses.",
+              "POST /chat/completions",
+              "**Starting a new project?** We recommend trying [Responses](https://platform.openai.com/docs/api-reference/responses) to take advantage of the latest OpenAI platform features. Compare [Chat Completions with Responses](https://platform.openai.com/docs/guides/responses-vs-chat-completions?api-mode=responses) ."
+            ],
+            "title": "Create chat completion | OpenAI API Reference"
+          },
+          {
+            "url": "https://deepwiki.com/openai/completions-responses-migration-pack/6-responses-api-reference",
+            "excerpts": [
+              "This document provides comprehensive reference documentation for the OpenAI /v1/responses API endpoint, covering all parameters, content types, streaming capabilities, tools integration, and structured output formats."
+            ],
+            "title": "Responses API Reference | openai/completions-responses ..."
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551",
+            "excerpts": [
+              "Codex models, which were accessible through the completions endpoint, have been discontinued since March 2023 on the OpenAI API."
+            ],
+            "title": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551"
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs",
+            "excerpts": [
+              "Docs Guides and concepts for the OpenAI API API reference Endpoints, parameters, and responses"
+            ],
+            "title": "OpenAI API Platform Documentation"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "utility_of_server_client_modes",
+        "reasoning": "The most directly relevant material describes reverse proxy implementations and how a proxy can sit as a server-side component to route, authenticate, log, and rate-limit traffic. This supports the field value by providing concrete patterns for a listening reverse proxy that sits at the network egress and centralizes critical functions such as authentication, observability, and rate-limiting. For example, guidance showing a reverse proxy listening on a local address and forwarding calls demonstrates the server-mode pattern that accepts client connections and forwards to upstream services, which aligns with the proposed stage-one architecture. Additionally, general OpenAI API documentation provides context on how proxies interact with OpenAI endpoints and how API usage can be architected, which helps frame the server-mode approach within the OpenAI API ecosystem. Some excerpts discuss real-time or WebSocket-based server-to-server communications, which is relevant for understanding potential extensions or alternates to the core server-mode pattern, but these are ancillary to the primary server-mode design. Other excerpts explore gateway-style routing (e.g., Cloudflare AI Gateway) that illustrate alternate deployment topologies, reinforcing the centrality of a server-side gateway for control and observability in proxy designs. Taken together, the strongest support comes from explicit reverse-proxy patterns and server-side deployment discussions, while gateway and real-time/websocket discussions provide contextual breadth rather than direct endorsement of the server-only mode as the default for stage-one. The emphasis remains on centralizing functionality in a server-mode proxy for a small, early-stage design, with client-side sidecars identified as a potential future enhancement if needs arise.",
+        "citations": [
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          },
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "http://developers.openai.com/api/docs",
+            "excerpts": [
+              "Explore guides, API docs, and examples for the OpenAI API."
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create",
+            "excerpts": [
+              "Starting a new project? We recommend trying Responses to take advantage of the latest OpenAI platform features. Compare Chat Completions with Responses."
+            ],
+            "title": "Create chat completion | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application."
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Base URL**\n```\n\nhttps://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai\n\n\n`",
+              "Chat completions endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completion",
+              "esponses endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/responses"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "anycast_for_reliability_and_latency",
+        "reasoning": "The field value describes a Cloudflare Anycast-based reliability and latency design, with the provider being Cloudflare and the mechanism of Anycast routing advertising a single IP across multiple data centers so requests are served by the nearest healthy location. Direct evidence in the excerpts confirms that Cloudflare provides an AI Gateway for OpenAI traffic observability and control, which directly maps to using Cloudflare as the entry/exit point for OpenAI endpoints. The gateway docs explain replacing the OpenAI API host with a Cloudflare gateway URL, illustrating a concrete implementation of routing OpenAI traffic through Cloudflare so latency and resilience benefits can be realized. Additional excerpts describe Cloudflare\u2019s Anycast DNS/delivery model, including how a single IP can be served from multiple global locations and how this improves speed and high availability by rerouting traffic when a data center or resolver goes offline. Several excerpts expand on the general concept of Anycast DNS and its relationship to global routing, complementing the specific OpenAI gateway guidance. Together, these excerpts support the field value\u2019s claims that the provider is Cloudflare, the mechanism is Anycast routing across globally distributed POPs, and the primary benefits are lower latency and higher resilience with OpenAI domains routed through the gateway. The content about OpenAI endpoints and Cloudflare gateway URLs directly ties the field to concrete OpenAI domains (such as api.openai.com and related chat endpoints) being routed via Cloudflare, which aligns with the described affected domains in the field value. The combination of gateway usage and Anycast explanation provides coherent support for the stated benefits and domain coverage. Finally, broader Anycast discussions help frame how the same mechanism contributes to performance and reliability in a real-world deployment context. Overall, the strongest support comes from explicit Cloudflare AI Gateway usage for OpenAI endpoints and the explicit description of Anycast routing delivering speed and resilience, with additional context about general Anycast DNS reinforcing the mechanism and benefits.",
+        "citations": [
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "Route OpenAI API requests through AI Gateway for observability and control.",
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`."
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://blog.cloudflare.com/tag/anycast/",
+            "excerpts": [
+              "Get the latest news on how products at Cloudflare are built, technologies used, and open positions to join the teams helping to build a better Internet.",
+              "# Anycast",
+              "How Cloudflare\u2019s systems dynamically route traffic across the globe",
+              "A Brief Primer on Anycast"
+            ],
+            "title": "Anycast - The Cloudflare Blog"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "realtime_api_websocket_details",
+        "reasoning": "The finegrained field value specifies a WebSocket-based Realtime API endpoint at wss://api.openai.com/v1/realtime?model=gpt-realtime-2, with a bi-directional JSON event stream over WebSocket, and a standard API-key-based bearer authentication during connection upgrade. The most directly relevant excerpt explicitly provides the exact endpoint URL for the realtime API, confirming the endpoint and model parameter. Supporting excerpts describe the WebSocket-based Realtime API in server-to-server contexts, including guidance to connect via WebSocket to the Realtime API, which confirms the protocol and server-to-server usage. Additional excerpts specify that messages over the WebSocket are JSON-serialized events sent as text strings, which aligns with the described data format in the field value. An excerpt mentioning the gpt-realtime model and low-latency WebSocket usage provides corroborative context that the Realtime API is indeed designed for low-latency WebSocket communication, reinforcing the alignment with the field value. The combination of these excerpts together substantiates endpoint URL, protocol, authentication pattern, and primary use case described in the field value.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://github.com/blhk0532/blog-v5/blob/main/resources/markdown/posts/gpt-realtime-api.md",
+            "excerpts": [
+              "As of March 14, 2026, OpenAI's current model docs call this model gpt-realtime, and the pinned snapshot is gpt-realtime-2025-08-28. The\nThe current Realtime guide says this model is built for low-latency conversations over WebRTC, WebSocket, or SIP."
+            ],
+            "title": "blog-v5/resources/markdown/posts/gpt-realtime-api.md ... - GitHub"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "network_reliability_and_routing",
+        "reasoning": "The recommended strategy centers on using consistent hostnames (such as api.openai.com and chatgpt.com) resolved via DNS, with Cloudflare\u2019s Anycast automatically steering traffic to the nearest healthy data center for speed and resilience. This is directly supported by multiple sources explaining how Anycast works with DNS to speed up resolution, improve reliability, and allow requests to be served by the nearest data center. Guidance on Cloudflare AI Gateway further reinforces routing through a gateway URL rather than raw IPs, implying a DNS-based, hostname-driven path to OpenAI services. Several excerpts explicitly state that direct-IP access is blocked or unreliable, highlighting the necessity of TLS with hostname indication (SNI) to obtain the correct certificate and establish a valid connection. TLS-related discussions underscore the need for proper TLS handshakes and SNI to ensure secure hostname-based routing. Additional connectivity guidance notes that direct IP access can fail due to blocks or policy controls, reinforcing the DNS-first approach. Together, these excerpts support the field value\u2019s core claims: always route via DNS hostnames, rely on Anycast for routing to optimal data centers, avoid direct IP connections, rely on SNI for TLS, and trust provider controls (e.g., Cloudflare) that enforce DNS-based routing for OpenAI services.",
+        "citations": [
+          {
+            "url": "https://ubos.tech/news/cloudflare-anycast-ip-generates-traffic-from-unrealistic-global-locations-insights-and-mitigation/",
+            "excerpts": [
+              "The phenomenon you\u2019re seeing is caused by Cloudflare\u2019s anycast routing, which can make a single IP address appear to originate from many geographic locations at once."
+            ],
+            "title": "Cloudflare Anycast IP Generates Traffic from Unrealistic ..."
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "Route OpenAI API requests through AI Gateway for observability and control.",
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Base URL**\n```\n\nhttps://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai\n\n\n`"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          },
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://www.cloudflare.com/learning/ssl/what-is-sni/",
+            "excerpts": [
+              "SNI, or Server Name Indication, is an addition to the TLS encryption protocol that enables a client device to specify the domain name it is trying to reach in the first step of the TLS handshake, preventing common name mismatch errors."
+            ],
+            "title": "What is SNI? How TLS server name indication works - Cloudflare"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          },
+          {
+            "url": "https://www.ipfly.net/blog/troubleshooting-cloudflare-connectivity-ip-ranges-error-codes-and-solutions/",
+            "excerpts": [
+              "When direct access works but Cloudflare returns a 521 error, a firewall block is the most likely cause. Verifying that all Cloudflare IP ranges\u2014104.16.0.0/12, 172.64.0.0/13, 162.158.0.0/15, and the complete supplementary list\u2014are whitelisted resolves most issues."
+            ],
+            "title": "Troubleshooting Cloudflare Connectivity: IP Ranges, Error ..."
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://developers.openai.com/api/docs",
+            "excerpts": [
+              "Docs Guides and concepts for the OpenAI API API reference Endpoints, parameters, and responses"
+            ],
+            "title": "OpenAI API Platform Documentation"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "websocket_and_sse_tuning",
+        "reasoning": "The most relevant content directly describes WebSocket usage and streaming semantics. A statement indicating that the Realtime API connects via WebSocket directly to the API and that the client and server exchange JSON-serialized events as strings of text aligns with the concept of persistent, bidirectional connections that require careful tuning for keep-alives and buffering. Another excerpt shows the WebSocket connection URL and notes the direct server-to-server WebSocket pattern, which is pertinent to configuring a proxy for WebSocket traffic and ensuring low-latency delivery. The SSE-related excerpts explicitly discuss server-sent events streaming, with notes about event delivery and streaming behavior, which underpins the need for generous idle timeouts and proper non-buffered handling to prevent premature termination and ensure timely event delivery. Taken together, these sources support the field\u2019s emphasis on long-lived connections, idle timeout configuration, and buffering behavior for SSE, as well as the tradeoffs around WebSocket compression (as part of WebSocket performance considerations) when deciding whether to enable or disable permessage-deflate in bandwidth-constrained scenarios. The remaining excerpts provide broader OpenAI API and network-routing context but do not directly address the specific tuning details in question, so they are less central to the finegrained field value.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Connect to the Realtime API using WebSockets on a server.",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application."
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "responses_api_details",
+        "reasoning": "The most relevant content directly describes the streaming mechanism for the Responses API, stating that streaming events are emitted as the Response is generated and that server-sent events (SSE) carry events such as 'response.created' and 'response.completed'. This aligns with the field value\u2019s note that the streaming mechanism uses SSE and that certain named events appear during generation. The next most relevant content explains the overall purpose of the Responses API, highlighting that it enables stateful interactions and extends the model\u2019s capabilities with built-in tools, which supports the concept of a stateful, tool-enhanced API and its relationship to the Chat Completions API as a replacement for new projects. A general OpenAI API documentation reference that covers the Responses API provides additional corroboration of endpoint-level details. The subsequent excerpts that describe streaming events in more detail (names and progression) further support the streaming aspect described in the field value, while other items about related but separate topics (like Realtime WebSocket, Codex, or unrelated Cloudflare/DNS material) do not directly support the finegrained field value and are thus less relevant.",
+        "citations": [
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "https://deepwiki.com/openai/completions-responses-migration-pack/6-responses-api-reference",
+            "excerpts": [
+              "This document provides comprehensive reference documentation for the OpenAI /v1/responses API endpoint, covering all parameters, content types, streaming capabilities, tools integration, and structured output formats."
+            ],
+            "title": "Responses API Reference | openai/completions-responses ..."
+          },
+          {
+            "url": "http://github.com/v2fly/domain-list-community/blob/master/data/openai",
+            "excerpts": [
+              "M ai n domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net Main domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net\nopenai.com\nMain domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net"
+            ],
+            "title": "openai - v2fly/domain-list-community"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "transport_protocol_choices",
+        "reasoning": "At the core, the transport choices should map cleanly to the API semantics. Contemporary OpenAI guidance demonstrates that WebSocket is the appropriate transport when using the Realtime API, enabling bi-directional, low-latency communication, with explicit examples showing a WebSocket URL and direct server connections. This directly supports the idea that WebSocket is the intended transport for real-time, server-to-server or backend connections to the Realtime endpoint. Additionally, for standard REST-like interactions such as chat completions and responses, HTTPS over HTTP/1.x (or HTTP/2 where available) is the baseline, simple to debug, and broadly supported; the streaming variant of responses uses Server-Sent Events over a long-lived HTTP connection, which aligns with the notion that streaming should be delivered via SSE on top of HTTP rather than tunneled through WebSocket. The field value also notes that gRPC and HTTP/3 are considered for future work but not in the initial stage, which is reflected in documentation discussions about prioritizing HTTPS and WebSocket while deferring gRPC/HTTP/3; this is consistent with guidance that emphasizes simpler, well-supported protocols for the stage-one design. Context about how proxies and tunnels are expected to behave with these endpoints reinforces that the proxy should transparently tunnel WebSocket upgrades to upstream when using the Realtime API, while keeping standard REST calls straightforward over HTTPS with SSE for streaming. Supporting references show explicit mention of creating chat completions endpoints over POST to the REST API, and the streaming of responses via SSE, which underpins the HTTPS/HTTP/2 baseline for most calls. Together, these excerpts justify a transport protocol strategy where: (a) WebSocket is used for the Realtime API, (b) Plain HTTPS (HTTP/1.1 or HTTP/2) is used for chat completions and responses with SSE for streaming, and (c) gRPC and HTTP/3 remain as future work, deferred for the initial implementation.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create",
+            "excerpts": [
+              "Starting a new project? We recommend trying Responses to take advantage of the latest OpenAI platform features. Compare Chat Completions with Responses.",
+              "POST /chat/completions",
+              "**Starting a new project?** We recommend trying [Responses](https://platform.openai.com/docs/api-reference/responses) to take advantage of the latest OpenAI platform features. Compare [Chat Completions with Responses](https://platform.openai.com/docs/guides/responses-vs-chat-completions?api-mode=responses) ."
+            ],
+            "title": "Create chat completion | OpenAI API Reference"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "http://developers.openai.com/api/docs",
+            "excerpts": [
+              "Explore guides, API docs, and examples for the OpenAI API."
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          },
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "evidence_backed_tradeoffs_for_small_proxy",
+        "reasoning": "To justify the technology stack tradeoff, the most directly relevant content shows concrete Rust-based reverse proxy examples using hyper and tokio, underscoring the feasibility and performance benefits of a minimal stack for a small proxy design. This aligns with choosing a lean, high-performance baseline rather than a heavier framework. For the protocol selection tradeoff, the material demonstrates the distinct roles of streaming via Server-Sent Events for Responses and true bi-directional WebSocket streams for Realtime, suggesting a staged proxy can pass through these protocols in their native contexts without attempting to translate between them. This supports implementing pass-through behavior for both protocols where applicable, rather than adding unnecessary protocol translation layers. Regarding the reliability tradeoff, multiple excerpts describe Cloudflare\u2019s Anycast-based routing for OpenAI endpoints, the benefits of not relying on direct IPs due to potential blocking and TLS/SNI issues, and the overall benefit of leaving routing to a robust, globally distributed network. This collectively backs a strategy that prefers hostname-based access and Cloudflare-backed paths over manual direct-IP connectivity for resilience and ease of maintenance. The combined evidence shows that a small Rust proxy can achieve high-performance forwarding with minimal boilerplate while relying on established routing and protocol stacks rather than reinventing them, which is consistent with a cautious, evidence-backed tradeoff approach for a minimal proxy design.",
+        "citations": [
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "http://github.com/v2fly/domain-list-community/blob/master/data/openai",
+            "excerpts": [
+              "M ai n domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net Main domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net\nopenai.com\nMain domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net"
+            ],
+            "title": "openai - v2fly/domain-list-community"
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "Route OpenAI API requests through AI Gateway for observability and control.",
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Base URL**\n```\n\nhttps://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai\n\n\n`",
+              "Chat completions endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completion",
+              "esponses endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/responses"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://www.ipfly.net/blog/troubleshooting-cloudflare-connectivity-ip-ranges-error-codes-and-solutions/",
+            "excerpts": [
+              "When direct access works but Cloudflare returns a 521 error, a firewall block is the most likely cause. Verifying that all Cloudflare IP ranges\u2014104.16.0.0/12, 172.64.0.0/13, 162.158.0.0/15, and the complete supplementary list\u2014are whitelisted resolves most issues."
+            ],
+            "title": "Troubleshooting Cloudflare Connectivity: IP Ranges, Error ..."
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "chat_completions_api_status",
+        "reasoning": "The field value asserts that the endpoint path for chat completions is POST /v1/chat/completions and that the endpoint is operational, with backward compatibility for existing projects. It also states an official recommendation to use the Responses API for new projects to leverage newer platform features. The most directly supportive content identifies the creation of chat completion via POST /chat/completions, which is consistent with the documented endpoint. Additional support comes from sources describing the Responses API as an alternative or successor with extended features, reinforcing the recommended direction for new projects. Contemporary OpenAI API documentation confirms the existence and usage of chat completions endpoints and introduces the Responses API as a feature-rich pathway, aligning with the recommended guidance. The general API documentation provides broader context confirming these are legitimate API surfaces to consider when designing a proxy or integration. In summary, the cited excerpts collectively support: (a) the existence of the chat completions endpoint, (b) its use-case for the standard chat completions flow, and (c) the advisory to consider the Responses API for newer implementations, all consistent with the field value\u2019s content.",
+        "citations": [
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "http://developers.openai.com/api/docs",
+            "excerpts": [
+              "Explore guides, API docs, and examples for the OpenAI API."
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated."
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs",
+            "excerpts": [
+              "Docs Guides and concepts for the OpenAI API API reference Endpoints, parameters, and responses"
+            ],
+            "title": "OpenAI API Platform Documentation"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "tls_performance_optimization",
+        "reasoning": "The field value asserts that the recommended TLS version is TLS 1.3 and that its primary performance feature is a faster handshake, which reduces round-trips and lowers initial latency for new secure connections. The excerpt detailing that TLS 1.3 speeds up the handshake and reduces the number of round-trips directly substantiates the performance claim, showing how connection establishment becomes faster compared to TLS 1.2. The other excerpt reinforces the same point by describing TLS 1.3 as an improved protocol with performance benefits, including faster handshakes and security/performance enhancements, which aligns with the claimed latency improvements during the initial secure connection establishment. Together, these sources establish a coherent link between adopting TLS 1.3 and reduced handshake latency, supporting the finegrained field value about TLS 1.3 as the recommended version and its latency impact.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "executive_summary",
+        "reasoning": "The field value requires a stage-one Rust reverse proxy that is OpenAI-compatible and designed with simplicity and reliability in mind, routing via DNS/VPN-like Cloudflare Anycast rather than direct IPs. It emphasizes that api.openai.com traffic is exposed through Cloudflare Anycast and that attempting direct IP connections is unreliable or blocked, which aligns with multiple excerpts describing Cloudflare as a reverse proxy that hides origin IPs and uses Anycast to distribute traffic. The design also relies on DNS resolution for routing, which is consistent with statements about routing through Cloudflare\u2019s or other gateways rather than hard-coded IPs. The plan to support key OpenAI endpoints\u2014legacy /v1/chat/completions, modern /v1/responses with SSE, and the wss://api.openai.com/v1/realtime WebSocket API\u2014matches excerpts that outline these endpoints and the streaming or WebSocket capabilities. References to the Realtime API and WebSocket guidance illustrate how to implement low-latency, bi-directional communication and server-to-server connections. Excerpts about OpenAI gateway documentation show how OpenAI endpoints can be accessed through gateway routes, reinforcing a gateway-centric deployment model. The inclusion of Cloudflare AI Gateway docs supports the notion of routing OpenAI requests through a Cloudflare-managed gateway rather than direct OpenAI endpoints. Additional context about TLS (TLS 1.3), HTTP/2, and connection pooling complements the performance-oriented goals of the stage-one proxy. In sum, the most directly aligned content describes (a) Cloudflare-based Anycast DNS routing and indirect addressing (not direct IPs), (b) OpenAI endpoints and their streaming/WebSocket characteristics, and (c) gateway-based approaches that enable observable, resilient proxying consistent with a minimal, production-grade Rust stack using hyper/tokio. The less direct items provide supportive details about proxy patterns, TLS considerations, and related networking optimizations that bolster the design but are not central to the core field value.",
+        "citations": [
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://ubos.tech/news/cloudflare-anycast-ip-generates-traffic-from-unrealistic-global-locations-insights-and-mitigation/",
+            "excerpts": [
+              "The phenomenon you\u2019re seeing is caused by Cloudflare\u2019s anycast routing, which can make a single IP address appear to originate from many geographic locations at once."
+            ],
+            "title": "Cloudflare Anycast IP Generates Traffic from Unrealistic ..."
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "Route OpenAI API requests through AI Gateway for observability and control.",
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Chat completions endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completion"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create",
+            "excerpts": [
+              "Starting a new project? We recommend trying Responses to take advantage of the latest OpenAI platform features. Compare Chat Completions with Responses.",
+              "POST /chat/completions",
+              "**Starting a new project?** We recommend trying [Responses](https://platform.openai.com/docs/api-reference/responses) to take advantage of the latest OpenAI platform features. Compare [Chat Completions with Responses](https://platform.openai.com/docs/guides/responses-vs-chat-completions?api-mode=responses) ."
+            ],
+            "title": "Create chat completion | OpenAI API Reference"
+          },
+          {
+            "url": "https://www.ipfly.net/blog/troubleshooting-cloudflare-connectivity-ip-ranges-error-codes-and-solutions/",
+            "excerpts": [
+              "When direct access works but Cloudflare returns a 521 error, a firewall block is the most likely cause. Verifying that all Cloudflare IP ranges\u2014104.16.0.0/12, 172.64.0.0/13, 162.158.0.0/15, and the complete supplementary list\u2014are whitelisted resolves most issues."
+            ],
+            "title": "Troubleshooting Cloudflare Connectivity: IP Ranges, Error ..."
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "codex_api_status_and_behavior",
+        "reasoning": "The strongest support comes from a statement clearly noting that Codex models were discontinued since March 2023 on the OpenAI API, which directly confirms the 'Discontinued' status and the deprecation timing. Additional excerpts describe tools and interfaces previously associated with Codex, such as a command-line option to connect to a remote WebSocket endpoint and an app-server with WebSocket transport. These details illustrate the kinds of features that existed prior to discontinuation (for example, remote control tools and WebSocket-based transport). Another excerpt discusses Codex-related WebSocket usage in a broader context, which reinforces that WebSocket-based tooling existed historically. Taken together, these excerpts support the implication that legacy Codex features like fast mode service tiers and WebSocket remote controls are obsolete in the current public API, aligning with the stated deprecation date and resulting status.",
+        "citations": [
+          {
+            "url": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551",
+            "excerpts": [
+              "Codex models, which were accessible through the completions endpoint, have been discontinued since March 2023 on the OpenAI API."
+            ],
+            "title": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551"
+          },
+          {
+            "url": "http://developers.openai.com/codex/cli/reference",
+            "excerpts": [
+              "`--remote`\nType / Values\n`ws://host:port | wss://host:port`\nDetails\nConnect the interactive TUI to a remote app-server WebSocket endpoint. Supported for `codex` , `codex resume` , and `codex fork` ; other subcommands reject remote mode."
+            ],
+            "title": "http://developers.openai.com/codex/cli/reference"
+          },
+          {
+            "url": "http://developers.openai.com/codex/app-server",
+            "excerpts": [
+              "1. Start the server with `codex app-server` (default stdio transport) or `codex app-server --listen ws://127.0.0.1:4500` (experimental WebSocket transport).\nStart the server with codex app-server (default stdio transport) or codex app-server --listen ws://127.0.0.1:4500 (experimental WebSocket transport)."
+            ],
+            "title": "http://developers.openai.com/codex/app-server"
+          },
+          {
+            "url": "http://github.com/openai/codex/releases",
+            "excerpts": [
+              "Added `codex remote-control` as a simpler entrypoint for starting a headless, remotely controllable app-server. ( [](https://github.com/openai/codex/pull/21424) )"
+            ],
+            "title": "http://github.com/openai/codex/releases"
+          },
+          {
+            "url": "http://openai.com/index/speeding-up-agentic-workflows-with-websockets",
+            "excerpts": [
+              "A deep dive into the Codex agent loop, showing how WebSockets and connection-scoped caching reduced API overhead and improved model latency."
+            ],
+            "title": "http://openai.com/index/speeding-up-agentic-workflows-with-websockets"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "unreliability_of_direct_ip_connections.technical_explanation",
+        "reasoning": "The phenomenon described\u2014direct IP access to a service fronted by Cloudflare can fail due to the need to present the correct TLS certificate for the target hostname\u2014maps directly to the observation that clients must include the target hostname in the TLS SNI to avoid certificate mismatches in a multi-tenant proxy environment. The assertion that direct-IP access is blocked and can trigger an error such as a direct IP access prohibition is corroborated by explicit mention that attempting to reach a site via its raw IP instead of its domain is blocked, with the system returning an error status aligned with Direct IP Access Not Allowed. Additionally, the explanation that SNI conveys the intended domain during the TLS handshake, preventing hostname mismatch errors, reinforces why omitting the hostname (as would happen with a raw IP connection) disrupts certificate selection. The information that Cloudflare provides reverse-proxy protections (DDoS, WAF) and hides origin IPs for OpenAI further explains why relying on a bare IP address is unreliable and discouraged in this architecture. The gateway/documentation items further illustrate that the intended access path is through domain-based routes (gateway URLs) rather than direct API host IPs, reinforcing the overall guidance against direct-IP usage and highlighting the practical implications for latency and reliability in proxy designs.",
+        "citations": [
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://www.cloudflare.com/learning/ssl/what-is-sni/",
+            "excerpts": [
+              "SNI, or Server Name Indication, is an addition to the TLS encryption protocol that enables a client device to specify the domain name it is trying to reach in the first step of the TLS handshake, preventing common name mismatch errors."
+            ],
+            "title": "What is SNI? How TLS server name indication works - Cloudflare"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Chat completions endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completion",
+              "esponses endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/responses"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "unreliability_of_direct_ip_connections.viability",
+        "reasoning": "The core claim is that direct-IP connections to OpenAI services are not viable and that hostnames or gateway paths should be used instead. The strongest support comes from documentation advising replacing the direct API URL with a gateway URL, which demonstrates a shift away from raw IP usage toward a gateway-based hostname routing path. Additional support shows that OpenAI\u2019s traffic is routed through a Cloudflare gateway, implying reliance on a hostname-based proxy rather than exposing raw IPs, and that the gateway endpoints specifically serve chat/completions and responses, reinforcing the proxy-first design. Supporting context notes that using raw IPs for access can be blocked or are typically not allowed (e.g., Cloudflare blocking raw IP access and SNI/TLS considerations that hinge on hostnames). Taken together, these excerpts coherently support the position that direct-IP connections are not recommended or viable, and that a hostname-based gateway or proxy approach is preferred for reliable access.",
+        "citations": [
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.",
+              "Chat completions endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/chat/completion",
+              "esponses endpoint**\n`https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai/responses"
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://www.cloudflare.com/learning/ssl/what-is-sni/",
+            "excerpts": [
+              "SNI, or Server Name Indication, is an addition to the TLS encryption protocol that enables a client device to specify the domain name it is trying to reach in the first step of the TLS handshake, preventing common name mismatch errors."
+            ],
+            "title": "What is SNI? How TLS server name indication works - Cloudflare"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "proxy_core_design_recommendations",
+        "reasoning": "The recommended framework is Tokio for asynchronous runtime in Rust, and Hyper as the minimal, production-grade HTTP stack. Excerpts describing a minimal, configuration-driven reverse proxy in Rust, built with Hyper, Reqwest, and Tokio, directly corroborate the choice of Tokio and Hyper as core components and align with a small, efficient proxy design. The guidance that a reverse proxy example demonstrates proxying calls through Hyper reinforces the suitability of Hyper as the HTTP backbone for a three-path proxy (standard JSON POST, non-buffered SSE pass-through, and WebSocket upgrade/tunneling), which matches the architecture principle of keeping the proxy small with three essential code paths. WebSocket and SSE-related excerpts further support the inclusion of a WebSocket upgrade path and streaming behavior, which are part of the three-path design. TLS-related excerpts discuss TLS 1.3 and secure handshakes, which align with the performance-oriented goal of preferring TLS 1.3 and secure transport in a latency-conscious proxy. TCP/network tuning excerpts (BBR guidance and related sysctl recommendations) support the performance optimization aspect of the design, such as leveraging kernel features to improve throughput and latency. SNI/TLS certificate handling excerpts provide a contextual backing for secure TLS handshakes and correct hostname indication during TLS handshakes, relevant to reliable TLS configurations in a proxy. Finally, references to OpenAI API endpoints and Cloudflare-related discussions offer environment-level context (e.g., interacting with OpenAI endpoints and potential gateway scenarios) that situates the proxy design within the OpenAI API usage domain, but are not strictly required for the core design recommendations themselves. In sum, the most directly supporting content validates the chosen Rust/Hyper/Tokio stack, the minimal three-path architecture, and TLS/BBR-focused performance considerations; supportive content adds networking/security context that can inform implementation details.",
+        "citations": [
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          },
+          {
+            "url": "https://dev.moe/en/3021",
+            "excerpts": [
+              "BBR is a TCP congestion control algorithm developed by Google. It improves upon the shortcomings of traditional congestion control algorithms (like CUBIC), which reduce speed upon packet loss, significantly enhancing bandwidth utilization in high packet loss environments."
+            ],
+            "title": "Enable TCP BBR v2 on Linux & Windows 11 - Coxxs"
+          },
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "That keeps the BBR configuration easy to audit, reapply, or remove later, and it avoids duplicate sysctl lines after repeated maintenance. Use these commands on Ubuntu 26.04 (Resolute Raccoon), Ubuntu 24.04 (Noble Numbat), and Ubuntu 22.04 (Jammy Jellyfish).",
+              "net.core.default_qdisc=fq",
+              "net.ipv4.tcp_congestion_control=bbr",
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles.",
+              "The algorithm measures actual network capacity rather than reacting to packet loss, making it particularly effective when bandwidth-delay product is high or when networks experience packet loss that doesn\u2019t indicate congestion."
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          },
+          {
+            "url": "https://enterprise-support.nvidia.com/s/article/linux-sysctl-tuning",
+            "excerpts": [
+              "You can use the Linux sysctl command to modify default system network parameters that are set by the operating system in order to improve IPv4 and IPv6 traffic performance."
+            ],
+            "title": "NVIDIA Enterprise Support Portal | Linux sysctl Tuning"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "unreliability_of_direct_ip_connections.underlying_technology",
+        "reasoning": "The most relevant excerpt explicitly defines Server Name Indication (SNI) as an enhancement to TLS that lets a client declare the domain it intends to reach during the TLS handshake, which is central to why direct-IP access can fail if the domain name isn\u2019t specified or mismatches. The next closely related excerpt explains that during the TLS handshake, SNI-related matching governs which certificate and settings are used, reinforcing that SNI is the critical mechanism in establishing a correct TLS session to the intended host. A supporting excerpt describes why attempting to connect to a host via its raw IP can be blocked by protective services (e.g., Cloudflare), which aligns with the notion that direct IP usage disrupts the domain-based TLS/SNI expectations and is often blocked or misrouted. An additional excerpt provides broader context about infrastructure that hides origin IPs behind a reverse proxy, which reinforces why direct IP connections are unreliable in modern setups, though it is less directly about the SNI mechanism itself. Collectively, these excerpts connect SNI to TLS handshakes, and explain why direct-IP connections frequently fail or are blocked in practice, aligning with the stated finegrained field value about SNI being the cause of the connection failure in this scenario.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/learning/ssl/what-is-sni/",
+            "excerpts": [
+              "SNI, or Server Name Indication, is an addition to the TLS encryption protocol that enables a client device to specify the domain name it is trying to reach in the first step of the TLS handshake, preventing common name mismatch errors."
+            ],
+            "title": "What is SNI? How TLS server name indication works - Cloudflare"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          },
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "linux_tcp_stack_tuning",
+        "reasoning": "The component describing the congestion_control explicitly identifies BBR (Bottleneck Bandwidth and Round-trip propagation time) as the recommended TCP congestion control algorithm for high-bandwidth, high-latency paths, which aligns with the field value noting BBR as the congestion control choice. The statement that BBR requires a specific queueing discipline clarifies the dependency between congestion control and the queueing mechanism, supporting the assertion that fq should be the default to enable BBR's benefits. Additional excerpts reinforce the need for the fq discipline as a prerequisite, and together they establish the linkage between the chosen congestion control method and the required queueing discipline. The excerpts about the kernel parameters show concrete sysctl-style settings, such as net.core.default_qdisc=fq and net.ipv4.tcp_congestion_control=bbr, which directly map to the kernel_parameters portion of the field value and demonstrate how to apply the tuning in practice. The mentions of recommended socket options (SO_REUSEPORT and TCP_NODELAY) in the field value are echoed in the surrounding discussion that emphasizes performance-oriented socket configuration for low-latency communications, including WebSocket scenarios. Overall, the strongest, most direct evidence comes from explicit statements about BBR as the congestion control method, the requirement of fq for BBR, and the exact sysctl parameter lines that implement these settings, with additional context on how these choices affect multi-core scaling and latency-critical traffic.",
+        "citations": [
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "net.ipv4.tcp_congestion_control=bbr",
+              "net.core.default_qdisc=fq",
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles.",
+              "The algorithm measures actual network capacity rather than reacting to packet loss, making it particularly effective when bandwidth-delay product is high or when networks experience packet loss that doesn\u2019t indicate congestion."
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          },
+          {
+            "url": "https://dev.moe/en/3021",
+            "excerpts": [
+              "BBR is a TCP congestion control algorithm developed by Google. It improves upon the shortcomings of traditional congestion control algorithms (like CUBIC), which reduce speed upon packet loss, significantly enhancing bandwidth utilization in high packet loss environments."
+            ],
+            "title": "Enable TCP BBR v2 on Linux & Windows 11 - Coxxs"
+          },
+          {
+            "url": "https://enterprise-support.nvidia.com/s/article/linux-sysctl-tuning",
+            "excerpts": [
+              "You can use the Linux sysctl command to modify default system network parameters that are set by the operating system in order to improve IPv4 and IPv6 traffic performance."
+            ],
+            "title": "NVIDIA Enterprise Support Portal | Linux sysctl Tuning"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "server_side_optimization_strategy",
+        "reasoning": "The strongest support comes from excerpts that describe concrete TCP/OS-level optimizations: using BBR as the TCP congestion control algorithm, and pairing it with a kernel queueing discipline like fq, plus setting TCP_NODELAY for interactive WebSocket frames to reduce latency. These excerpts also discuss enabling BBR and fq as part of Linux system configuration, and explain how BBR can improve throughput on high-bandwidth, high-latency paths\u2014directly aligning with a multi-layered TCP/OS optimization strategy. Additionally, the cited guidance on TLS performance endorses prioritizing TLS 1.3 to shorten handshake round-trips, which directly matches the TLS portion of the field value. The references to system-level socket/runtime configuration, such as SO_REUSEPORT for multi-core scaling and broader sysctl tuning of network buffers and connection tracking, further corroborate the multi-layered server-side optimization approach described. For long-lived upstream connections like SSE/WebSockets, the material about maintaining WebSocket health and efficient upstream pooling/connectivity (including the context of upstream connections and streaming) provides relevant angle on connection management and latency preservation for persistent paths. The TLS/SNI and certificate handling notes complement this by highlighting secure, efficient TLS negotiation, which is part of minimizing latency. Finally, the excerpts touching WebSockets for real-time or streaming endpoints illustrate how persistent connections are used in practice, which is relevant to maintaining low latency for long-lived channels. Taken together, these excerpts form a coherent set of directly supporting or closely aligned details for the server-side optimization strategy described in the field value.",
+        "citations": [
+          {
+            "url": "https://dev.moe/en/3021",
+            "excerpts": [
+              "BBR is a TCP congestion control algorithm developed by Google. It improves upon the shortcomings of traditional congestion control algorithms (like CUBIC), which reduce speed upon packet loss, significantly enhancing bandwidth utilization in high packet loss environments."
+            ],
+            "title": "Enable TCP BBR v2 on Linux & Windows 11 - Coxxs"
+          },
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "net.core.default_qdisc=fq",
+              "net.ipv4.tcp_congestion_control=bbr",
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles.",
+              "The algorithm measures actual network capacity rather than reacting to packet loss, making it particularly effective when bandwidth-delay product is high or when networks experience packet loss that doesn\u2019t indicate congestion."
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          },
+          {
+            "url": "https://enterprise-support.nvidia.com/s/article/linux-sysctl-tuning",
+            "excerpts": [
+              "You can use the Linux sysctl command to modify default system network parameters that are set by the operating system in order to improve IPv4 and IPv6 traffic performance."
+            ],
+            "title": "NVIDIA Enterprise Support Portal | Linux sysctl Tuning"
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "anycast_for_reliability_and_latency.primary_benefits",
+        "reasoning": "The target field value asserts that the main advantages of Anycast are faster access due to shorter travel distance and higher resilience through automatic rerouting around failures. Excerpts that define Anycast as speeding up DNS resolution and ensuring reliability directly support the latency and availability claims. For example, statements describing Anycast speeding DNS resolution and ensuring reliability by keeping services available even if one resolver goes offline align with the latency reduction and resilience described in the field value. Additional excerpts explain that in Anycast, a single IP can map to multiple servers and that traffic can be served by different data centers, which underpins the resilience and high availability aspect. Finally, discussions on how Cloudflare\u2019s Anycast deployments route traffic globally and keep services highly available provide contextual support for both faster responses and fault tolerance. Together, these excerpts substantiate the claim that Anycast improves speed (latency) and resilience (availability) through global routing and rerouting capabilities.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://blog.cloudflare.com/tag/anycast/",
+            "excerpts": [
+              "How Cloudflare\u2019s systems dynamically route traffic across the globe",
+              "A Brief Primer on Anycast"
+            ],
+            "title": "Anycast - The Cloudflare Blog"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "evidence_backed_tradeoffs_for_small_proxy.technology_stack_tradeoff",
+        "reasoning": "The target field value asserts that the primary tradeoff for a small proxy design is between a minimal, low-level stack (hyper and tokio) and a heavier framework, with evidence favoring the minimal stack due to maximum performance, fine-grained control, and small binary size. The most relevant excerpt explicitly describes a minimal, configuration-driven reverse proxy in Rust built with hyper, reqwest, and tokio, which directly supports the idea that a minimal stack is used for a small proxy. It also notes the proxy as a minimal solution, aligning with the stated preference for simplicity and performance. The second most relevant excerpt discusses a concrete example of a reverse proxy setup, including the use of a Rust-based stack and specific runtime details, reinforcing the notion that a lean stack can achieve a functioning proxy with straightforward forwarding logic and small code footprints. These two excerpts together support the tradeoff argument by illustrating a minimal stack implementation and its practical deployment. There is less direct support from other excerpts, which cover OpenAI WebSocket usage, streaming, and Cloudflare/OpenAI gateway docs, not focused on the hyper/tokio vs heavier framework tradeoffs for a small proxy design.",
+        "citations": [
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "realtime_api_websocket_details.protocol",
+        "reasoning": "The target field value describes a protocol that is WebSocket-based and used for bi-directional exchange of JSON-serialized events as text strings. The most direct support comes from the excerpt stating that over a WebSocket you will both send and receive JSON-serialized events as strings, which exactly matches the notion of bi-directional JSON text messages via WebSocket. Supporting, but secondary, are excerpts that establish WebSocket as the transport for the Realtime API, including explicit mentions of connecting via WebSocket and server-to-server usage. These excerpts corroborate that WebSocket is the chosen protocol for realtime communications, thereby reinforcing the field value. Additional excerpts that reference the WebSocket transport in the context of the Realtime API (such as the presence of a WebSocket URL and server-oriented guidance) further corroborate the protocol choice and deployment scenario, though they do not recount the exact payload format as explicitly as the direct bi-directional JSON-serialized event statement. Taken together, the most relevant excerpt provides direct evidence of the exact data interchange format over WebSocket, while the others anchor the overall WebSocket-based realtime design.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application."
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://github.com/blhk0532/blog-v5/blob/main/resources/markdown/posts/gpt-realtime-api.md",
+            "excerpts": [
+              "As of March 14, 2026, OpenAI's current model docs call this model gpt-realtime, and the pinned snapshot is gpt-realtime-2025-08-28. The\nThe current Realtime guide says this model is built for low-latency conversations over WebRTC, WebSocket, or SIP."
+            ],
+            "title": "blog-v5/resources/markdown/posts/gpt-realtime-api.md ... - GitHub"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "realtime_api_websocket_details.endpoint_url",
+        "reasoning": "The fine-grained field value is the WebSocket endpoint URL used for the OpenAI Realtime API. The most directly relevant excerpt explicitly assigns the URL as a WebSocket endpoint: it defines a URL string equal to the exact endpoint in question. This direct match provides strongest support for the field value. The next most relevant items describe that the Realtime API is accessed over WebSocket in server-to-server scenarios and that JSON-serialized events are exchanged over the WebSocket, which corroborates the intended use and data flow of the endpoint without confirming the specific URL. Additional excerpts discuss connecting to the Realtime API in server-to-server contexts and general guidance on WebSocket usage, further supporting the context and applicability of the endpoint in typical integrations. A separate excerpt notes the model naming related to gpt-realtime, which is contextually related but does not confirm the specific endpoint parameter or its exact value. Taken together, these excerpts collectively support understanding that the endpoint is a WebSocket URL used in a server-to-server Realtime integration, with the exact endpoint URL provided by the first excerpt as the precise match.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API."
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://github.com/blhk0532/blog-v5/blob/main/resources/markdown/posts/gpt-realtime-api.md",
+            "excerpts": [
+              "As of March 14, 2026, OpenAI's current model docs call this model gpt-realtime, and the pinned snapshot is gpt-realtime-2025-08-28. The\nThe current Realtime guide says this model is built for low-latency conversations over WebRTC, WebSocket, or SIP."
+            ],
+            "title": "blog-v5/resources/markdown/posts/gpt-realtime-api.md ... - GitHub"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "websocket_and_sse_tuning.sse_optimization_technique",
+        "reasoning": "The core idea of SSE optimization in this context is the mechanism by which events are delivered to the client as they are produced. an excerpt notes that when streaming is enabled, the server emits server-sent events to the client as the Response is generated, which aligns with the fundamental behavior SSE requires for timely delivery. Additional excerpts reinforce the same SSE streaming concept by explicitly referring to streaming events, which is the modality your fine-grained field value is concerned with. While these excerpts establish that SSE streaming is active and that events are delivered over time, they do not provide concrete configuration guidance for long-lived HTTP connections, idle timeouts, TCP keep-alives, or buffering avoidance. Therefore, the reasoning supports the existence of SSE streaming as the relevant mechanism, but does not supply the exact tuning parameters requested. This results in partial support for the specific tuning claims, with strong alignment on the SSE streaming concept itself but lacking detailed, actionable tuning data in the excerpts.",
+        "citations": [
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "responses_api_details.key_features",
+        "reasoning": "The finegrained field value asserts that the system allows for the creation of stateful interactions with the model and extends capabilities with built-in tools. The most directly supportive excerpt states: 'Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u0019s capabilities with built-in tools for file search, web search, computer use, and more.' This clearly aligns with the idea of maintaining state across interactions and augmenting functionality with tools. A secondary, related excerpt mentions the API endpoint and 'tools integration,' indicating that the responses API supports extended capabilities and tool integration, which complements the primary claim by providing contextual evidence that such stateful and tool-enhanced interactions are part of the response ecosystem. Other excerpts focus on streaming events or general response APIs, but do not directly address stateful interactions or built-in tools, making them less relevant to this specific field value.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "https://deepwiki.com/openai/completions-responses-migration-pack/6-responses-api-reference",
+            "excerpts": [
+              "This document provides comprehensive reference documentation for the OpenAI /v1/responses API endpoint, covering all parameters, content types, streaming capabilities, tools integration, and structured output formats."
+            ],
+            "title": "Responses API Reference | openai/completions-responses ..."
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "responses_api_details.replaces_api",
+        "reasoning": "The finegrained field value asserts a Chat Completions API entry and that the OpenAI recommendation is to use the Responses API for new projects. The most relevant excerpt directly pertains to the existence and capabilities of the Responses API endpoint, describing its parameters, content types, streaming capabilities, and integration with tools, which supports the idea that a dedicated Responses API exists and is recommended for use alongside completions-related workflows. Other excerpts discuss streaming events and general Responses API references, which provide contextual support about how the Responses API operates (e.g., streaming, response lifecycle) and its documentation, reinforcing the relevance of a dedicated Responses API in the OpenAI ecosystem. A domain-list style excerpt mentioning OpenAI domains is the least informative for the specific API recommendation, offering peripheral context rather than direct evidence about the API path or the recommendation itself.",
+        "citations": [
+          {
+            "url": "https://deepwiki.com/openai/completions-responses-migration-pack/6-responses-api-reference",
+            "excerpts": [
+              "This document provides comprehensive reference documentation for the OpenAI /v1/responses API endpoint, covering all parameters, content types, streaming capabilities, tools integration, and structured output formats."
+            ],
+            "title": "Responses API Reference | openai/completions-responses ..."
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "http://github.com/v2fly/domain-list-community/blob/master/data/openai",
+            "excerpts": [
+              "M ai n domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net Main domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net\nopenai.com\nMain domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net"
+            ],
+            "title": "openai - v2fly/domain-list-community"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "responses_api_details.endpoint_path",
+        "reasoning": "The most relevant excerpt explicitly references the OpenAI /v1/responses API endpoint, which directly aligns with the target endpoint path POST /v1/responses. This provides concrete context about the endpoint being part of the Responses API and its parameters, even if it does not quote the exact method/route. Additional excerpts discussing the Responses API Reference and streaming events establish that the broader topic centers on the Responses API and how responses are delivered (including streaming behavior). While those excerpts do not confirm the exact endpoint path, they support the idea that the Responses API documentation covers endpoint behavior and capabilities, making them contextually relevant. Other excerpts focus on streaming events or general domain information, offering peripheral context but not direct evidence about the endpoint path. Therefore, the most relevant pieces are those that directly reference the Responses API endpoint/documentation, followed by those that contextualize the endpoint\u2019s behavior within the Responses API ecosystem.",
+        "citations": [
+          {
+            "url": "https://deepwiki.com/openai/completions-responses-migration-pack/6-responses-api-reference",
+            "excerpts": [
+              "This document provides comprehensive reference documentation for the OpenAI /v1/responses API endpoint, covering all parameters, content types, streaming capabilities, tools integration, and structured output formats."
+            ],
+            "title": "Responses API Reference | openai/completions-responses ..."
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "http://github.com/v2fly/domain-list-community/blob/master/data/openai",
+            "excerpts": [
+              "M ai n domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net Main domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net\nopenai.com\nMain domain chat.com chatgpt.com crixet.com oaistatic.com oaiusercontent.com openai.com sora.com # CDN & API openai.com.cdn.cloudflare.net"
+            ],
+            "title": "openai - v2fly/domain-list-community"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "realtime_api_websocket_details.primary_use_case",
+        "reasoning": "The fine-grained field value describes a use case centered on server-to-server integrations that require the lowest-level interface and real-time data handling. Multiple excerpts explicitly discuss server-to-server WebSocket connections and real-time data workflows: one notes that a backend system will connect via WebSocket directly to the Realtime API in a server-to-server integration, another describes sending and receiving JSON-serialized events over WebSocket, and another highlights connecting to the Realtime API via WebSocket in a server-to-server scenario. These pieces of content directly illustrate a low-level, server-to-server WebSocket workflow intended for real-time interaction, which matches the requested primary use case. Additionally, passages mentioning low-latency conversations and WebSocket/WebRTC contexts reinforce the emphasis on real-time, low-latency behavior appropriate for server-to-server interfaces. While none of the excerpts explicitly mention base64-encoded audio chunks, the overall pattern of direct server-to-server WebSocket usage and emphasis on low latency supports the core intent of the field value. The combination of explicit server-to-server connectivity, WebSocket transport, and real-time data handling forms coherent support for the described use case, with strongest emphasis on direct server-facing WebSocket communication and low-latency operation.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://github.com/blhk0532/blog-v5/blob/main/resources/markdown/posts/gpt-realtime-api.md",
+            "excerpts": [
+              "As of March 14, 2026, OpenAI's current model docs call this model gpt-realtime, and the pinned snapshot is gpt-realtime-2025-08-28. The\nThe current Realtime guide says this model is built for low-latency conversations over WebRTC, WebSocket, or SIP."
+            ],
+            "title": "blog-v5/resources/markdown/posts/gpt-realtime-api.md ... - GitHub"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "anycast_for_reliability_and_latency.mechanism",
+        "reasoning": "The core mechanism of Anycast is described as one IP address serving many servers across multiple data centers, with requests routed to the nearest healthy data center based on routing topology. This directly supports the field value\u2019s claim that a single destination IP is advertised across multiple geographically dispersed data centers and that clients are served by the closest healthy data center, yielding locality-based routing (Europe to a European server, Asia to an Asian server). The description that one IP address can apply to many servers reinforces the shared-destination concept and aligns with the mechanism of directing traffic to the nearest available data center. Additional excerpts explain that Anycast speeds up DNS resolution and improves reliability by ensuring queries can be served by other resolvers or data centers if one becomes unavailable, which elaborates on reliability and latency benefits of the mechanism. Some excerpts also discuss how Cloudflare\u2019s infrastructure uses Anycast to route traffic globally, supporting the concrete deployment context for such a mechanism. A related excerpt notes that OpenAI\u2019s use of a reverse-proxy setup (e.g., Cloudflare) can provide DDoS protection and WAF capabilities, which complements the reliability aspect by mitigating outages or disruptions at origin servers. Overall, the most directly relevant information establishes the mechanism of advertising a single IP across multiple POPs and directing clients to the nearest healthy data center, while the surrounding excerpts provide corroboration of latency, reliability, and deployment context that reinforce the field value.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://blog.cloudflare.com/tag/anycast/",
+            "excerpts": [
+              "How Cloudflare\u2019s systems dynamically route traffic across the globe",
+              "A Brief Primer on Anycast",
+              "Get the latest news on how products at Cloudflare are built, technologies used, and open positions to join the teams helping to build a better Internet.",
+              "# Anycast"
+            ],
+            "title": "Anycast - The Cloudflare Blog"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "tls_performance_optimization.recommended_version",
+        "reasoning": "The target field value represents the recommended TLS version. Content describing TLS 1.3 as the modern, secure, and faster version supports treating TLS 1.3 as the recommended choice. The first excerpt highlights TLS 1.3\u2019s speed enhancements and removal of older features, directly supporting a recommendation for TLS 1.3. The second excerpt frames TLS 1.3 as the norm for secure communication and notes its adoption, reinforcing its status as the recommended version. Together, they establish both performance and security rationales for preferring TLS 1.3 over earlier versions.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "tls_performance_optimization.key_performance_feature",
+        "reasoning": "The first excerpt explicitly states that TLS 1.3 sped up TLS handshakes among other improvements, which directly supports the claim that the primary performance feature is a faster handshake process between client and server. The second excerpt notes that TLS 1.3 provides improved security and performance and has become the norm for secure communication, which reinforces the notion that TLS 1.3 offers performance benefits, though it is less specific about the handshake mechanism. Taken together, these excerpts support the characterization of a faster handshake as the core performance feature, with additional performance gains described in broader terms. The most direct support is the explicit mention of a sped-up handshake; the supplementary source provides corroborating context about overall performance improvements.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "codex_api_status_and_behavior.deprecation_date",
+        "reasoning": "The target field deprecation_date is about when Codex-related endpoints were deprecated. The most relevant excerpt explicitly states that Codex models, accessible via the completions endpoint, have been discontinued since March 2023 on the OpenAI API. This directly aligns with the field value of March 2023. While other excerpts discuss Codex deployment mechanics (remote control, app-server setup, WebSocket usage), they do not provide a deprecation timestamp or contradict it, so they do not meaningfully alter the conclusion drawn from the direct deprecation statement.",
+        "citations": [
+          {
+            "url": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551",
+            "excerpts": [
+              "Codex models, which were accessible through the completions endpoint, have been discontinued since March 2023 on the OpenAI API."
+            ],
+            "title": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "evidence_backed_tradeoffs_for_small_proxy.protocol_selection_tradeoff",
+        "reasoning": "The most directly relevant points establish that a proxy designer must consider two distinct streaming technologies: one (WebSockets) for bi-directional, real-time communication required by a Realtime API, and another (Server-Sent Events) for simple, unidirectional streaming used by the Responses API. Specific evidence notes that over a WebSocket you send and receive JSON-serialized events, which supports bi-directional, low-latency transport suitable for Realtime, while server-sent events are described as simple, text-based, HTTP-based streaming appropriate for the Responses API. The stated pragmatic recommendation is to implement pass-through for both protocols in their native contexts and avoid converting SSE streams into a WebSocket channel, since such a conversion would add overhead without improving functionality. Collectively, these points support the core tradeoff: favor the straightforward, context-appropriate use of SSE for streaming responses and WebSockets for real-time bi-directional communication, rather than attempting to unify them under a single transport.",
+        "citations": [
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "evidence_backed_tradeoffs_for_small_proxy.reliability_strategy_tradeoff",
+        "reasoning": "The core tradeoff is between attempting a direct, potentially complex routing path to OpenAI via a pinned IP versus using a DNS-hosted hostname that leverages an underlying, highly resilient network. Excerpts describing Anycast DNS explain that a single IP address can be served by many data centers and that queries are resolved by the nearest, healthiest location, which directly supports a reliability-first strategy for a small proxy design. Excerpts stating that Anycast speeds up resolution and improves reliability by distributing load and providing failover reinforce why relying on the DNS hostname is superior to manual direct-IP routing. The specific error example shows a Cloudflare error when direct IP is used, illustrating the practical unreliability of direct-IP approaches and the risk of TLS/SNI-related failures, which strongly argues against hard-coding a pinned IP. Taken together, these sources substantiate the recommended approach: route OpenAI API requests through a DNS hostname with Anycast-managed routing for built-in resilience, at the cost of sacrificing some manual control but gaining robustness. The surrounding Cloudflare/Ai Gateway references provide additional context that can be leveraged for observability and control, but do not undermine the central conclusion about the superiority of hostname-based routing with Anycast for reliability.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "responses_api_details.streaming_mechanism",
+        "reasoning": "The field value specifies SSE as the streaming mechanism and notes that enabling streaming with stream=true results in a stream of events, including names like 'response.created' and 'response.completed'. Excerpts that directly state that server-sent events are emitted during streaming and that streaming events exist (with the corresponding event names) directly support this description. For instance, a passage states that when a Response is created with streaming enabled, the server will emit server-sent events to the client as the Response is generated, which aligns with the SSE mechanism described in the field value. Another excerpt explicitly references streaming events by name and describes the lifecycle of a streaming response with events such as 'response.created' and 'response.completed', which matches the event names in the field value. Additional excerpts discuss streaming capabilities and the streaming API context, which corroborates that streaming via SSE is the intended mechanism for delivering incremental responses. Taken together, these excerpts provide direct and contextual support for the claim that the streaming mechanism is SSE and that specific event names are emitted during streaming.",
+        "citations": [
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated.",
+              " # Streaming events",
+              "## response.created",
+              "## response.completed"
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://deepwiki.com/openai/completions-responses-migration-pack/6-responses-api-reference",
+            "excerpts": [
+              "This document provides comprehensive reference documentation for the OpenAI /v1/responses API endpoint, covering all parameters, content types, streaming capabilities, tools integration, and structured output formats."
+            ],
+            "title": "Responses API Reference | openai/completions-responses ..."
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "codex_api_status_and_behavior.status",
+        "reasoning": "The finegrained field value asserts a status of 'Discontinued' for Codex API usage. The most directly supporting information is a statement that Codex models have been discontinued since March 2023 on the OpenAI API, which precisely aligns with the value and time frame of the field. Other excerpts describe how Codex can be interacted with (remote-mode, app-server, WebSocket endpoints) or discuss related tooling and workflows, but they do not state a current discontinued status. Thus, the explicit discontinuation claim provides targeted evidence for the field value, while the remaining excerpts contribute background about Codex usage and tooling without confirming the status.",
+        "citations": [
+          {
+            "url": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551",
+            "excerpts": [
+              "Codex models, which were accessible through the completions endpoint, have been discontinued since March 2023 on the OpenAI API."
+            ],
+            "title": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "proxy_core_design_recommendations.core_library",
+        "reasoning": "The field value describes Hyper as the foundational HTTP implementation for both the client and server components of a minimal, production-grade proxy. The most directly supportive excerpt states that there is a minimal, configuration-driven reverse proxy in Rust built with Hyper, Reqwest, and Tokio, which explicitly identifies Hyper as the HTTP foundation used to implement the proxy. A closely related excerpt discusses a Hyper-based reverse proxy with a concrete example, further reinforcing Hyper\u2019s role as the core HTTP library for a proxy application. Other excerpts focus on WebSocket APIs, TLS, or performance tuning and do not address Hyper or HTTP proxy construction, making them only tangentially relevant. Therefore, the two most relevant excerpts collectively corroborate the field value by identifying Hyper as the primary HTTP library powering a Rust-based proxy design.",
+        "citations": [
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "chat_completions_api_status.endpoint_path",
+        "reasoning": "The fine-grained field path is chat_completions_api_status.endpoint_path, and its value is the HTTP endpoint path for OpenAI's chat completions API. The most supportive excerpts are those that explicitly reference the OpenAI API documentation and its endpoints: one excerpt states that the OpenAI API Platform Documentation covers endpoints, parameters, and responses, which directly corroborates that there is a defined chat completions endpoint under the API. Another excerpt reiterates the OpenAI API Platform Documentation and its role in detailing endpoints and concepts, further supporting the existence and structure of API paths such as /v1/chat/completions. A third excerpt discusses streaming responses in the OpenAI API, which is a characteristic behavior of chat completions calls when streaming is enabled, aligning with the general context of the chat completions endpoint. Additional excerpts mention OpenAI API guides and concepts, and the broader responses overview, which provide context about how the chat completions endpoint functions within the API\u2019s ecosystem. Other excerpts describe network infrastructure or Rust-based reverse proxies, which are tangential to the specific endpoint path and thus less directly relevant to validating the precise endpoint path value but still offer contextual background about proxies and infrastructure that might surround API access.",
+        "citations": [
+          {
+            "url": "http://developers.openai.com/api/docs",
+            "excerpts": [
+              "Explore guides, API docs, and examples for the OpenAI API."
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs",
+            "excerpts": [
+              "Docs Guides and concepts for the OpenAI API API reference Endpoints, parameters, and responses"
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated."
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "chat_completions_api_status.official_recommendation",
+        "reasoning": "The most directly relevant excerpts describe the Responses API and its capabilities. One excerpt states that when a Response is created with streaming enabled, the server emits server-sent events to the client as the Response is generated, illustrating how the Responses API can deliver live, incremental outputs. This aligns with the idea of leveraging the latest platform features via the Responses API for new projects. Another excerpt describes creating stateful interactions by using the output of previous responses and extending model capabilities with built-in tools, which underscores the broader feature set and capabilities associated with the modern API surface that new projects would benefit from. Additional excerpts provide general context about OpenAI API platform documentation and guides, reinforcing that there are comprehensive resources outlining endpoints, parameters, and responses that support adopting newer APIs like the Responses API. Taken together, these excerpts support the notion that the Responses API is a core avenue for accessing latest features in new projects, and that the OpenAI API platform documentation corroborates this direction.",
+        "citations": [
+          {
+            "url": "http://developers.openai.com/api/reference/resources/responses/streaming-events",
+            "excerpts": [
+              "When you create a Response with stream set to true , the server will emit server-sent events to the client as the Response is generated."
+            ],
+            "title": "Responses streaming events | OpenAI API Reference"
+          },
+          {
+            "url": "https://developers.openai.com/api/reference/responses/overview",
+            "excerpts": [
+              "Create stateful interactions with the model, using the output of previous responses as input. Extend the model\u2019s capabilities with built-in tools for file search, web search, computer use, and more."
+            ],
+            "title": "Responses Overview | OpenAI API Reference"
+          },
+          {
+            "url": "http://developers.openai.com/api/docs",
+            "excerpts": [
+              "Explore guides, API docs, and examples for the OpenAI API."
+            ],
+            "title": "OpenAI API Platform Documentation"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs",
+            "excerpts": [
+              "Docs Guides and concepts for the OpenAI API API reference Endpoints, parameters, and responses"
+            ],
+            "title": "OpenAI API Platform Documentation"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "anycast_for_reliability_and_latency.provider",
+        "reasoning": "The most directly relevant passages identify Cloudflare as the infrastructure provider involved with Anycast-based routing and reliability improvements. Excerpts that discuss Cloudflare\u2019s Anycast-related capabilities and how Anycast enables traffic routing across a distributed network are highly pertinent to the field value, as they establish Cloudflare as the provider responsible for latency and reliability via Anycast. Excerpts that explicitly mention Cloudflare as the reverse proxy and backbone for OpenAI-related traffic further reinforce the provider role in this context. Additional excerpts describing Anycast DNS concepts in the Cloudflare ecosystem contribute supportive context about the general mechanism by which Anycast enhances availability and performance, strengthening the link to the provider. Even passages focused on general Anycast explanations from Cloudflare help corroborate the provider\u2019s role in reliability and latency through global routing, although they are slightly less directly tied to the specific OpenAI proxy use case. The few excerpts that discuss OpenAI gateway usage without a direct Cloudflare linkage are still relevant insofar as they establish Cloudflare as a capable provider in the space, but are considered less central to the fine-grained field value than those explicitly tying Cloudflare to Anycast and routing/resilience functions.",
+        "citations": [
+          {
+            "url": "https://blog.cloudflare.com/tag/anycast/",
+            "excerpts": [
+              "A Brief Primer on Anycast",
+              "How Cloudflare\u2019s systems dynamically route traffic across the globe",
+              "Get the latest news on how products at Cloudflare are built, technologies used, and open positions to join the teams helping to build a better Internet.",
+              "# Anycast"
+            ],
+            "title": "Anycast - The Cloudflare Blog"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "In Anycast, one IP address can apply to many servers.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "Route OpenAI API requests through AI Gateway for observability and control.",
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`."
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "linux_tcp_stack_tuning.kernel_parameters",
+        "reasoning": "The target field value specifies two concrete kernel parameters to be set via sysctl/config: net.core.default_qdisc=fq and net.ipv4.tcp_congestion_control=bbr. An excerpt that explicitly lists the tcp_congestion_control setting shows the exact parameter and value, directly supporting the field. Another excerpt that explicitly lists the default_qdisc setting provides the other required parameter. Additional excerpts describe BBR\u2019s purpose and when it\u2019s advantageous, which reinforces why these particular parameters are recommended (to enable a high-performance congestion control and a fair queuing discipline). Other excerpts discuss BBR in general and system-tuning guidance, which corroborate the broader context but do not provide the exact two parameter lines, thus they are supportive but secondary for the precise field value. In summary, the strongest support comes from the explicit presence of the two exact parameter assignments, with secondary support from contextual explanations of BBR and sysctl tuning.",
+        "citations": [
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "net.ipv4.tcp_congestion_control=bbr",
+              "net.core.default_qdisc=fq",
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles."
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          },
+          {
+            "url": "https://dev.moe/en/3021",
+            "excerpts": [
+              "BBR is a TCP congestion control algorithm developed by Google. It improves upon the shortcomings of traditional congestion control algorithms (like CUBIC), which reduce speed upon packet loss, significantly enhancing bandwidth utilization in high packet loss environments."
+            ],
+            "title": "Enable TCP BBR v2 on Linux & Windows 11 - Coxxs"
+          },
+          {
+            "url": "https://enterprise-support.nvidia.com/s/article/linux-sysctl-tuning",
+            "excerpts": [
+              "You can use the Linux sysctl command to modify default system network parameters that are set by the operating system in order to improve IPv4 and IPv6 traffic performance."
+            ],
+            "title": "NVIDIA Enterprise Support Portal | Linux sysctl Tuning"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "linux_tcp_stack_tuning.congestion_control",
+        "reasoning": "The finegrained field value asserts that BBR is the recommended TCP congestion control algorithm, aimed at delivering significant performance improvements on high-bandwidth, high-latency paths. Excerpts that discuss BBR delivering substantial performance improvements on high-bandwidth, high-latency connections directly support this claim by describing the conditions under which BBR shines and why it is advantageous. Excerpts noting that BBR improves bandwidth utilization in challenging environments (e.g., high packet loss) further support the general claim that BBR is effective as a congestion control method, even if the primary emphasis is not solely on high-BDP scenarios. Excerpts that explain prerequisites for BBR, such as the need for a specific queuing discipline (fq), corroborate the practical feasibility of deploying BBR in typical Linux network stacks, reinforcing the overall conclusion that BBR is a recommended option. Excerpts focusing on broader Linux tuning or unrelated protocols provide contextual or peripheral support but do not directly confirm the core claim about BBR being the recommended congestion control for high-BDP paths. Overall, the combination of direct performance-benefit statements on high-BDP paths and the practical notes on enabling BBR provides coherent support for the finegrained field value.",
+        "citations": [
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles.",
+              "The algorithm measures actual network capacity rather than reacting to packet loss, making it particularly effective when bandwidth-delay product is high or when networks experience packet loss that doesn\u2019t indicate congestion.",
+              "net.ipv4.tcp_congestion_control=bbr",
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "net.core.default_qdisc=fq"
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          },
+          {
+            "url": "https://dev.moe/en/3021",
+            "excerpts": [
+              "BBR is a TCP congestion control algorithm developed by Google. It improves upon the shortcomings of traditional congestion control algorithms (like CUBIC), which reduce speed upon packet loss, significantly enhancing bandwidth utilization in high packet loss environments."
+            ],
+            "title": "Enable TCP BBR v2 on Linux & Windows 11 - Coxxs"
+          },
+          {
+            "url": "https://enterprise-support.nvidia.com/s/article/linux-sysctl-tuning",
+            "excerpts": [
+              "You can use the Linux sysctl command to modify default system network parameters that are set by the operating system in order to improve IPv4 and IPv6 traffic performance."
+            ],
+            "title": "NVIDIA Enterprise Support Portal | Linux sysctl Tuning"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "anycast_for_reliability_and_latency.affected_domains",
+        "reasoning": "To determine which domains are routed via Cloudflare Anycast for reliability and latency, the most relevant material highlights how Anycast distributes requests across multiple servers and keeps DNS resolving services highly available, which supports the idea that major OpenAI domains would be covered by the Anycast network. Specifically, explanations that Anycast helps speed up DNS resolution, increases reliability, and ensures traffic can be handled by different data centers directly support the claim that key OpenAI domains would be routed through a global Anycast network. Additional context that Cloudflare acts as a reverse proxy for OpenAI infrastructure\u2014providing DDoS protection and concealing origin IPs\u2014bolsters the assertion that endpoints under OpenAI\u2019s umbrella (including api.openai.com and related domains) benefit from Cloudflare-managed Anycast routing and obfuscation. Broader Cloudflare blog discussions on Anycast illustrate how traffic is dynamically routed across the globe, which aligns with the stated domains being part of an Anycast-enabled reliability and latency strategy. While some excerpts discuss Cloudflare routing via AI Gateway and general Anycast concepts, they collectively support the idea that the primary OpenAI domains associated with OpenAI services would be included in Cloudflare\u2019s Anycast-enabled reliability and latency framework.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/dns/what-is-anycast-dns/",
+            "excerpts": [
+              "Learn how Anycast makes DNS resolving faster, increases reliability, and prevents DNS flood DDoS attacks.",
+              "Anycast helps speed up the DNS resolution process for users and ensures DNS reliability.",
+              "In Anycast, one IP address can apply to many servers.",
+              "For example, a request to an IP address within the Cloudflare CDN can be responded to by any data center Cloudflare operates, instead of one specific server.",
+              "Anycast also helps keep DNS resolving services highly available. If one DNS resolver goes offline, queries can still be answered by other resolvers in the network."
+            ],
+            "title": "What is Anycast DNS? | How Anycast works with DNS - Cloudflare"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          },
+          {
+            "url": "https://blog.cloudflare.com/tag/anycast/",
+            "excerpts": [
+              "Get the latest news on how products at Cloudflare are built, technologies used, and open positions to join the teams helping to build a better Internet.",
+              "# Anycast",
+              "How Cloudflare\u2019s systems dynamically route traffic across the globe",
+              "A Brief Primer on Anycast"
+            ],
+            "title": "Anycast - The Cloudflare Blog"
+          },
+          {
+            "url": "https://developers.cloudflare.com/ai-gateway/usage/providers/openai/",
+            "excerpts": [
+              "When making requests to OpenAI, replace https://api.openai.com/v1 in the URL you are currently using with https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai.",
+              "When making requests to OpenAI, replace `https://api.openai.com/v1` in the URL you are currently using with `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`."
+            ],
+            "title": "OpenAI \u00b7 Cloudflare AI Gateway docs"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "linux_tcp_stack_tuning.queueing_discipline",
+        "reasoning": "The claim that the fq (Fair Queue) queueing discipline is required to work with the BBR congestion control algorithm is directly supported by statements that explicitly set the queueing discipline to fq in the system configuration, indicating this particular discipline is needed for BBR to function optimally. Additionally, evidence that the default queueing discipline is fq reinforces the notion that fq should be the standard or default configuration when using BBR, aligning with the field value that fq must be the default. The mention that BBR delivers significant performance gains on high-bandwidth, high-latency connections helps explain why fq is desirable in conjunction with BBR, though it does not by itself state the requirement. General notes about sysctl tuning provide broader context for network performance but are less directly connected to the specific pairing of fq with BBR in the requested field, so they are treated as supporting context rather than core evidence. Collectively, the excerpts that directly reference fq as the queueing discipline and its status as the default provide the strongest support for the field value, while the BBR-focused performance notes and broader tuning context help corroborate why this pairing is important.\n",
+        "citations": [
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "net.core.default_qdisc=fq",
+              "net.ipv4.tcp_congestion_control=bbr",
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles.",
+              "The algorithm measures actual network capacity rather than reacting to packet loss, making it particularly effective when bandwidth-delay product is high or when networks experience packet loss that doesn\u2019t indicate congestion."
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "tls_performance_optimization.latency_impact",
+        "reasoning": "TLS 1.3 speeds up the TLS handshake by reducing the number of round-trips required for establishing a secure connection, which directly lowers the initial latency for new connections. The first source notes that TLS 1.3 speeds up TLS handshakes and removes older cryptographic features, highlighting an improvement in handshake speed. The second source discusses TLS 1.3 in practice as providing improved security and performance, reinforcing the notion that TLS 1.3 reduces latency during connection establishment. Together, these excerpts support the claim that TLS 1.3 lowers initial connection latency due to faster handshakes and overall performance gains.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "proxy_core_design_recommendations.recommended_framework",
+        "reasoning": "The field value claims that Tokio provides the asynchronous runtime for writing reliable, high-performance network applications in Rust. The most relevant excerpt directly states that a minimal, configuration-driven reverse proxy in Rust is built with hyper, reqwest, and tokio, explicitly including Tokio as part of the stack. This directly confirms Tokio\u2019s role in the described Rust proxy design. Other excerpts discuss Rust-based proxies and related libraries (such as hyper-reverse-proxy) and protocols (WebSocket, TLS, etc.), which are contextually related to building proxies but do not specifically confirm Tokio as the runtime. Therefore, the most supporting evidence comes from the direct assertion of Tokio in the proxy stack, while related excerpts provide peripheral context about Rust proxy ecosystems but do not confirm the runtime choice.",
+        "citations": [
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "proxy_core_design_recommendations.performance_goal",
+        "reasoning": "The strongest support for the field value comes from sources that clearly discuss TLS 1.3 and its performance benefits, which align with the requirement to prefer TLS 1.3 in order to achieve low latency and secure handshakes. Explicit statements about TLS 1.3 speeding up handshakes and becoming the norm provide direct backing for a TLS 1.3 preference in the proxy design. Additional support comes from entries detailing TCP congestion control optimizations like BBR, including how BBR changes congestion control behavior to improve throughput in high-bandwidth, high-latency scenarios, which aligns with the goal of high reliability and low latency through better network performance. Concrete server-side tuning guidance for Linux networking parameters (such as using fq queuing discipline and enabling BBR via sysctl settings) provides actionable steps that a small proxy can implement to realize the intended performance characteristics. References that discuss the SNI-based certificate selection during TLS handshakes further reinforce reliability and correctness in TLS negotiation, which is relevant to a robust proxy design. Finally, the Rust-based reverse proxy references illustrate practical implementation contexts for building a minimal, configuration-driven proxy in Rust, which underpins the feasibility of implementing the described design in code. Taken together, these excerpts collectively support a design that emphasizes TLS 1.3, connection reuse, Linux kernel performance features like BBR, and appropriate network parameter tuning to realize low-latency, high-reliability forwarding to the OpenAI API.",
+        "citations": [
+          {
+            "url": "https://www.cloudflare.com/en-gb/learning/ssl/why-use-tls-1.3/",
+            "excerpts": [
+              "TLS, which is used by HTTPS and other network protocols for encryption, is the modern version of SSL. TLS 1.3 dropped support for older, less secure cryptographic features, and it sped up TLS handshakes, among other improvements."
+            ],
+            "title": "Why use TLS 1.3? | SSL and TLS vulnerabilities | Cloudflare"
+          },
+          {
+            "url": "https://dl.acm.org/doi/fullHtml/10.1145/3442381.3450057",
+            "excerpts": [
+              "Transport Layer Security (TLS) has become the norm for secure communication over the Internet. In August 2018, TLS 1.3, the latest version of TLS, was approved, providing improved security and performance of the previous TLS version."
+            ],
+            "title": "TLS 1.3 in Practice:How TLS 1.3 Contributes to the Internet"
+          },
+          {
+            "url": "https://linuxcapable.com/how-to-enable-bbr-on-ubuntu-linux/",
+            "excerpts": [
+              "net.ipv4.tcp_congestion_control=bbr",
+              "net.core.default_qdisc=fq",
+              "The first line sets the queueing discipline to fq (Fair Queue), which BBR requires for optimal performance.",
+              "BBR delivers the most significant performance improvements on high-bandwidth, high-latency connections where the default cubic algorithm struggles.",
+              "The algorithm measures actual network capacity rather than reacting to packet loss, making it particularly effective when bandwidth-delay product is high or when networks experience packet loss that doesn\u2019t indicate congestion."
+            ],
+            "title": "How to Enable BBR on Ubuntu 26.04, 24.04 and 22.04"
+          },
+          {
+            "url": "https://dev.moe/en/3021",
+            "excerpts": [
+              "BBR is a TCP congestion control algorithm developed by Google. It improves upon the shortcomings of traditional congestion control algorithms (like CUBIC), which reduce speed upon packet loss, significantly enhancing bandwidth utilization in high packet loss environments."
+            ],
+            "title": "Enable TCP BBR v2 on Linux & Windows 11 - Coxxs"
+          },
+          {
+            "url": "https://enterprise-support.nvidia.com/s/article/linux-sysctl-tuning",
+            "excerpts": [
+              "You can use the Linux sysctl command to modify default system network parameters that are set by the operating system in order to improve IPv4 and IPv6 traffic performance."
+            ],
+            "title": "NVIDIA Enterprise Support Portal | Linux sysctl Tuning"
+          },
+          {
+            "url": "https://github.com/cloudflare/cloudflare-docs/blob/production/src/content/docs/ssl/reference/certificate-and-hostname-priority.mdx",
+            "excerpts": [
+              "Cloudflare uses the following order to determine the certificate and settings used during a TLS handshake: SNI match: Certificates and settings that match the SNI hostname exactly take precedence."
+            ],
+            "title": "cloudflare-docs/src/content/docs/ssl/reference/certificate ..."
+          },
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          }
+        ],
+        "confidence": "high"
+      },
+      {
+        "field": "codex_api_status_and_behavior.implication",
+        "reasoning": "The strongest support for the field value comes from the excerpt explicitly noting that Codex models, available through the completions endpoint, have been discontinued since March 2023 on the OpenAI API. This directly contradicts the idea that Codex-era features remain relevant on the public API today. Another excerpt describes WebSocket-based workflows and remote-control tooling related to Codex, indicating that such capabilities existed as Codex-specific tooling, which could be considered legacy in the context of a current public API. Additional excerpts describe server and remote-access workflows for Codex (remote endpoints, app-servers, and WebSocket transport), which demonstrate that Codex-era tooling was operational in some form, reinforcing the notion that these features are not the standard public API today. The remaining excerpts discuss Codex-related tooling and remote capabilities, but do not explicitly declare obsolescence; instead, they document the existence or usage of Codex features, implying that such features were historically available or configurable but may not reflect the current public API status. Taken together, the clearest evidence supports obsolescence for Codex-specific modes as of the cited discontinuation, while other excerpts provide context about the kinds of tooling that existed around Codex-era workflows, which may be superseded by current OpenAI API capabilities.\n",
+        "citations": [
+          {
+            "url": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551",
+            "excerpts": [
+              "Codex models, which were accessible through the completions endpoint, have been discontinued since March 2023 on the OpenAI API."
+            ],
+            "title": "http://community.openai.com/t/documentation-and-implementation-of-open-ais-new-codex-model/1060551"
+          },
+          {
+            "url": "http://openai.com/index/speeding-up-agentic-workflows-with-websockets",
+            "excerpts": [
+              "A deep dive into the Codex agent loop, showing how WebSockets and connection-scoped caching reduced API overhead and improved model latency."
+            ],
+            "title": "http://openai.com/index/speeding-up-agentic-workflows-with-websockets"
+          },
+          {
+            "url": "http://developers.openai.com/codex/cli/reference",
+            "excerpts": [
+              "`--remote`\nType / Values\n`ws://host:port | wss://host:port`\nDetails\nConnect the interactive TUI to a remote app-server WebSocket endpoint. Supported for `codex` , `codex resume` , and `codex fork` ; other subcommands reject remote mode."
+            ],
+            "title": "http://developers.openai.com/codex/cli/reference"
+          },
+          {
+            "url": "http://github.com/openai/codex/releases",
+            "excerpts": [
+              "Added `codex remote-control` as a simpler entrypoint for starting a headless, remotely controllable app-server. ( [](https://github.com/openai/codex/pull/21424) )"
+            ],
+            "title": "http://github.com/openai/codex/releases"
+          },
+          {
+            "url": "http://developers.openai.com/codex/app-server",
+            "excerpts": [
+              "1. Start the server with `codex app-server` (default stdio transport) or `codex app-server --listen ws://127.0.0.1:4500` (experimental WebSocket transport).\nStart the server with codex app-server (default stdio transport) or codex app-server --listen ws://127.0.0.1:4500 (experimental WebSocket transport)."
+            ],
+            "title": "http://developers.openai.com/codex/app-server"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "proxy_core_design_recommendations.architecture_principle",
+        "reasoning": "The target field value advocates a minimal reverse proxy in Rust with a small surface area and three distinct code paths: standard JSON POST requests, non-buffered SSE passthrough, and WebSocket upgrade/tunneling. The two strongest excerpts describe a minimal, configuration-driven reverse proxy in Rust and a concrete example of a reverse proxy setup, confirming the feasibility and architectural lean towards a small, focused proxy. Additional excerpts emphasize WebSocket usage in a server-to-server context, including establishing WebSocket connections directly to a WebSocket API and passing JSON-serialized events over WebSocket. This supports the WebSocket upgrade/tunneling path as a core design consideration. While the explicit mention of non-buffered SSE pass-through is not present in these excerpts, the combination of a minimal proxy foundation and clear WebSocket usage aligns with a compact, purpose-built proxy design and helps validate the chosen three-path approach as a reasonable minimal architecture. The gathered information collectively corroborates the emphasis on keeping the proxy small, leveraging a direct HTTP/JSON POST path, a dedicated WebSocket path, and leaving room for non-buffered streaming (SSE) as a plausible pass-through path within a lean proxy design.",
+        "citations": [
+          {
+            "url": "http://github.com/shadertheory/exchange",
+            "excerpts": [
+              "A minimal, configuration-driven reverse proxy in Rust\nA minimal, configuration-driven reverse proxy in Rust, built with hyper , reqwest , and tokio ."
+            ],
+            "title": "shadertheory/exchange"
+          },
+          {
+            "url": "https://docs.rs/hyper-reverse-proxy",
+            "excerpts": [
+              "The following example will set up a reverse proxy listening on 127.0.0.1:13900, and will proxy these calls:"
+            ],
+            "title": "hyper_reverse_proxy - Rust - Docs.rs"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/guides/realtime-websocket",
+            "excerpts": [
+              "Connect to the Realtime API using WebSockets on a server.",
+              "In a server-to-server integration with Realtime, your backend system will connect via WebSocket directly to the Realtime API.",
+              "Over a WebSocket, you will both send and receive JSON-serialized events as strings of text",
+              "Learn how to connect to the Realtime API using WebSocket in a server-to-server application.",
+              "const  url =  \"wss://api.openai.com/v1/realtime?model=gpt-realtime-2\" ;"
+            ],
+            "title": "Realtime API with WebSocket | OpenAI API"
+          }
+        ],
+        "confidence": "medium"
+      },
+      {
+        "field": "unreliability_of_direct_ip_connections.reason_for_failure",
+        "reasoning": "Direct IP connections to services protected by Cloudflare can fail because users may attempt to connect using the raw IP address instead of the domain name, which Cloudflare blocks. This is related to how Cloudflare operates as a reverse proxy, providing protection and hiding origin server IPs. Additionally, the TLS handshake process, which is crucial for secure connections, can encounter errors. SNI (Server Name Indication) is part of the TLS handshake that helps prevent name mismatch errors by allowing the client to specify the domain name it's trying to reach during the handshake.",
+        "citations": [
+          {
+            "url": "https://evomi.com/blog/cloudflare-error-1003-how-to-fix",
+            "excerpts": [
+              "Essentially, this error signifies that Cloudflare, a service designed to protect and accelerate websites, has blocked your attempt to connect because you tried reaching the site using its raw IP address instead of its friendly domain name (like evomi.com)."
+            ],
+            "title": "Cloudflare Error 1003: Why It Occurs & How to Address It"
+          },
+          {
+            "url": "https://www.cloudflare.com/learning/ssl/what-is-sni/",
+            "excerpts": [
+              "SNI, or Server Name Indication, is an addition to the TLS encryption protocol that enables a client device to specify the domain name it is trying to reach in the first step of the TLS handshake, preventing common name mismatch errors."
+            ],
+            "title": "What is SNI? How TLS server name indication works - Cloudflare"
+          },
+          {
+            "url": "https://undercodetesting.com/decoding-the-hidden-infrastructure-how-dns-exposes-openais-cloudflare-backbone-and-what-it-means-for-your-api-security-video/",
+            "excerpts": [
+              "This initial reconnaissance reveals that OpenAI uses Cloudflare as a reverse proxy, which provides DDoS protection, Web Application Firewall (WAF) capabilities, and hides origin server IPs."
+            ],
+            "title": "Decoding The Hidden Infrastructure: How DNS Exposes OpenAI's ..."
+          }
+        ],
+        "confidence": "high"
+      }
+    ],
+    "type": "json",
+    "beta_fields": null,
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "executive_summary": {
+          "type": "string",
+          "description": "A high-level overview of the key findings and design recommendations for building a stage-one, low-latency, OpenAI-compatible Rust proxy. This summary addresses the primary tradeoffs and conclusions from the detailed analysis."
+        },
+        "proxy_core_design_recommendations": {
+          "type": "object",
+          "properties": {
+            "recommended_framework": {
+              "type": "string",
+              "description": "The recommended asynchronous Rust framework for building the proxy."
+            },
+            "core_library": {
+              "type": "string",
+              "description": "The recommended underlying HTTP library."
+            },
+            "architecture_principle": {
+              "type": "string",
+              "description": "The fundamental design principle for the proxy."
+            },
+            "performance_goal": {
+              "type": "string",
+              "description": "The primary performance objective of the design."
+            }
+          },
+          "required": [
+            "recommended_framework",
+            "core_library",
+            "architecture_principle",
+            "performance_goal"
+          ],
+          "additionalProperties": false
+        },
+        "openai_endpoint_analysis": {
+          "type": "string",
+          "description": "A summary of the current state of relevant OpenAI API endpoints. This section clarifies the transition from older APIs like Chat Completions and Codex to the newer, more capable Responses and Realtime APIs."
+        },
+        "chat_completions_api_status": {
+          "type": "object",
+          "properties": {
+            "endpoint_path": {
+              "type": "string",
+              "description": "The API path for the Chat Completions endpoint."
+            },
+            "current_status": {
+              "type": "string",
+              "description": "The current operational status of the API."
+            },
+            "official_recommendation": {
+              "type": "string",
+              "description": "OpenAI's official guidance for developers regarding this endpoint."
+            }
+          },
+          "required": [
+            "endpoint_path",
+            "current_status",
+            "official_recommendation"
+          ],
+          "additionalProperties": false
+        },
+        "responses_api_details": {
+          "type": "object",
+          "properties": {
+            "endpoint_path": {
+              "type": "string",
+              "description": "The API path for the modern Responses endpoint."
+            },
+            "key_features": {
+              "type": "string",
+              "description": "A summary of the advanced capabilities offered by the Responses API."
+            },
+            "streaming_mechanism": {
+              "type": "string",
+              "description": "The protocol used for streaming responses from this API."
+            },
+            "replaces_api": {
+              "type": "string",
+              "description": "The legacy API that the Responses API is intended to succeed."
+            }
+          },
+          "required": [
+            "endpoint_path",
+            "key_features",
+            "streaming_mechanism",
+            "replaces_api"
+          ],
+          "additionalProperties": false
+        },
+        "realtime_api_websocket_details": {
+          "type": "object",
+          "properties": {
+            "endpoint_url": {
+              "type": "string",
+              "description": "The full WebSocket URL for connecting to the Realtime API."
+            },
+            "protocol": {
+              "type": "string",
+              "description": "The communication protocol used by this endpoint."
+            },
+            "authentication": {
+              "type": "string",
+              "description": "The method used to authenticate with the WebSocket endpoint."
+            },
+            "primary_use_case": {
+              "type": "string",
+              "description": "The intended application for the Realtime API."
+            }
+          },
+          "required": [
+            "endpoint_url",
+            "protocol",
+            "authentication",
+            "primary_use_case"
+          ],
+          "additionalProperties": false
+        },
+        "codex_api_status_and_behavior": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "description": "The current status of the Codex API."
+            },
+            "deprecation_date": {
+              "type": "string",
+              "description": "The date when the Codex API was officially discontinued."
+            },
+            "implication": {
+              "type": "string",
+              "description": "The consequence of the discontinuation on related features like 'fast mode'."
+            }
+          },
+          "required": [
+            "status",
+            "deprecation_date",
+            "implication"
+          ],
+          "additionalProperties": false
+        },
+        "network_reliability_and_routing": {
+          "type": "string",
+          "description": "A summary of the network routing strategy for connecting to OpenAI services, focusing on the dichotomy between using Anycast via DNS and the pitfalls of attempting direct IP connections."
+        },
+        "anycast_for_reliability_and_latency": {
+          "type": "object",
+          "properties": {
+            "provider": {
+              "type": "string",
+              "description": "The service provider that supplies the Anycast network for OpenAI."
+            },
+            "mechanism": {
+              "type": "string",
+              "description": "How Anycast routing works to improve performance and reliability."
+            },
+            "primary_benefits": {
+              "type": "string",
+              "description": "The main advantages of using an Anycast network."
+            },
+            "affected_domains": {
+              "type": "string",
+              "description": "The key OpenAI domains that are routed via the Anycast network."
+            }
+          },
+          "required": [
+            "provider",
+            "mechanism",
+            "primary_benefits",
+            "affected_domains"
+          ],
+          "additionalProperties": false
+        },
+        "unreliability_of_direct_ip_connections": {
+          "type": "object",
+          "properties": {
+            "viability": {
+              "type": "string",
+              "description": "The conclusion on whether direct-IP connections are a feasible strategy."
+            },
+            "reason_for_failure": {
+              "type": "string",
+              "description": "The primary technical reason why direct-IP connections fail."
+            },
+            "underlying_technology": {
+              "type": "string",
+              "description": "The specific TLS extension that causes the connection failure."
+            },
+            "technical_explanation": {
+              "type": "string",
+              "description": "A detailed explanation of why the TLS handshake fails with direct IP connections to Cloudflare-proxied services."
+            }
+          },
+          "required": [
+            "viability",
+            "reason_for_failure",
+            "underlying_technology",
+            "technical_explanation"
+          ],
+          "additionalProperties": false
+        },
+        "transport_protocol_choices": {
+          "type": "string",
+          "description": "A discussion of the transport protocol options between the end-user/client and the proxy. This section weighs the tradeoffs between HTTP/1.1, HTTP/2, WebSockets, and Server-Sent Events (SSE) based on different application needs like streaming or request-response."
+        },
+        "server_side_optimization_strategy": {
+          "type": "string",
+          "description": "An overview of optimization techniques for the Linux server hosting the proxy, aimed at minimizing latency and maximizing throughput for TCP, TLS, and WebSocket/SSE traffic."
+        },
+        "linux_tcp_stack_tuning": {
+          "type": "object",
+          "properties": {
+            "congestion_control": {
+              "type": "string",
+              "description": "The recommended TCP congestion control algorithm for improving throughput on high-latency connections."
+            },
+            "queueing_discipline": {
+              "type": "string",
+              "description": "The required queueing discipline that works with the recommended congestion control algorithm."
+            },
+            "socket_options": {
+              "type": "string",
+              "description": "Recommended TCP socket options to reduce latency, such as disabling Nagle's algorithm."
+            },
+            "kernel_parameters": {
+              "type": "string",
+              "description": "Example sysctl commands to apply the recommended TCP tuning."
+            }
+          },
+          "required": [
+            "congestion_control",
+            "queueing_discipline",
+            "socket_options",
+            "kernel_parameters"
+          ],
+          "additionalProperties": false
+        },
+        "tls_performance_optimization": {
+          "type": "object",
+          "properties": {
+            "recommended_version": {
+              "type": "string",
+              "description": "The recommended version of the Transport Layer Security protocol."
+            },
+            "key_performance_feature": {
+              "type": "string",
+              "description": "The primary feature of the recommended TLS version that reduces latency."
+            },
+            "latency_impact": {
+              "type": "string",
+              "description": "How the recommended TLS version speeds up connection establishment."
+            }
+          },
+          "required": [
+            "recommended_version",
+            "key_performance_feature",
+            "latency_impact"
+          ],
+          "additionalProperties": false
+        },
+        "websocket_and_sse_tuning": {
+          "type": "object",
+          "properties": {
+            "sse_optimization_technique": {
+              "type": "string",
+              "description": "A key tuning consideration for maintaining long-lived Server-Sent Events connections through proxies."
+            },
+            "websocket_optimization_technique": {
+              "type": "string",
+              "description": "A performance tradeoff to consider when using WebSocket compression."
+            }
+          },
+          "required": [
+            "sse_optimization_technique",
+            "websocket_optimization_technique"
+          ],
+          "additionalProperties": false
+        },
+        "utility_of_server_client_modes": {
+          "type": "string",
+          "description": "An analysis of the query's point on 'server/client modes'. This section concludes that for a small proxy design, the primary useful mode is a 'server' (reverse proxy) that accepts client connections and forwards them to OpenAI. A 'client' mode is less relevant for this architecture."
+        },
+        "evidence_backed_tradeoffs_for_small_proxy": {
+          "type": "object",
+          "properties": {
+            "technology_stack_tradeoff": {
+              "type": "string",
+              "description": "The tradeoff between using mature, proven frameworks versus more experimental, potentially higher-performance ones."
+            },
+            "protocol_selection_tradeoff": {
+              "type": "string",
+              "description": "The tradeoff between using simpler streaming protocols like SSE versus more complex ones like WebSockets."
+            },
+            "reliability_strategy_tradeoff": {
+              "type": "string",
+              "description": "The tradeoff between relying on standard, reliable DNS/Anycast routing versus attempting complex and unreliable direct-IP logic."
+            }
+          },
+          "required": [
+            "technology_stack_tradeoff",
+            "protocol_selection_tradeoff",
+            "reliability_strategy_tradeoff"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "executive_summary",
+        "proxy_core_design_recommendations",
+        "openai_endpoint_analysis",
+        "chat_completions_api_status",
+        "responses_api_details",
+        "realtime_api_websocket_details",
+        "codex_api_status_and_behavior",
+        "network_reliability_and_routing",
+        "anycast_for_reliability_and_latency",
+        "unreliability_of_direct_ip_connections",
+        "transport_protocol_choices",
+        "server_side_optimization_strategy",
+        "linux_tcp_stack_tuning",
+        "tls_performance_optimization",
+        "websocket_and_sse_tuning",
+        "utility_of_server_client_modes",
+        "evidence_backed_tradeoffs_for_small_proxy"
+      ],
+      "additionalProperties": false
+    },
+    "content_file": "tokenproxy-deep-transport-research.md"
+  }
+}

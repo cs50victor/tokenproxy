@@ -1,0 +1,23 @@
+HTTP/2 403
+date: Wed, 27 May 2026 10:58:07 GMT
+content-type: text/html; charset=UTF-8
+content-length: 8432
+accept-ch: Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA
+cf-mitigated: challenge
+x-frame-options: SAMEORIGIN
+server: cloudflare
+critical-ch: Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA
+cross-origin-embedder-policy: require-corp
+cross-origin-opener-policy: same-origin-allow-popups
+cross-origin-resource-policy: same-origin
+origin-agent-cluster: ?1
+permissions-policy: accelerometer=(),browsing-topics=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),interest-cohort=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=(self)
+referrer-policy: strict-origin-when-cross-origin
+server-timing: chlray;desc="a02480a9b8c24fd0"
+x-content-type-options: nosniff
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+set-cookie: __cf_bm=._SinEVJhUT3SyoCc5oPdeqSpj56aPUikXGJ9ytVFgc-1779879487.0009077-1.0.1.1-hqmEwzNGiJJK_uBsX6mdil0iXrRGCu2Ocnz9HZB4k7uTRH6uDgPQFrdS2fEztZAkvxieJhPK8bXgZaCslfGKPs6S8RnFj7OAHR.VDoN4wZIfy_LJYR7WJtYFwbk.Cbza; HttpOnly; SameSite=None; Secure; Path=/; Domain=chatgpt.com; Expires=Wed, 27 May 2026 11:28:07 GMT
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=p0NoYDBQ6hlAF6EV%2Brm5rEOgCJPiC7PMWUSdfYi7uI2QXGJqZWhDxCqdo8niOzKhNZP5vaBlcMZcKMuX%2BJV7%2BgHGRo0zMB6nHpjiS3g%2BUVhFospPReDhZkmKiW%2F0"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.01,"max_age":604800}
+cf-ray: a02480a9b8c24fd0-SJC
+alt-svc: h3=":443"; ma=86400

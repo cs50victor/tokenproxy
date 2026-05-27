@@ -1,0 +1,17 @@
+HTTP/2 401
+date: Wed, 27 May 2026 10:56:05 GMT
+content-type: application/json; charset=utf-8
+content-length: 496
+set-cookie: __cf_bm=FadQXda3S4X7.uD1KSUEqQZZKfm3bwJPKfdEG4gBWxM-1779879365.762887-1.0.1.1-NVTxpA7yeS3kNVIxCPUgCHnn372NZ8cB3hQEbH8uWhN6hVmzyFybM5qCsEzt1LvXOFteyeGwh85Uaz6Hqe6G5gts.HfKGSiyx_8SsWcfd709hPzuT0rFbfyuh6PYbhD6; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.openai.com; Expires=Wed, 27 May 2026 11:26:05 GMT
+set-cookie: _cfuvid=IVDdxmKbyCghkwSxJp8ud21e6gwdhrxvpnU6BBn0suQ-1779879365.762887-1.0.1.1-_fw2sfHG.DVnG_huJ4oKdZ9vJUpLvulCh6xVt9NWpbo; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.openai.com
+cf-ray: a0247db40a433222-SJC
+cf-cache-status: DYNAMIC
+server: cloudflare
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+vary: Origin
+access-control-expose-headers: CF-Ray
+access-control-expose-headers: CF-Ray
+x-content-type-options: nosniff
+x-openai-proxy-wasm: v0.1
+x-request-id: req_54da9e0c0f6c4175a6e0f8680a11225c
+alt-svc: h3=":443"; ma=86400
