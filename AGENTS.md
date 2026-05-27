@@ -27,7 +27,33 @@ Stage one is writing the technical report and system design spec for tokenproxy.
 
 Treat `very_detailed_tokenproxy_spec.html` as the project's single self-contained implementation authority. Any engineer should be able to read that file and implement tokenproxy from start to finish. Do not leave unresolved assumptions, "likely" statements, TODO-style placeholders, or design claims that depend on unstated context. Present claims as facts only when measurements, citations, traces, or source excerpts support them; otherwise mark them as unanswered research questions and keep them out of implementation decisions.
 
-Write the report like a technical research paper. Define the method, cite every external claim inline, and include an APA-style References section at the end of the report. The final section of the HTML file must be a performance-review attestation. That attestation must summarize which submodule references were reviewed, state what implementation choices they support, and include references from every repository submodule. If a submodule cannot be reviewed, state the reason in the attestation.
+Write the report like a technical research paper. Define the method, cite every external claim inline, and include an APA-style References section at the end of the report. The final section of the HTML file must be a performance-review attestation. That attestation is an evidence audit, not a narrative summary.
+
+Performance-review attestation requirements:
+
+- Re-read `very_detailed_tokenproxy_spec.html` before editing the attestation. Do not preserve old attestation claims unless the current checkout still proves them.
+- Run `git submodule status --recursive` and account for every listed submodule. For each initialized submodule, record its commit and the exact source files reviewed. For each uninitialized submodule, record the `git submodule status` line and do not use it to support a design choice.
+- Source review must inspect implementation files, benchmark harnesses, or tests, not README prose alone. Cite exact file paths and line ranges for each performance-relevant fact: pooling, retry boundaries, backpressure, runtime model, parser choice, event-loop design, WebSocket/SSE flow, benchmark method, or telemetry.
+- The attestation table must include, for each submodule: commit, source paths with line ranges, verified source fact, implementation decision supported, and any benchmark or probe artifact that supports the decision.
+- Run actual measurements before making any performance claim. This includes passive network probes, tiny Rust experiments, Rust performance experiments, or workflow benchmarks appropriate to the claim. Include command, timestamp, environment, sample count, raw artifact path, and summary statistics such as p50, p95, p99, errors, and outliers.
+- Do not replace benchmarks with instructions for how to run benchmarks. A section may describe reproducibility, but every accepted performance decision must also point to a completed local run or a captured upstream artifact that was reviewed.
+- If credentials, network policy, missing tooling, platform limits, or absent product code prevent a benchmark, state that exact blocker, include the failed or skipped command, and mark the claim as an unanswered research question. Do not convert blocked measurements into design facts.
+- Do not write phrases such as "benchmark-backed", "measured", "validated", "reviewed", or "performance-proven" unless the report includes the source line references and benchmark/probe artifacts that justify the word.
+- The attestation must be the final substantive section of the HTML file and must map measured results back to concrete stage-two implementation decisions. If no actual performance experiments were run, the attestation must say so plainly and must not endorse latency-sensitive choices beyond source-backed correctness or complexity observations.
+
+Integration-test evidence requirements:
+
+- Do not stop at a required test matrix. If the report says an integration behavior is validated, include the actual test command, timestamp, environment, fixture or server used, pass/fail result, and artifact path or captured output.
+- If product code does not exist yet, state that integration tests could not run because there is no implementation under test. Keep those cases in a future test matrix, not in the measured-results or attestation sections.
+- Do not use integration-test language such as "validated", "verified", "passes", "covered", or "ready" for fake-server, SSE, WebSocket, failover, or metrics behavior unless a real test was executed in the current checkout.
+- Every integration-test claim must name the boundary tested: direct upstream probe, local fake OpenAI server, generated Rust experiment, or future stage-two implementation. Do not blur planned tests with completed tests.
+
+Comparative design-section requirements:
+
+- Comparative sections that argue for or against a framework, runtime, protocol stack, parser, transport, pooling strategy, scheduler model, or other performance-sensitive dependency must be evidence sections, not deferrals. They must cite source lines for complexity claims and include actual local measurements or reviewed upstream benchmark artifacts for performance claims.
+- Do not write final design rules that say only "measure first", "until a benchmark shows", "after a local implementation has a measured bottleneck", "Tokenproxy should measure", or equivalent future-tense gates. Replace them with one of two forms: a measured decision with the command, artifact, sample count, and result; or an explicit unanswered research question with the blocking reason.
+- A decision to avoid any performance-motivated dependency or advanced implementation path must state whether the decision rests on measured performance, source-backed complexity, ecosystem compatibility, operational risk, maintainability, or absent product code. Do not imply a performance result when the real evidence is only complexity, compatibility, or scope control.
+- If the report recommends any latency-sensitive default, it must show the local comparison that was run or state that the default is provisional and not performance-proven.
 
 Use the ripgrep article as the structural model:
 
