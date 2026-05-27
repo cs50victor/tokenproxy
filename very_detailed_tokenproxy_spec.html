@@ -66,7 +66,9 @@
       </p>
       <p class="mt-4 text-sm">
         Evidence snapshot: local checkout at <code>/Users/vic8or/dev/tokenproxy</code>,
-        observed through 2026-05-27 00:56:57 PDT and 2026-05-27 07:56:57 UTC.
+        passive probe artifacts through 2026-05-27 00:56:57 PDT / 2026-05-27
+        07:56:57 UTC; official OpenAI docs rechecked through 2026-05-27
+        01:18:26 PDT / 2026-05-27 08:18:26 UTC.
       </p>
     </header>
 
@@ -577,17 +579,19 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
             <td><code>axum</code> on Hyper 1</td>
             <td>
               Concise route code and direct access to request bodies, headers, and WebSocket
-              upgrades. If profiling shows framework overhead above the target, replace the
-              listener with Hyper service code without changing routing modules.
+              upgrades. This is a maintainability and ecosystem choice, not a measured
+              Axum-versus-Hyper performance result. A lower-level Hyper listener remains
+              an unanswered research question because no tokenproxy product code exists
+              for that comparison.
             </td>
           </tr>
           <tr>
             <td>HTTP upstream</td>
             <td><code>reqwest</code> with rustls TLS</td>
             <td>
-              Pooled clients, streaming bodies, HTTP/2 support, proxy/TLS configuration, and
-              small code. Codex's local proxy already uses Reqwest and disables global timeout
-              for streams (Codex, 2026b, lines 102-107).
+              Streaming bodies, HTTP/2 support, proxy/TLS configuration, and small code.
+              Codex's local proxy already uses Reqwest and disables global timeout for
+              streams (Codex, 2026b, lines 102-107).
             </td>
           </tr>
           <tr>
@@ -604,17 +608,21 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
             <td><code>serde_json</code></td>
             <td>
               Correctness and simplicity first. Use byte pass-through for full payloads and
-              parse only fields needed for routing and telemetry. Benchmark before adding
-              <code>simd-json</code>.
+              parse only fields needed for routing and telemetry. This parser choice rests
+              on compatibility and code-size control, not a local throughput comparison.
+              <code>simd-json</code> remains an unanswered research question because no
+              real Responses payload benchmark exists in this checkout.
             </td>
           </tr>
           <tr>
             <td>Concurrency maps</td>
             <td><code>arc-swap</code>, <code>dashmap</code>, <code>tokio::sync</code></td>
             <td>
-              Account config is read-heavy and hot. Use <code>arc-swap</code> snapshots for
-              routing tables, <code>DashMap</code> only for mutable per-account health, and
-              <code>watch</code> channels for updates.
+              Account configuration is shared by every request, while health state mutates
+              during failures and rate-limit updates. Use <code>arc-swap</code> snapshots
+              for routing tables, <code>DashMap</code> only for mutable per-account health,
+              and <code>watch</code> channels for updates. This is a concurrency-shape
+              decision; lock-strategy latency remains an unanswered stage-two benchmark.
             </td>
           </tr>
           <tr>
@@ -707,7 +715,7 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         <li>Require client messages to be JSON text with <code>type=response.create</code>.</li>
         <li>On first request, select an account supporting Responses and, when requested, WebSocket continuation.</li>
         <li>Open upstream <code>wss://api.openai.com/v1/responses</code> or account base equivalent.</li>
-        <li>Forward <code>response.create</code> unchanged except for safe defaults and prohibited transport fields.</li>
+        <li>Forward <code>response.create</code> as JSON text after removing WebSocket transport-only fields such as <code>stream</code> and <code>background</code>.</li>
         <li>For later turns, prefer <code>previous_response_id</code> plus only new input when upstream state is valid.</li>
         <li>If upstream lacks WebSocket continuation, synthesize a full <code>input</code> array from last request, last output, and new input.</li>
         <li>Forward upstream JSON text events to the downstream in order.</li>
@@ -1110,17 +1118,17 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         The first accepted WebSocket <code>response.create</code> must include a model.
         Tokenproxy forwards it as JSON text to the upstream socket after account
         selection and auth insertion. It records a request template after removing
-        transport-only fields and after applying any tested defaults. It records
-        <code>last_completed_response_id</code> and <code>last_completed_output_items</code>
-        only after a terminal <code>response.completed</code> event.
+        transport-only fields such as <code>stream</code> and <code>background</code>, then
+        applying any tested defaults. It records <code>last_completed_response_id</code>
+        and <code>last_completed_output_items</code> only after a terminal
+        <code>response.completed</code> event.
       </p>
       <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
   "type": "response.create",
   "model": "gpt-5.5",
   "instructions": "You are a concise coding agent.",
   "tools": [{ "type": "function", "name": "run_test", "parameters": { "type": "object" } }],
-  "input": [{ "type": "message", "role": "user", "content": "Run the fast tests." }],
-  "stream": true
+  "input": [{ "type": "message", "role": "user", "content": "Run the fast tests." }]
 }</code></pre>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Incremental fast path</h3>
@@ -1155,7 +1163,7 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         <li>Build <code>input</code> as prior input items, then completed output items, then new input items.</li>
         <li>Preserve output items exactly, including <code>phase</code>, tool-call IDs, annotations, reasoning summaries, and unknown fields.</li>
         <li>Deduplicate tool-call output items by <code>call_id</code> only when a test proves the same tool output appears in both prior and new input.</li>
-        <li>Set <code>stream = true</code> for WebSocket relay requests.</li>
+        <li>Remove WebSocket transport-only fields such as <code>stream</code> and <code>background</code> before sending the request upstream.</li>
       </ol>
       <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
   "type": "response.create",
@@ -1166,9 +1174,16 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
     { "type": "message", "role": "user", "content": "Run the fast tests." },
     { "type": "function_call", "call_id": "call_1", "name": "run_test", "arguments": "{\"target\":\"fast\"}" },
     { "type": "function_call_output", "call_id": "call_1", "output": "{\"status\":\"ok\"}" }
-  ],
-  "stream": true
+  ]
 }</code></pre>
+      <p class="mt-4">
+        The current OpenAI WebSocket guide says a <code>response.create</code> payload
+        mirrors the normal Responses create body except that transport-specific
+        fields such as <code>stream</code> and <code>background</code> are not used (OpenAI,
+        2026b). CLIProxyAPI's local normalizer sets <code>stream = true</code> before
+        using its executor path (CLIProxyAPI, 2026d, lines 478-495 and 523-612);
+        tokenproxy must follow the current WebSocket transport contract instead.
+      </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Compaction reset</h3>
       <p>
@@ -1569,7 +1584,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
     <section id="test-matrix" class="mb-12">
       <h2 class="mb-4 text-2xl font-bold">Required Test Matrix</h2>
       <p>
-        The implementation is not ready until these tests exist. Keep tests local
+        Do not accept a stage-two implementation without these tests. Keep tests local
         and deterministic by default. Credentialed upstream probes belong in ignored
         benchmark artifacts, not in normal unit tests.
       </p>
@@ -1613,7 +1628,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
           </tr>
           <tr>
             <td><code>responses/websocket</code></td>
-            <td>Text-only acceptance, ping/pong, binary close, one in-flight guard, upstream disconnect, 60-minute reconnect path, <code>previous_response_not_found</code> replay.</td>
+            <td>Text-only acceptance, ping/pong, binary close, one in-flight guard, upstream disconnect, 60-minute reconnect path, <code>previous_response_not_found</code> replay, and removal of WebSocket transport-only fields.</td>
           </tr>
           <tr>
             <td><code>metrics</code></td>
@@ -1792,7 +1807,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
     </section>
 
     <section id="mapping" class="mb-12">
-      <h2 class="mb-4 text-2xl font-bold">Measured Results to Implementation Decisions</h2>
+      <h2 class="mb-4 text-2xl font-bold">Evidence to Implementation Decisions</h2>
       <table class="mt-4 text-sm">
         <thead>
           <tr>
