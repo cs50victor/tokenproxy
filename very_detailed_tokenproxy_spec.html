@@ -119,7 +119,8 @@
         03:58 PDT / 2026-05-27 10:58 UTC; official OpenAI docs rechecked
         through 2026-05-27 04:04 PDT / 2026-05-27 11:04 UTC; usage-source
         probes through 2026-05-27 11:24 PDT / 2026-05-27 18:24 UTC; remote
-        setup source review through 2026-05-27 12:03 PDT / 2026-05-27 19:03 UTC.
+        setup source review through 2026-05-27 12:03 PDT / 2026-05-27 19:03 UTC;
+        auth-source review through 2026-05-27 15:55 PDT / 2026-05-27 22:55 UTC.
       </p>
     </header>
 
@@ -415,7 +416,7 @@
         <li>The default bind address must be <code>127.0.0.1:8787</code> so local development is safe and production servers can place tokenproxy behind a TLS reverse proxy.</li>
         <li>Binding to a non-loopback address must require <code>server.allow_non_loopback = true</code>.</li>
         <li>Every OpenAI-compatible route and every operator route except <code>GET /healthz</code> must require downstream client authentication with <code>Authorization: Bearer &lt;client key&gt;</code>.</li>
-        <li>Startup must fail before listening when the config file is invalid, no account is enabled, an enabled account references a missing token environment variable, or <code>downstream_auth.token_env</code> is unset, empty, or missing from the process environment.</li>
+        <li>Startup must fail before listening when the config file is invalid, no account is enabled, an enabled API-key account references a missing token environment variable, an enabled ChatGPT/Codex account references a missing or unreadable auth JSON path, or <code>downstream_auth.token_env</code> is unset, empty, or missing from the process environment.</li>
         <li>Tokenproxy must never autogenerate, print, or persist downstream client keys. The operator must create the client key outside tokenproxy and provide the same value to tokenproxy and authorized clients.</li>
         <li>Startup must not make credentialed OpenAI requests unless the operator explicitly runs a probe command.</li>
         <li>Shutdown must stop accepting new sockets, let active HTTP/SSE/WebSocket sessions drain for <code>shutdown_grace_ms</code>, then close remaining sessions with metrics.</li>
@@ -702,7 +703,33 @@ supports_responses = true
 supports_responses_ws = true
 supports_compact = true
 service_tiers = ["auto", "default", "priority"]
-prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
+prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"
+
+[[accounts]]
+id = "chatgpt-work"
+kind = "chatgpt_codex_auth_json"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_json_path = "/var/lib/tokenproxy/prod/auth/chatgpt-work.auth.json"
+priority = 90
+models = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"]
+supports_chat_completions = false
+supports_responses = true
+supports_responses_ws = true
+supports_compact = true
+service_tiers = ["default", "priority"]
+
+[[accounts]]
+id = "chatgpt-personal"
+kind = "chatgpt_codex_auth_json"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_json_path = "/var/lib/tokenproxy/prod/auth/chatgpt-personal.auth.json"
+priority = 80
+models = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"]
+supports_chat_completions = false
+supports_responses = true
+supports_responses_ws = true
+supports_compact = true
+service_tiers = ["default", "priority"]</code></pre>
       <p class="mt-4">
         Validation rules are part of the contract: account IDs must be unique;
         <code>server.id</code> must be a non-secret operator label and should be unique
@@ -713,13 +740,85 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         key when the variable is absent;
         <code>base_url</code> must use <code>https</code> unless
         <code>allow_insecure_upstream</code> is explicitly enabled for local tests;
-        <code>token_env</code> must be set for enabled accounts; booleans must not be
-        inferred from absent model names; timeout values must be nonzero; and
+        <code>token_env</code> must be set for enabled <code>openai_api_key</code>
+        accounts; <code>auth_json_path</code> must be an absolute path for enabled
+        <code>chatgpt_codex_auth_json</code> accounts; each ChatGPT/Codex account
+        must have its own path; booleans must not be inferred from absent model names;
+        timeout values must be nonzero; and
         <code>max_precommit_retries</code> must be <code>0</code> or <code>1</code> in stage two.
         <code>service_tiers</code> names accepted client request values for that
         account. Add <code>flex</code> only after the upstream account and model are
         known to support it. Normalize Codex-compatible legacy <code>fast</code> to
         upstream <code>priority</code> before account eligibility checks.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Remote ChatGPT/Codex auth files</h3>
+      <p>
+        There are two different TOML files in the remote Codex setup. The client
+        <code>~/.codex/config.toml</code> points at tokenproxy and supplies only the
+        downstream bearer key. It does not point at upstream ChatGPT credentials.
+        The server <code>/etc/tokenproxy/tokenproxy.toml</code> owns upstream account
+        credentials by naming a server-local JSON file path directly in each
+        ChatGPT/Codex account.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code># /etc/tokenproxy/tokenproxy.toml on the remote tokenproxy host
+[[accounts]]
+id = "chatgpt-work"
+kind = "chatgpt_codex_auth_json"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_json_path = "/var/lib/tokenproxy/prod/auth/chatgpt-work.auth.json"
+models = ["gpt-5.3-codex"]
+supports_responses = true
+supports_responses_ws = true
+supports_compact = true</code></pre>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>[[accounts]]
+id = "chatgpt-personal"
+kind = "chatgpt_codex_auth_json"
+base_url = "https://chatgpt.com/backend-api/codex"
+auth_json_path = "/var/lib/tokenproxy/prod/auth/chatgpt-personal.auth.json"
+models = ["gpt-5.3-codex"]
+supports_responses = true
+supports_responses_ws = true
+supports_compact = true</code></pre>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code># server process environment, not client laptop config
+export TOKENPROXY_CLIENT_KEY="client-key-for-downstream-callers"
+
+tokenproxy --config /etc/tokenproxy/tokenproxy.toml --dry-run
+tokenproxy --config /etc/tokenproxy/tokenproxy.toml</code></pre>
+      <p class="mt-4">
+        The JSON file must stay on the remote tokenproxy host and must be readable
+        only by the tokenproxy service user. For a Codex-compatible file, tokenproxy
+        must parse the <code>$CODEX_HOME/auth.json</code> shape: optional
+        <code>auth_mode</code>, optional <code>OPENAI_API_KEY</code>, optional
+        <code>tokens</code>, <code>tokens.id_token</code> as the raw ID-token JWT,
+        <code>tokens.access_token</code>, <code>tokens.refresh_token</code>,
+        optional <code>tokens.account_id</code>, and optional
+        <code>last_refresh</code>. Startup dry-run must fail before listening if the
+        path is empty, the path is relative, the file is missing, the path is not a
+        regular file, the same path is reused by two enabled accounts, the JSON cannot
+        parse, or the selected account lacks ChatGPT token data.
+      </p>
+      <p class="mt-4">
+        This differs from CLIProxyAPI's directory model. CLIProxyAPI has one
+        <code>auth-dir</code>, defaults it to <code>~/.cli-proxy-api</code>, expands
+        <code>~</code>, then scans all <code>.json</code> files under that directory
+        into auth records. Tokenproxy should start simpler: each enabled ChatGPT
+        account names one explicit absolute JSON path in TOML. A server that hosts
+        multiple tokenproxy environments should use separate config files or separate
+        path prefixes, for example <code>/var/lib/tokenproxy/prod/auth/</code> and
+        <code>/var/lib/tokenproxy/staging/auth/</code>. Add directory scanning only after
+        stage-two operators need bulk import and tests cover duplicate IDs, disabled
+        files, unsafe names, and live reload.
+      </p>
+      <p class="caption">
+        Source: Codex <code>utils/home-dir/src/lib.rs</code> lines 5-17 and
+        20-61, <code>login/src/auth/storage.rs</code> lines 31-48, 84-85,
+        113-153, and 336-356, <code>login/src/token_data.rs</code> lines
+        10-25 and 137-176, <code>config/src/types.rs</code> lines 85-98,
+        and <code>model-provider-info/src/lib.rs</code> lines 127-135;
+        CLIProxyAPI <code>internal/config/config.go</code> lines 22-26 and
+        46-48, <code>internal/util/util.go</code> lines 74-95, and
+        <code>sdk/auth/filestore.go</code> lines 129-158 and 188-263.
       </p>
     </section>
 
@@ -2149,7 +2248,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
         <tbody>
           <tr>
             <td><code>config</code></td>
-            <td>Missing token env, duplicate account ID, invalid URL, non-loopback bind without opt-in, zero timeout, invalid retry count.</td>
+            <td>Missing token env, missing <code>auth_json_path</code>, relative or unreadable auth JSON path, duplicate enabled auth JSON path, malformed Codex auth JSON, duplicate account ID, invalid URL, non-loopback bind without opt-in, zero timeout, invalid retry count.</td>
           </tr>
           <tr>
             <td><code>http/classify</code></td>
@@ -2280,6 +2379,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       <ul class="list-disc pl-6">
         <li>Bind to loopback by default. Non-loopback bind requires an explicit config flag.</li>
         <li>Require a downstream bearer client key before listening. The key comes from <code>downstream_auth.token_env</code>; tokenproxy must not autogenerate one.</li>
+        <li>Keep upstream ChatGPT/Codex auth JSON files on the tokenproxy server. Client Codex TOML must never reference those files.</li>
         <li>Compare the downstream bearer key with constant-time equality.</li>
         <li>Reject requests without <code>Authorization: Bearer &lt;client key&gt;</code> before reading large bodies or dialing upstream.</li>
         <li>Reject unsupported routes. Do not proxy arbitrary URLs.</li>
@@ -2306,7 +2406,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       <h2 class="mb-4 text-2xl font-bold">Implementation Plan</h2>
       <ol class="list-decimal pl-6">
         <li>Create a Rust workspace with one binary crate <code>tokenproxy</code> and one internal library crate if tests need it.</li>
-        <li>Implement config loading, account model, redaction helpers, and route classifier.</li>
+        <li>Implement config loading, account model, Codex-compatible auth JSON parsing, redaction helpers, and route classifier.</li>
         <li>Implement configuration-backed <code>GET /v1/models</code> response from configured models and account capability state.</li>
         <li>Implement non-streaming pass-through for <code>/v1/responses</code> and <code>/v1/chat/completions</code>.</li>
         <li>Add pooled upstream client with per-request auth insertion and connection timeout config.</li>
@@ -2559,7 +2659,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <tbody>
               <tr><th>Is it a CLI?</th><td>Yes. The binary is a CLI that normally starts a long-running OpenAI-compatible server on a remote host or application-network host.</td></tr>
               <tr><th>What changes in clients?</th><td>Only <code>base_url</code> and model-provider selection. Request bodies keep their OpenAI shape.</td></tr>
-              <tr><th>What changes for operators?</th><td>They own the TOML file, account token environment variables, TLS endpoint, process supervision, logs, health, and metrics.</td></tr>
+              <tr><th>What changes for operators?</th><td>They own the TOML file, account token environment variables, ChatGPT auth-file paths, TLS endpoint, process supervision, logs, health, and metrics.</td></tr>
               <tr><th>What tokenproxy owns?</th><td>Account choice, upstream auth insertion, continuation state, SSE/WebSocket relay, and pre-commit failover.</td></tr>
             </tbody>
           </table>
@@ -2609,8 +2709,9 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
           <table class="mt-4 text-sm">
             <tbody>
               <tr><th>Client key</th><td>Set <code>TOKENPROXY_CLIENT_KEY</code> in the process environment. Tokenproxy never creates a key for the operator.</td></tr>
+              <tr><th>ChatGPT auth files</th><td>Set each account's <code>auth_json_path</code> to a distinct absolute server-local Codex auth JSON path. Client Codex TOML never points at these files.</td></tr>
               <tr><th>Start</th><td><code>tokenproxy --config /etc/tokenproxy/tokenproxy.toml --bind 127.0.0.1:8787</code> behind a TLS reverse proxy.</td></tr>
-              <tr><th>Dry run</th><td>Validate config, account IDs, URLs, timeout bounds, and downstream plus upstream token env names without contacting upstream.</td></tr>
+              <tr><th>Dry run</th><td>Validate config, account IDs, URLs, timeout bounds, downstream key env, upstream token env, and upstream auth JSON paths without contacting upstream.</td></tr>
               <tr><th>Probe</th><td>Passive DNS/TLS/HTTP timing only until the operator explicitly asks for credentialed probes.</td></tr>
               <tr><th>Listen</th><td>Accept Chat Completions, Responses HTTP/SSE, Responses WebSocket, and model-catalog requests from authenticated remote clients.</td></tr>
               <tr><th>Observe</th><td>Expose account state, route reason, transport, prompt-cache class, retry phase, and status-page context.</td></tr>
@@ -2651,8 +2752,10 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
         Source: <a href="#configuration">Runtime
         Configuration</a>, <a href="#transport-deployment-policy">Transport and
         Deployment Policy</a>, Codex <code>model-provider-info/src/lib.rs</code> lines
-        1-6, 49-78, and 81-135, Codex <code>config/src/thread_config.rs</code> lines
-        279-287, and Codex <code>config/src/profile_toml.rs</code> lines 24-31.
+        1-6, 49-78, 81-135, and 127-135, Codex
+        <code>config/src/thread_config.rs</code> lines 279-287, Codex
+        <code>config/src/profile_toml.rs</code> lines 24-31, and Codex
+        <code>login/src/auth/storage.rs</code> lines 31-48 and 84-85.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Local development and diagnostics</h3>
@@ -2736,6 +2839,9 @@ curl -s -H "Authorization: Bearer $TOKENPROXY_CLIENT_KEY" http://127.0.0.1:8787/
         <div class="command-card">
           <p class="font-bold">On the server</p>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>sudo install -m 0600 tokenproxy.toml /etc/tokenproxy/tokenproxy.toml
+sudo install -m 0600 chatgpt-work.auth.json /var/lib/tokenproxy/prod/auth/chatgpt-work.auth.json
+sudo install -m 0600 chatgpt-personal.auth.json /var/lib/tokenproxy/prod/auth/chatgpt-personal.auth.json
+
 export OPENAI_API_KEY="set-in-server-secret-store"
 export TOKENPROXY_CLIENT_KEY="set-in-server-secret-store"
 
@@ -2766,7 +2872,8 @@ codex exec \
         <a href="#transport-deployment-policy">Transport and Deployment Policy</a>,
         <code>stage_one_evidence/2026-05-27T1203-0700-remote-setup-source-review/ssh_https_source_review.md</code>,
         NGINX WebSocket proxying, Caddy <code>reverse_proxy</code>, Cloudflare
-        WebSockets, and OpenBSD <code>ssh_config(5)</code>.
+        WebSockets, OpenBSD <code>ssh_config(5)</code>, and Codex
+        <code>login/src/auth/storage.rs</code> lines 31-48 and 84-85.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Server-to-proxy example</h3>
@@ -3285,7 +3392,7 @@ codex exec \
         </thead>
         <tbody>
           <tr><td>Routes Chat, Responses, Responses WebSocket, and configured model-catalog traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
-          <tr><td>Lets Codex target a remote tokenproxy provider without upstream credentials in Codex config.</td><td><code>config</code></td><td>Codex provider entry plus tokenproxy account table</td><td>Codex setup smoke test</td><td>Codex config source and Runtime Configuration</td></tr>
+          <tr><td>Lets Codex target a remote tokenproxy provider without upstream credentials in Codex config.</td><td><code>config</code></td><td>Codex provider entry plus tokenproxy account table and server-side <code>auth_json_path</code></td><td>Codex setup smoke test plus missing-auth-file dry-run test</td><td>Codex config/auth source and Runtime Configuration</td></tr>
           <tr><td>Rejects anonymous proxy exposure.</td><td><code>config</code> and <code>listener</code></td><td><code>DownstreamAuth</code>, client-key env name, constant-time bearer comparison</td><td>missing-env startup test plus unauthenticated request admission tests</td><td>Normative contract, Runtime Configuration, and Security rules</td></tr>
           <tr><td>Preserves continuation quality.</td><td><code>responses_state</code></td><td>ordered output-item log, <code>previous_response_id</code>, assistant <code>phase</code></td><td>replay and compaction tests</td><td>OpenAI and CLIProxyAPI rows</td></tr>
           <tr><td>Preserves Codex fast-mode intent.</td><td><code>routing</code></td><td>requested and actual <code>service_tier</code>, account tier allowlist</td><td>service-tier passthrough tests</td><td>OpenAI docs and Codex source</td></tr>
@@ -3390,6 +3497,10 @@ codex exec \
         Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
       </p>
       <p class="mt-3">
+        CLIProxyAPI. (2026l). <em>Auth-dir and file-backed Codex auth sources</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
         Cloudflare. (2026b). <em>pingora-core/src/protocols/mod.rs</em>. Local submodule
         <code>pingora</code>, commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
       </p>
@@ -3455,6 +3566,11 @@ codex exec \
         Codex. (2026i). <em>Model-provider config, FastMode, service-tier model
         metadata, request filtering, and Responses request construction sources</em>.
         Local submodule <code>codex</code>, commit
+        <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        Codex. (2026j). <em>Auth home, auth.json storage, token data, and auth
+        storage mode sources</em>. Local submodule <code>codex</code>, commit
         <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
       </p>
       <p class="mt-3">
@@ -3866,6 +3982,11 @@ codex exec \
               <code>internal/api/handlers/management/auth_files.go</code> lines
               375-436;
               <code>internal/api/handlers/management/usage.go</code> lines 23-42;
+              <code>internal/config/config.go</code> lines 22-26 and 46-48;
+              <code>internal/util/util.go</code> lines 74-95;
+              <code>sdk/auth/filestore.go</code> lines 129-158, 188-263,
+              and 279-305;
+              <code>internal/auth/codex/token.go</code> lines 15-39 and 46-80;
               <code>internal/redisqueue/plugin.go</code> lines 118-126.
             </td>
             <td>
@@ -3887,7 +4008,13 @@ codex exec \
               upstream response headers for usage sinks, and exposes auth
               <code>next_retry_after</code> through management auth-file entries. The
               reviewed management auth-file and usage-queue handlers do not expose a
-              built-in remaining-percent quota field.
+              built-in remaining-percent quota field. CLIProxyAPI also resolves one
+              <code>auth-dir</code>, defaults an empty auth directory to
+              <code>~/.cli-proxy-api</code>, expands <code>~</code>, scans JSON files
+              below that directory, parses provider type and metadata, and writes Codex
+              OAuth token files with <code>id_token</code>, <code>access_token</code>,
+              <code>refresh_token</code>, <code>account_id</code>, <code>email</code>,
+              and <code>type</code> fields.
             </td>
             <td>
               Implement the same narrow generation/WebSocket surface, add a local
@@ -3897,7 +4024,10 @@ codex exec \
               account-selected upstream paths instead of broad public downstream routes,
               derive stable prompt-cache-key values, and model tokenproxy usage visibility
               as observed reset/cooldown state plus optional adapter-provided quota
-              percentages instead of invented remaining-capacity estimates.
+              percentages instead of invented remaining-capacity estimates. Do not inherit
+              directory-wide auth scanning in stage two; use explicit per-account
+              <code>auth_json_path</code> entries first so multiple remote ChatGPT
+              accounts have clear config-to-file boundaries.
             </td>
             <td>
               Source and test review only. No CLIProxyAPI benchmark or test command was
@@ -3917,6 +4047,15 @@ codex exec \
               lines 376-386;
               <code>codex-rs/model-provider-info/src/lib.rs</code> lines 1-6,
               35-37, 49-78, and 81-135;
+              <code>codex-rs/utils/home-dir/src/lib.rs</code> lines 5-17
+              and 20-61;
+              <code>codex-rs/login/src/auth/storage.rs</code> lines 31-48,
+              84-85, 113-153, and 336-356;
+              <code>codex-rs/login/src/token_data.rs</code> lines 10-25
+              and 137-176;
+              <code>codex-rs/config/src/types.rs</code> lines 85-98;
+              <code>codex-rs/model-provider/src/auth.rs</code> lines 52-63
+              and 78-120;
               <code>codex-rs/login/src/auth/manager.rs</code> lines 94-98;
               <code>codex-rs/cloud-tasks/src/env_detect.rs</code> lines 35-75;
               <code>codex-rs/codex-mcp/src/mcp/mod.rs</code> lines 425-448;
@@ -3962,6 +4101,15 @@ codex exec \
               and has a source test that builds a local provider with
               <code>requires_openai_auth = false</code> and
               <code>supports_websockets = true</code>.
+              Codex resolves its home from <code>CODEX_HOME</code> or
+              <code>~/.codex</code>, stores file-mode CLI auth at
+              <code>$CODEX_HOME/auth.json</code>, supports file, keyring, auto, and
+              ephemeral auth storage modes, and serializes ChatGPT auth as
+              <code>auth_mode</code> plus token data whose <code>id_token</code> JSON
+              field is the raw JWT. For a provider with
+              <code>requires_openai_auth = false</code>, provider auth resolution skips
+              the OpenAI login requirement and uses the provider's configured
+              environment key or unauthenticated mode where applicable.
               Codex FastMode is stable and default-enabled, maps legacy <code>fast</code>
               to upstream <code>priority</code>, preserves explicit <code>default</code> as a
               request sentinel, filters unsupported tiers before request construction,
@@ -3975,7 +4123,9 @@ codex exec \
               auth, use explicit provider-base path joining for API and ChatGPT Codex
               accounts, exclude ChatGPT WHAM/Apps/agent-identity paths from downstream
               proxying, document a local Codex provider setup that points at tokenproxy
-              without storing upstream credentials in Codex config, use the Tokio ecosystem first, bound WebSocket queues, close on
+              without storing upstream credentials in Codex config, parse
+              Codex-compatible upstream auth JSON only on the tokenproxy server through
+              explicit per-account paths, use the Tokio ecosystem first, bound WebSocket queues, close on
               control-plane overload, emit tagged WebSocket timing metrics, normalize
               legacy <code>fast</code> to <code>priority</code>, pass official service-tier
               values through only when supported, record requested and actual
@@ -4220,7 +4370,9 @@ codex exec \
         reset deadlines when a 429 usage-limit response or account adapter provides
         them, and publish remaining percentages only when an adapter or upstream field
         explicitly provides that value. Expose remote client access over normal
-        HTTPS/WSS with downstream client authentication; do not add SSH tunnel
+        HTTPS/WSS with downstream client authentication; keep client Codex TOML free of
+        upstream ChatGPT/Codex auth paths and point tokenproxy account entries at
+        server-local auth JSON files through <code>auth_json_path</code>; do not add SSH tunnel
         management or keep SSH as a supported tokenproxy client setup. Treat
         client-to-remote-proxy and server-to-proxy as the primary product workflows;
         keep same-device loopback as a development and diagnostic workflow only.
@@ -4251,6 +4403,14 @@ codex exec \
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-27 3:55 PM PDT</td>
+            <td>Changed ChatGPT/Codex account config from path env indirection to direct per-account auth_json_path entries for multi-account servers.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 1:06 PM PDT</td>
+            <td>Reviewed Codex and CLIProxyAPI auth-file source; added the server-side auth-file contract and kept client Codex TOML credential-free.</td>
+          </tr>
           <tr>
             <td>2026-05-27 12:36 PM PDT</td>
             <td>Re-reviewed downstream traffic security; added explicit bearer client-key startup and admission rules with no autogenerated key.</td>
