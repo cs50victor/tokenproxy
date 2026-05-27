@@ -41,7 +41,18 @@
     .viz-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
     .viz-grid > *, .viz-grid-3 > * { min-width: 0; }
     .viz-box { border: 1px solid #111; padding: 0.75rem; min-width: 0; }
+    .quick-map { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+    .command-card { border: 1px solid #111; padding: 0.75rem; min-width: 0; }
+    .checkgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
+    .checkgrid > div { border: 1px solid #111; padding: 0.75rem; min-width: 0; }
     .metric { border: 1px solid #111; padding: 0.75rem; min-width: 0; min-height: 8.5rem; }
+    .usage-board { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+    .usage-card { border: 1px solid #111; padding: 0.75rem; min-width: 0; }
+    .usage-card header { display: flex; justify-content: space-between; gap: 0.75rem; align-items: baseline; border-bottom: 1px solid #111; padding-bottom: 0.35rem; margin-bottom: 0.6rem; }
+    .usage-window { margin-top: 0.65rem; }
+    .usage-line { display: flex; justify-content: space-between; gap: 0.75rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 0.82rem; }
+    .usage-bar { height: 0.55rem; border: 1px solid #111; margin-top: 0.3rem; background: #fff; }
+    .usage-bar span { display: block; height: 100%; background: #111; }
     .module-map { display: inline-block; min-width: min(22rem, 100%); max-width: 100%; line-height: 1.45; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
     .flow { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: stretch; }
@@ -85,7 +96,7 @@
     @media (max-width: 640px) {
       .px-6 { padding-left: 1rem; padding-right: 1rem; }
       .text-4xl { font-size: 2rem; }
-      .viz-grid, .viz-grid-3 { grid-template-columns: 1fr; }
+      .viz-grid, .viz-grid-3, .quick-map, .checkgrid, .usage-board { grid-template-columns: 1fr; }
       table { font-size: 0.82rem; }
     }
   </style>
@@ -106,7 +117,9 @@
         passive network and transport artifacts through 2026-05-27 04:09 PDT /
         2026-05-27 11:09 UTC, endpoint inventory artifacts through 2026-05-27
         03:58 PDT / 2026-05-27 10:58 UTC; official OpenAI docs rechecked
-        through 2026-05-27 04:04 PDT / 2026-05-27 11:04 UTC.
+        through 2026-05-27 04:04 PDT / 2026-05-27 11:04 UTC; usage-source
+        probes through 2026-05-27 11:24 PDT / 2026-05-27 18:24 UTC; remote
+        setup source review through 2026-05-27 12:03 PDT / 2026-05-27 19:03 UTC.
       </p>
     </header>
 
@@ -118,6 +131,14 @@
         OpenAI-compatible agent requests, choose a usable upstream account, preserve
         streaming semantics, and keep the continuation path fast. It is not a gateway
         platform, an API translator for every provider, or a general QUIC experiment.
+      </p>
+      <p class="mt-4">
+        The primary product use case is a network-reachable tokenproxy server. A
+        developer laptop, agent client, or application server connects to that server
+        over <code>https://</code> or <code>wss://</code>; tokenproxy then relays upstream
+        with its configured account pool. Running tokenproxy on the same device as the
+        client is a local development and diagnostic path, not the default deployment
+        model.
       </p>
       <p class="mt-4">
         The central design claim is that the largest latency wins for Codex-like workflows
@@ -186,12 +207,12 @@
       <div class="claim mt-5">
         <p>
           <strong>Claim 6.</strong> Stage two should expose one binary and one routing model,
-          not divergent server and client modes. A remote server, a user-device relay,
-          and a server-to-server Ubuntu deployment need the same OpenAI-compatible HTTP,
-          SSE, and WebSocket semantics. Deployment roles may change listener addresses,
-          auth policy, mTLS, outbound connector setup, and socket tuning, but they must
-          not fork account selection, replay, service-tier handling, or stream failure
-          behavior.
+          with client-to-remote-proxy and server-to-proxy as the primary workflows. A
+          same-device loopback run is useful for local development and diagnostics, but
+          it is not the product default. Deployment roles may change listener
+          addresses, downstream auth, TLS termination, reverse-proxy placement, and
+          socket tuning, but they must not fork account selection, replay, service-tier
+          handling, or stream failure behavior.
         </p>
       </div>
     </section>
@@ -207,7 +228,7 @@
         <li><code>POST /v1/responses</code> with JSON and SSE streaming support.</li>
         <li><code>POST /v1/responses/compact</code> as a thin pass-through for compacting Responses input windows.</li>
         <li><code>GET /v1/responses</code> WebSocket upgrade for Responses WebSocket mode.</li>
-        <li><code>GET /v1/models</code> as a small local compatibility endpoint backed by configured model and account-capability state.</li>
+        <li><code>GET /v1/models</code> as a small configuration-backed compatibility endpoint backed by configured model and account-capability state.</li>
         <li><code>GET /healthz</code> for local process health.</li>
         <li><code>GET /metrics</code> for Prometheus-format counters and histograms.</li>
       </ul>
@@ -268,7 +289,7 @@
             <td>Official OpenAPI and WebSocket guide; CLIProxyAPI registers the HTTP and WebSocket routes at <code>internal/api/server.go</code> lines 385-399; Codex uses endpoint paths in <code>responses.rs</code> lines 102-104, <code>compact.rs</code> lines 33-54, and <code>responses_websocket.rs</code> lines 376-386.</td>
           </tr>
           <tr>
-            <td>Implement a local model catalog response. Do not call upstream while serving the request.</td>
+            <td>Implement a configuration-backed model catalog response. Do not call upstream while serving the request.</td>
             <td>Public model catalog</td>
             <td><code>GET /v1/models</code>.</td>
             <td>Official OpenAPI <code>/models</code>; CLIProxyAPI registers <code>v1.GET("/models")</code> at <code>internal/api/server.go</code> lines 385-386; Codex uses path <code>models</code> with a 5-second refresh timeout in <code>model-provider/src/models_endpoint.rs</code> lines 31-33 and 81-105.</td>
@@ -389,7 +410,9 @@
       <h3 class="mt-8 mb-3 text-xl font-bold">Process contract</h3>
       <ul class="list-disc pl-6">
         <li>The binary name must be <code>tokenproxy</code>.</li>
-        <li>The default bind address must be <code>127.0.0.1:8787</code>.</li>
+        <li>The primary supported deployment is a network-reachable HTTPS/WSS tokenproxy origin consumed by user devices, Codex clients, agent SDKs, or application servers.</li>
+        <li>Running tokenproxy on the same device as the client is a local development and diagnostic path only.</li>
+        <li>The default bind address must be <code>127.0.0.1:8787</code> so local development is safe and production servers can place tokenproxy behind a TLS reverse proxy.</li>
         <li>Binding to a non-loopback address must require <code>server.allow_non_loopback = true</code>.</li>
         <li>Startup must fail before listening when the config file is invalid, no account is enabled, or an enabled account references a missing token environment variable.</li>
         <li>Startup must not make credentialed OpenAI requests unless the operator explicitly runs a probe command.</li>
@@ -450,8 +473,64 @@
             <td>Return Prometheus text exposition.</td>
             <td>Non-GET returns <code>405</code>.</td>
           </tr>
+          <tr>
+            <td><code>GET /usage</code></td>
+            <td>No body.</td>
+            <td>Return a non-secret usage snapshot for this tokenproxy instance: server ID, observed time, account label or hash, health, observed usage-limit windows, remaining percent when rate-limit headers or an account adapter explicitly report enough fields, reset time when headers, errors, or adapters report it, rate-limit pressure, and cooldown state. Do not call upstream while serving. Operator dashboards and CLI clients combine remote tokenproxy servers and optional local development instances by polling each instance.</td>
+            <td>Non-GET returns <code>405</code>. Remote operator requests without configured downstream auth return <code>401</code>. Unknown upstream reset data stays <code>null</code>.</td>
+          </tr>
         </tbody>
       </table>
+      <p class="mt-4">
+        The <code>/usage</code> response must use this shape so an operator UI can merge
+        several connected tokenproxy servers without server-side peer discovery.
+        The 2026-05-27 usage-source probe showed that standard OpenAI Responses and
+        Chat Completions responses expose token usage in the response body and
+        request/token limits, remaining counts, and reset durations in
+        <code>x-ratelimit-*</code> headers
+        (<code>stage_one_evidence/2026-05-27T112339-0700-usage-source-probes/usage_probe_summary.txt</code>).
+        CLIProxyAPI supports the Codex reset-time path by parsing
+        <code>usage_limit_reached</code> 429 bodies with <code>error.resets_at</code> or
+        <code>error.resets_in_seconds</code>, carrying upstream response headers into usage
+        records, and exposing queued usage records through its management API
+        (CLIProxyAPI, 2026i). It does not expose a built-in remaining-percent quota
+        field in the reviewed source. Tokenproxy must therefore compute percentages
+        only from explicit limit/remaining fields or account-adapter quota snapshots;
+        otherwise <code>remaining_percent</code> stays <code>null</code>. The values below are
+        fixtures that define fields; they are not measured usage.
+      </p>
+      <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>{
+  "server_id": "remote-ubuntu",
+  "observed_at": "2026-05-27T11:24:18-07:00",
+  "accounts": [
+    {
+      "account_id_hash": "acct_8f12",
+      "display_name": "openai-primary",
+      "health": "open",
+      "usage": [
+        {
+          "window": "openai_requests",
+          "limit": 500,
+          "remaining": 499,
+          "remaining_percent": 99.8,
+          "reset_after": "120ms",
+          "reset_at": null,
+          "source": "openai_ratelimit_headers",
+          "observed_at": "2026-05-27T11:24:18-07:00"
+        },
+        {
+          "window": "codex_usage_limit",
+          "limited": true,
+          "remaining_percent": null,
+          "reset_at": "2026-05-27T15:07:00-07:00",
+          "source": "usage_limit_reached_error",
+          "observed_at": "2026-05-27T11:18:55-07:00"
+        }
+      ],
+      "cooldown_until": null
+    }
+  ]
+}</code></pre>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Header and body rules</h3>
       <ul class="list-disc pl-6">
@@ -579,6 +658,7 @@
 
       <h3 class="mt-8 mb-3 text-xl font-bold">TOML schema</h3>
       <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>[server]
+id = "remote-ubuntu"
 bind = "127.0.0.1:8787"
 allow_non_loopback = false
 max_body_bytes = 10485760
@@ -619,6 +699,8 @@ service_tiers = ["auto", "default", "priority"]
 prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
       <p class="mt-4">
         Validation rules are part of the contract: account IDs must be unique;
+        <code>server.id</code> must be a non-secret operator label and should be unique
+        across connected usage sources;
         <code>base_url</code> must use <code>https</code> unless
         <code>allow_insecure_upstream</code> is explicitly enabled for local tests;
         <code>token_env</code> must be set for enabled accounts; booleans must not be
@@ -662,12 +744,14 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
       </p>
       <ul class="mt-4 list-disc pl-6">
         <li><code>id</code>: stable local account identifier.</li>
+        <li><code>display_name</code>: optional non-secret operator label for the usage view; logs and metrics still use the account hash by default.</li>
         <li><code>kind</code>: <code>openai_api_key</code> or later ChatGPT-account adapter kind.</li>
         <li><code>base_url</code>: default <code>https://api.openai.com/v1</code>.</li>
         <li><code>models</code>: explicit allowlist or discovered model map.</li>
         <li><code>supports_responses</code>, <code>supports_chat_completions</code>, <code>supports_responses_ws</code>.</li>
         <li><code>health</code>: open, throttled, auth_failed, disabled, or unknown.</li>
         <li><code>next_retry_at</code>: monotonic deadline for retrying throttled accounts.</li>
+        <li><code>usage_windows</code>: latest observed rate-limit, usage-limit, or adapter windows, each with <code>limited</code>, optional <code>remaining_percent</code>, <code>reset_at</code>, <code>source</code>, and <code>observed_at</code>. OpenAI <code>x-ratelimit-*</code> headers can populate limit, remaining, and reset duration; Codex <code>usage_limit_reached</code> errors can populate <code>reset_at</code>; the reviewed CLIProxyAPI management and usage-queue sources did not expose a remaining-percent field, so subscription-window percentages require a future account adapter (CLIProxyAPI, 2026i, lines 1095-1113; CLIProxyAPI, 2026k, lines 375-436).</li>
         <li><code>prompt_cache_key_seed</code>: stable per caller or per account key material.</li>
       </ul>
       <p class="mt-4">
@@ -972,6 +1056,7 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
       <ul class="list-disc pl-6">
         <li>Mirror upstream status and body for upstream responses.</li>
         <li>Forward <code>content-type</code>, <code>openai-request-id</code>, <code>x-request-id</code>, and rate-limit headers.</li>
+        <li>When a response carries account-scoped rate or usage-limit hints, update the selected account's health and usage window state without rewriting the upstream body.</li>
         <li>Strip <code>set-cookie</code> unless a later ChatGPT-account adapter proves it is needed and stores it out of logs.</li>
         <li>For SSE, do not synthesize semantic events except for tested repair of missing completed output when source events contain enough output-item data.</li>
         <li>For WebSocket, forward upstream JSON text events in order. Do not reorder deltas for metrics convenience.</li>
@@ -1670,13 +1755,14 @@ After compacted window is used:
       <h2 class="mb-4 text-2xl font-bold">Transport and Deployment Policy</h2>
       <p>
         Stage two should ship one <code>tokenproxy</code> binary with role configuration,
-        not separate server-mode and client-mode code paths. The request contract is the
-        same whether the process runs on a user laptop, a hosted proxy server, or an
-        Ubuntu server-to-server relay: admit OpenAI-compatible HTTP/SSE/WebSocket
-        traffic, choose an account, preserve continuation state, and relay upstream
-        traffic by hostname. Role configuration may change listen address, downstream
-        authentication, mTLS, outbound connector setup, and socket tuning. It must not
-        fork replay, account routing, service-tier, prompt-cache, or failure semantics.
+        not separate server-mode and client-mode code paths. The primary deployment
+        shape is a remote proxy server: a user device, Codex client, agent SDK, or
+        application server connects over <code>https://</code> or <code>wss://</code> to a
+        tokenproxy origin, and tokenproxy relays upstream by hostname. Same-device
+        loopback use exists to develop, smoke-test, and diagnose the same contract. Role
+        configuration may change listen address, downstream authentication, TLS
+        termination, reverse-proxy placement, and socket tuning. It must not fork
+        replay, account routing, service-tier, prompt-cache, or failure semantics.
       </p>
       <table class="mt-4 text-sm">
         <thead>
@@ -1688,18 +1774,29 @@ After compacted window is used:
         </thead>
         <tbody>
           <tr>
-            <td>Hosted proxy to user device</td>
+            <td>Remote client access</td>
             <td>
-              Use normal HTTPS plus WebSocket from the client to the proxy when the
-              device can reach the proxy. If the device is behind NAT and must expose a
-              local client endpoint, add an outbound connector role that dials the hosted
-              proxy over TLS and carries the same request protocol over an authenticated
-              tunnel. Do not create a separate routing implementation for that role.
+              Use one supported remote client surface: <code>https://</code> for
+              HTTP/SSE and <code>wss://</code> for Responses WebSocket at the configured
+              tokenproxy origin. Terminate TLS in tokenproxy or in a normal reverse
+              proxy that forwards to a loopback tokenproxy listener. Require downstream
+              client authentication for remote access. Do not make SSH local forwarding
+              a stage-two setup path, CLI-managed feature, benchmark target, or second
+              supported client mode.
             </td>
             <td>
-              The OpenAI WebSocket contract is one response in flight per upstream socket,
-              so connection ownership is already a routing invariant. Duplicating the
-              router across modes would duplicate the highest-risk state machine.
+              NGINX, Caddy, and Cloudflare document normal WebSocket proxy support over
+              HTTP(S). OpenSSH local forwarding is a separate TCP forwarding channel
+              that requires an SSH client process, local port binding, and tunnel
+              lifecycle management. Reviewed SSH forwarding benchmarks show SSH can work
+              for HTTP traffic, but they do not show a latency advantage over direct
+              HTTPS/WSS. The simpler supported path is therefore one public
+              OpenAI-compatible HTTPS/WSS origin plus one downstream client key.
+              Source:
+              <code>stage_one_evidence/2026-05-27T1203-0700-remote-setup-source-review/ssh_https_source_review.md</code>,
+              NGINX WebSocket proxying, Caddy <code>reverse_proxy</code>, Cloudflare
+              WebSockets, OpenBSD <code>ssh_config(5)</code>, and ssh-auto-forward
+              benchmark artifacts.
             </td>
           </tr>
           <tr>
@@ -1970,6 +2067,16 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
             <td>account_id_hash, state</td>
           </tr>
           <tr>
+            <td><code>tokenproxy_account_usage_remaining_percent</code></td>
+            <td>gauge</td>
+            <td>server_id, account_id_hash, window, source</td>
+          </tr>
+          <tr>
+            <td><code>tokenproxy_account_usage_reset_timestamp_seconds</code></td>
+            <td>gauge</td>
+            <td>server_id, account_id_hash, window, source</td>
+          </tr>
+          <tr>
             <td><code>tokenproxy_cached_input_tokens_total</code></td>
             <td>counter</td>
             <td>model_family, endpoint</td>
@@ -1987,6 +2094,12 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
         timing events (Codex, 2026d, lines 574-790). Iggy's benchmark analytics compute
         p50, p95, and p99 latency distribution data and render P50/P95/P99 markers
         (Apache Iggy, 2026b, lines 35-45; Apache Iggy, 2026c, lines 255-260).
+        Usage gauges must be emitted only for values observed from upstream headers,
+        account adapters, or completed response usage metadata; tokenproxy must omit
+        unknown reset windows instead of guessing. CLIProxyAPI captures upstream
+        response headers into usage records, but its Codex reset evidence comes from
+        structured 429 error bodies and retry deadlines, not from a percentage quota
+        counter (CLIProxyAPI, 2026i).
       </p>
     </section>
 
@@ -2021,7 +2134,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
           </tr>
           <tr>
             <td><code>routing/select</code></td>
-            <td>Model allowlist, service tier filter, WebSocket support filter, throttled cooldown, auth failure exclusion, deterministic tie-break.</td>
+            <td>Model allowlist, service tier filter, WebSocket support filter, throttled cooldown, usage-limit reset exclusion, auth failure exclusion, deterministic tie-break.</td>
           </tr>
           <tr>
             <td><code>http/sse</code></td>
@@ -2040,8 +2153,12 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
             <td>Text-only acceptance, ping/pong, binary close, one in-flight guard, upstream disconnect, 60-minute reconnect path, <code>previous_response_not_found</code> replay, and removal of WebSocket transport-only fields.</td>
           </tr>
           <tr>
+            <td><code>usage</code></td>
+            <td><code>GET /usage</code> snapshot shape, server ID, account hash or display label, window omission when unknown, reset timestamp parsing, no prompts, no tokens, no raw upstream request IDs.</td>
+          </tr>
+          <tr>
             <td><code>metrics</code></td>
-            <td>Low-cardinality labels, request duration buckets, WebSocket event counters, account health gauge, no raw account ID labels.</td>
+            <td>Low-cardinality labels, request duration buckets, WebSocket event counters, account health and usage-window gauges, no raw account ID labels.</td>
           </tr>
         </tbody>
       </table>
@@ -2113,7 +2230,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       </p>
       <ul class="mt-4 list-disc pl-6">
         <li>Use an immutable account routing table behind <code>ArcSwap</code>.</li>
-        <li>Use per-account health cells with atomic state and <code>Instant</code> deadlines.</li>
+        <li>Use per-account health cells with atomic state, <code>Instant</code> deadlines, and optional wall-clock usage-window display.</li>
         <li>Use bounded channels for WebSocket session events; on overflow, close the session rather than growing unbounded memory.</li>
         <li>Store WebSocket replay state per session: last request JSON, last response output items, last response ID, account ID, and a compaction flag.</li>
         <li>Expire closed session replay state immediately unless debug capture is explicitly enabled.</li>
@@ -2126,6 +2243,8 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
         Iggy's shard router gives the corresponding server-side rule: never block the
         reactor on a full internal channel; record the drop and rely on the protocol
         recovery path where one exists (Apache Iggy, 2026d, lines 178-227).
+        Usage-limit reset state must use the same simple account cell; do not add a
+        scheduler when selection-time deadline checks are enough.
       </p>
     </section>
 
@@ -2138,6 +2257,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
         <li>Attach upstream Authorization only from selected account state.</li>
         <li>Redact Authorization, cookies, Set-Cookie, account tokens, and refresh tokens in logs.</li>
         <li>Expose account IDs in logs as stable hashes unless debug mode is enabled.</li>
+        <li>Expose <code>GET /usage</code> only as an operator surface; it must return no tokens, cookies, raw upstream request IDs, prompts, or response bodies.</li>
         <li>Use constant-time comparison for local admin tokens if an admin endpoint is added.</li>
         <li>Disable request/response body dumps by default.</li>
         <li>When dumps are enabled, write JSONL with redacted headers and a max body byte cap.</li>
@@ -2157,7 +2277,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       <ol class="list-decimal pl-6">
         <li>Create a Rust workspace with one binary crate <code>tokenproxy</code> and one internal library crate if tests need it.</li>
         <li>Implement config loading, account model, redaction helpers, and route classifier.</li>
-        <li>Implement local <code>GET /v1/models</code> response from configured models and account capability state.</li>
+        <li>Implement configuration-backed <code>GET /v1/models</code> response from configured models and account capability state.</li>
         <li>Implement non-streaming pass-through for <code>/v1/responses</code> and <code>/v1/chat/completions</code>.</li>
         <li>Add pooled upstream client with per-request auth insertion and connection timeout config.</li>
         <li>Add SSE relay with first-event header delay and Responses event metrics.</li>
@@ -2166,6 +2286,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
         <li>Add downstream Responses WebSocket route and upstream WebSocket client.</li>
         <li>Add WebSocket continuation state, <code>previous_response_id</code> fast path, and full transcript fallback.</li>
         <li>Add account health transitions, backoff, and retry-before-commit behavior.</li>
+        <li>Add read-only <code>GET /usage</code> snapshots from observed account state so remote operator views, plus optional local development views, can list account usage and reset windows.</li>
         <li>Add Prometheus metrics and JSON logs.</li>
         <li>Add benchmark harness with direct-upstream and through-proxy modes.</li>
         <li>Run workflow benchmarks and update this spec only when completed artifacts require design changes.</li>
@@ -2194,6 +2315,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
 |   |-- state.rs
 |   |-- websocket.rs
 |   `-- replay.rs
+|-- usage.rs
 |-- metrics.rs
 `-- bench_probe.rs</code></pre>
       <p class="mt-4">
@@ -2363,16 +2485,16 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <rect x="20" y="34" width="135" height="76" fill="none" stroke="#111"/>
             <text x="39" y="62" font-size="13" font-family="monospace">Codex CLI</text>
             <text x="39" y="84" font-size="12" font-family="monospace">or agent SDK</text>
-            <text x="39" y="102" font-size="11" font-family="monospace">base_url=/v1</text>
+            <text x="39" y="102" font-size="11" font-family="monospace">base_url=https</text>
             <line x1="155" y1="72" x2="238" y2="72" stroke="#111"/>
             <polygon points="238,72 228,67 228,77" fill="#111"/>
-            <text x="166" y="58" font-size="11" font-family="monospace">HTTP/SSE/WS</text>
+            <text x="166" y="58" font-size="11" font-family="monospace">HTTPS/WSS</text>
 
             <rect x="250" y="20" width="205" height="105" fill="none" stroke="#111"/>
             <text x="280" y="48" font-size="14" font-family="monospace">tokenproxy</text>
-            <text x="280" y="71" font-size="12" font-family="monospace">one Rust binary</text>
-            <text x="280" y="91" font-size="12" font-family="monospace">listener + router + relay</text>
-            <text x="280" y="111" font-size="12" font-family="monospace">default 127.0.0.1:8787</text>
+            <text x="280" y="71" font-size="12" font-family="monospace">server-hosted binary</text>
+            <text x="280" y="91" font-size="12" font-family="monospace">TLS origin + router</text>
+            <text x="280" y="111" font-size="12" font-family="monospace">loopback behind TLS</text>
 
             <line x1="455" y1="72" x2="533" y2="72" stroke="#111"/>
             <polygon points="533,72 523,67 523,77" fill="#111"/>
@@ -2389,7 +2511,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <text x="381" y="199" font-size="11" font-family="monospace">Prometheus</text>
             <rect x="476" y="158" width="92" height="52" fill="none" stroke="#111"/>
             <text x="499" y="180" font-size="12" font-family="monospace">/models</text>
-            <text x="493" y="199" font-size="11" font-family="monospace">local list</text>
+            <text x="493" y="199" font-size="11" font-family="monospace">config list</text>
             <line x1="352" y1="125" x2="352" y2="148" stroke="#111"/>
             <line x1="296" y1="148" x2="522" y2="148" stroke="#111"/>
             <line x1="296" y1="148" x2="296" y2="158" stroke="#111"/>
@@ -2397,17 +2519,17 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <line x1="522" y1="148" x2="522" y2="158" stroke="#111"/>
 
             <rect x="85" y="242" width="560" height="62" fill="none" stroke="#111"/>
-            <text x="110" y="267" font-size="13" font-family="monospace">CLI: tokenproxy --config ./tokenproxy.toml</text>
-            <text x="110" y="288" font-size="13" font-family="monospace">optional: --bind ADDR | --dry-run | --probe-network</text>
+            <text x="110" y="267" font-size="13" font-family="monospace">server: tokenproxy --config /etc/tokenproxy/tokenproxy.toml</text>
+            <text x="110" y="288" font-size="13" font-family="monospace">client: base_url=https://tokenproxy.example.com/v1</text>
           </svg>
         </div>
         <div class="viz-box">
           <p class="font-bold">Thirty-second mental model</p>
           <table class="mt-4 text-sm">
             <tbody>
-              <tr><th>Is it a CLI?</th><td>Yes. The binary is a CLI that normally starts a long-running OpenAI-compatible server.</td></tr>
+              <tr><th>Is it a CLI?</th><td>Yes. The binary is a CLI that normally starts a long-running OpenAI-compatible server on a remote host or application-network host.</td></tr>
               <tr><th>What changes in clients?</th><td>Only <code>base_url</code> and model-provider selection. Request bodies keep their OpenAI shape.</td></tr>
-              <tr><th>What changes for operators?</th><td>They own the TOML file, account token environment variables, process supervision, logs, health, and metrics.</td></tr>
+              <tr><th>What changes for operators?</th><td>They own the TOML file, account token environment variables, TLS endpoint, process supervision, logs, health, and metrics.</td></tr>
               <tr><th>What tokenproxy owns?</th><td>Account choice, upstream auth insertion, continuation state, SSE/WebSocket relay, and pre-commit failover.</td></tr>
             </tbody>
           </table>
@@ -2422,14 +2544,16 @@ warn!("websocket control queue full while replying to ping; closing connection")
         </div>
       </div>
       <p class="caption">
-        Caption: the first screen must show tokenproxy as one CLI-started server
-        with OpenAI-compatible client traffic and operator endpoints. Source:
+        Caption: the first screen must show tokenproxy as a remote server process
+        with OpenAI-compatible HTTPS/WSS client traffic and operator endpoints.
+        Same-device loopback appears only as a development and diagnostic variant.
+        Source:
         <a href="#normative-contract">Normative Stage-two Contract</a>,
         <a href="#configuration">Runtime Configuration</a>, and
         <a href="#transport-deployment-policy">Transport and Deployment Policy</a>.
       </p>
 
-      <h3 class="mt-8 mb-3 text-xl font-bold">First-run setup path</h3>
+      <h3 class="mt-8 mb-3 text-xl font-bold">Primary remote setup path</h3>
       <div class="viz-grid">
         <div class="viz-box">
           <p class="font-bold">Codex client view</p>
@@ -2438,41 +2562,41 @@ service_tier = "default"
 
 [model_providers.tokenproxy]
 name = "tokenproxy"
-base_url = "http://127.0.0.1:8787/v1"
+base_url = "https://tokenproxy.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
 env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
           <p class="mt-4">
-            The local Codex config names tokenproxy as an OpenAI-compatible Responses
-            provider. It does not hold upstream OpenAI or ChatGPT account credentials;
-            tokenproxy owns account selection and upstream auth insertion.
+            The Codex config points at the remote tokenproxy HTTPS/WSS origin. It does
+            not hold upstream OpenAI or ChatGPT account credentials; tokenproxy owns
+            account selection and upstream auth insertion.
           </p>
         </div>
         <div class="viz-box">
           <p class="font-bold">Tokenproxy operator view</p>
           <table class="mt-4 text-sm">
             <tbody>
-              <tr><th>Start</th><td><code>tokenproxy --config tokenproxy.toml --bind 127.0.0.1:8787</code></td></tr>
+              <tr><th>Start</th><td><code>tokenproxy --config /etc/tokenproxy/tokenproxy.toml --bind 127.0.0.1:8787</code> behind a TLS reverse proxy.</td></tr>
               <tr><th>Dry run</th><td>Validate config, account IDs, URLs, timeout bounds, and token env names without contacting upstream.</td></tr>
               <tr><th>Probe</th><td>Passive DNS/TLS/HTTP timing only until the operator explicitly asks for credentialed probes.</td></tr>
-              <tr><th>Listen</th><td>Accept Chat Completions, Responses HTTP/SSE, Responses WebSocket, and local model-catalog requests.</td></tr>
+              <tr><th>Listen</th><td>Accept Chat Completions, Responses HTTP/SSE, Responses WebSocket, and model-catalog requests from authenticated remote clients.</td></tr>
               <tr><th>Observe</th><td>Expose account state, route reason, transport, prompt-cache class, retry phase, and status-page context.</td></tr>
             </tbody>
           </table>
         </div>
       </div>
-      <svg class="mt-4 border border-black" viewBox="0 0 760 160" role="img" aria-label="First-run setup path">
+      <svg class="mt-4 border border-black" viewBox="0 0 760 160" role="img" aria-label="Primary remote setup path">
         <rect x="20" y="24" width="120" height="48" fill="none" stroke="#111"/>
         <text x="38" y="44" font-size="12" font-family="monospace">Codex config</text>
         <text x="38" y="62" font-size="12" font-family="monospace">provider=tokenproxy</text>
         <text x="154" y="54" font-size="14" font-family="monospace">-&gt;</text>
         <rect x="182" y="24" width="126" height="48" fill="none" stroke="#111"/>
-        <text x="206" y="44" font-size="12" font-family="monospace">loopback HTTP</text>
+        <text x="206" y="44" font-size="12" font-family="monospace">HTTPS/WSS</text>
         <text x="200" y="62" font-size="12" font-family="monospace">/v1/responses</text>
         <text x="322" y="54" font-size="14" font-family="monospace">-&gt;</text>
         <rect x="350" y="24" width="128" height="48" fill="none" stroke="#111"/>
-        <text x="374" y="44" font-size="12" font-family="monospace">tokenproxy</text>
+        <text x="358" y="44" font-size="12" font-family="monospace">remote tokenproxy</text>
         <text x="366" y="62" font-size="12" font-family="monospace">route + relay</text>
         <text x="492" y="54" font-size="14" font-family="monospace">-&gt;</text>
         <rect x="520" y="24" width="120" height="48" fill="none" stroke="#111"/>
@@ -2489,8 +2613,8 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
         <text x="238" y="130" font-size="12" font-family="monospace">route evidence</text>
       </svg>
       <p class="caption">
-        Caption: this setup view shows the smallest local Codex path: user-defined
-        Codex provider, loopback tokenproxy listener, tokenproxy-owned upstream account
+        Caption: this setup view shows the primary remote Codex path: user-defined
+        Codex provider, HTTPS/WSS tokenproxy origin, tokenproxy-owned upstream account
         credentials, and returned stream events. Source: <a href="#configuration">Runtime
         Configuration</a>, <a href="#transport-deployment-policy">Transport and
         Deployment Policy</a>, Codex <code>model-provider-info/src/lib.rs</code> lines
@@ -2498,7 +2622,7 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
         279-287, and Codex <code>config/src/profile_toml.rs</code> lines 24-31.
       </p>
 
-      <h3 class="mt-8 mb-3 text-xl font-bold">Normal local commands</h3>
+      <h3 class="mt-8 mb-3 text-xl font-bold">Local development and diagnostics</h3>
       <div class="quick-map">
         <div class="command-card">
           <p class="font-bold">Minimal tokenproxy config</p>
@@ -2517,7 +2641,7 @@ supports_responses = true
 supports_responses_ws = true</code></pre>
         </div>
         <div class="command-card">
-          <p class="font-bold">Operator shell</p>
+          <p class="font-bold">Same-device diagnostic shell</p>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export OPENAI_API_KEY="set-outside-repo"
 export TOKENPROXY_CLIENT_KEY="local-client-token"
 
@@ -2525,33 +2649,35 @@ tokenproxy --config ./tokenproxy.toml --dry-run
 tokenproxy --config ./tokenproxy.toml
 
 curl -s http://127.0.0.1:8787/healthz
-curl -s http://127.0.0.1:8787/v1/models</code></pre>
+curl -s http://127.0.0.1:8787/v1/models
+curl -s http://127.0.0.1:8787/usage</code></pre>
         </div>
       </div>
       <p class="caption">
-        Caption: the normal path is a config file, environment-held secrets, dry-run
-        validation, then a long-running server. Source:
+        Caption: same-device loopback commands are for development, smoke tests, and
+        diagnostics. They exercise the same route contract as the remote server path,
+        but they are not the primary production setup. Source:
         <a href="#configuration">Runtime Configuration</a> and
         <a href="#security">Security and Privacy Rules</a>.
       </p>
 
-      <h3 class="mt-8 mb-3 text-xl font-bold">Server setup with local Codex</h3>
+      <h3 class="mt-8 mb-3 text-xl font-bold">Client-to-remote-proxy example</h3>
       <div class="viz-box">
-        <svg viewBox="0 0 800 330" role="img" aria-label="Remote tokenproxy with local Codex over SSH tunnel">
+        <svg viewBox="0 0 800 330" role="img" aria-label="Remote tokenproxy with local Codex over HTTPS and WebSocket">
           <rect x="30" y="40" width="170" height="90" fill="none" stroke="#111"/>
           <text x="60" y="70" font-size="14" font-family="monospace">local laptop</text>
           <text x="60" y="94" font-size="12" font-family="monospace">Codex profile</text>
-          <text x="60" y="116" font-size="12" font-family="monospace">base_url local /v1</text>
+          <text x="60" y="116" font-size="12" font-family="monospace">base_url https /v1</text>
 
           <rect x="302" y="40" width="190" height="90" fill="none" stroke="#111"/>
-          <text x="337" y="70" font-size="14" font-family="monospace">SSH tunnel</text>
-          <text x="334" y="94" font-size="12" font-family="monospace">-L 8787:127.0.0.1:8787</text>
-          <text x="346" y="116" font-size="12" font-family="monospace">encrypted transport</text>
+          <text x="328" y="70" font-size="14" font-family="monospace">HTTPS / WSS</text>
+          <text x="322" y="94" font-size="12" font-family="monospace">tokenproxy.example.com</text>
+          <text x="334" y="116" font-size="12" font-family="monospace">client key auth</text>
 
           <rect x="598" y="40" width="170" height="90" fill="none" stroke="#111"/>
           <text x="636" y="70" font-size="14" font-family="monospace">server</text>
-          <text x="626" y="94" font-size="12" font-family="monospace">tokenproxy</text>
-          <text x="620" y="116" font-size="12" font-family="monospace">loopback bind</text>
+          <text x="614" y="94" font-size="12" font-family="monospace">TLS reverse proxy</text>
+          <text x="620" y="116" font-size="12" font-family="monospace">to 127.0.0.1</text>
 
           <line x1="200" y1="85" x2="302" y2="85" stroke="#111"/>
           <polygon points="302,85 292,80 292,90" fill="#111"/>
@@ -2559,14 +2685,14 @@ curl -s http://127.0.0.1:8787/v1/models</code></pre>
           <polygon points="598,85 588,80 588,90" fill="#111"/>
 
           <rect x="598" y="200" width="170" height="70" fill="none" stroke="#111"/>
-          <text x="620" y="229" font-size="13" font-family="monospace">api.openai.com</text>
-          <text x="620" y="251" font-size="12" font-family="monospace">host-based TLS/SNI</text>
+          <text x="624" y="229" font-size="13" font-family="monospace">tokenproxy</text>
+          <text x="620" y="251" font-size="12" font-family="monospace">loopback bind</text>
           <line x1="683" y1="130" x2="683" y2="200" stroke="#111"/>
           <polygon points="683,200 678,190 688,190" fill="#111"/>
 
           <rect x="30" y="198" width="462" height="74" fill="none" stroke="#111"/>
           <text x="54" y="225" font-size="13" font-family="monospace">Default remote pattern</text>
-          <text x="54" y="249" font-size="12" font-family="monospace">No public proxy listener is required. The local Codex config stays identical.</text>
+          <text x="54" y="249" font-size="12" font-family="monospace">One public HTTPS/WSS origin. No SSH tunnel command is required.</text>
         </svg>
       </div>
       <div class="quick-map mt-4">
@@ -2575,41 +2701,84 @@ curl -s http://127.0.0.1:8787/v1/models</code></pre>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>sudo install -m 0600 tokenproxy.toml /etc/tokenproxy/tokenproxy.toml
 export OPENAI_API_KEY="set-in-server-secret-store"
 
-tokenproxy --config /etc/tokenproxy/tokenproxy.toml --log-json</code></pre>
+tokenproxy --config /etc/tokenproxy/tokenproxy.toml --bind 127.0.0.1:8787 --log-json
+
+# Caddy example
+tokenproxy.example.com {
+  reverse_proxy 127.0.0.1:8787
+}</code></pre>
         </div>
         <div class="command-card">
           <p class="font-bold">On the laptop</p>
-          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>ssh -N -L 8787:127.0.0.1:8787 tokenproxy-host
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export TOKENPROXY_CLIENT_KEY="remote-client-token"
 
-export TOKENPROXY_CLIENT_KEY="local-client-token"
-codex -p tokenproxy</code></pre>
+codex exec \
+  -c "model_providers.tokenproxy={ name = 'tokenproxy', base_url = 'https://tokenproxy.example.com/v1', wire_api = 'responses', requires_openai_auth = false, supports_websockets = true, env_key = 'TOKENPROXY_CLIENT_KEY' }" \
+  -c model_provider="tokenproxy" \
+  "summarize this repository"</code></pre>
         </div>
       </div>
       <p class="caption">
-        Caption: server use starts with an SSH tunnel and loopback server bind.
-        A public non-loopback listener remains an explicit deployment role because
-        the stage-two contract requires opt-in before binding outside loopback.
+        Caption: remote use starts with one HTTPS/WSS tokenproxy origin and a
+        downstream client key. SSH local forwarding remains an operator-managed
+        fallback outside the stage-two client contract because reviewed source and
+        benchmark evidence did not show a speed advantage that justifies a second
+        setup surface.
         Source: <a href="#normative-contract">Normative Stage-two Contract</a> and
-        <a href="#transport-deployment-policy">Transport and Deployment Policy</a>.
+        <a href="#transport-deployment-policy">Transport and Deployment Policy</a>,
+        <code>stage_one_evidence/2026-05-27T1203-0700-remote-setup-source-review/ssh_https_source_review.md</code>,
+        NGINX WebSocket proxying, Caddy <code>reverse_proxy</code>, Cloudflare
+        WebSockets, and OpenBSD <code>ssh_config(5)</code>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Server-to-proxy example</h3>
+      <div class="quick-map">
+        <div class="command-card">
+          <p class="font-bold">Application server environment</p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export OPENAI_BASE_URL="https://tokenproxy.example.com/v1"
+export TOKENPROXY_CLIENT_KEY="server-client-token"
+
+agent-worker \
+  --openai-base-url "$OPENAI_BASE_URL" \
+  --openai-api-key "$TOKENPROXY_CLIENT_KEY"</code></pre>
+        </div>
+        <div class="command-card">
+          <p class="font-bold">Tokenproxy server role</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>Client leg</th><td>Authenticated <code>https://</code>, SSE, or <code>wss://</code> from an application server.</td></tr>
+              <tr><th>Proxy work</th><td>Account choice, upstream auth insertion, continuation state, stream relay, and pre-commit failover.</td></tr>
+              <tr><th>Upstream leg</th><td>Host-preserving TLS to OpenAI or ChatGPT endpoint chosen by account configuration.</td></tr>
+              <tr><th>Local run</th><td>Allowed only as a same-contract development or diagnostic substitute.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: application servers use tokenproxy exactly like an OpenAI-compatible
+        remote base URL. This is a primary workflow alongside Codex clients pointed at
+        the same remote origin. Source:
+        <a href="#transport-deployment-policy">Transport and Deployment Policy</a> and
+        <a href="#normative-contract">Normative Stage-two Contract</a>.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Codex config.toml changes</h3>
       <div class="quick-map">
         <div class="command-card">
-          <p class="font-bold">Persistent profile in <code>~/.codex/config.toml</code></p>
+          <p class="font-bold">Persistent remote profile in <code>~/.codex/config.toml</code></p>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>[profiles.tokenproxy]
 model_provider = "tokenproxy"
 
 [model_providers.tokenproxy]
 name = "tokenproxy"
-base_url = "http://127.0.0.1:8787/v1"
+base_url = "https://tokenproxy.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = false
 supports_websockets = true
 env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
         </div>
         <div class="command-card">
-          <p class="font-bold">One-shot Codex command</p>
+          <p class="font-bold">Local development override</p>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export TOKENPROXY_CLIENT_KEY="local-client-token"
 
 codex exec \
@@ -2619,14 +2788,14 @@ codex exec \
         </div>
       </div>
       <div class="checkgrid mt-4 text-sm">
-        <div><strong><code>base_url</code></strong><br>Always points at tokenproxy's OpenAI-compatible <code>/v1</code> base, local or tunneled.</div>
+        <div><strong><code>base_url</code></strong><br>Points at tokenproxy's OpenAI-compatible <code>/v1</code> base: public HTTPS/WSS for remote use, loopback only for local development.</div>
         <div><strong><code>wire_api</code></strong><br>Use <code>responses</code>; current Codex source accepts only the Responses wire API for providers.</div>
         <div><strong><code>requires_openai_auth</code></strong><br>Use <code>false</code> so Codex does not start its OpenAI login flow for this proxy provider.</div>
         <div><strong><code>supports_websockets</code></strong><br>Use <code>true</code> so Codex can use persistent Responses WebSocket traffic when the model path enables it.</div>
       </div>
       <p class="caption">
         Caption: the Codex profile changes are provider selection, not a new
-        client protocol. They mirror the local config shape of
+        client protocol. They mirror the Codex config shape of
         <code>model_provider</code> plus <code>[model_providers.&lt;id&gt;]</code>
         with <code>base_url</code>, <code>wire_api</code>, and <code>env_key</code>.
         Source: local <code>~/.codex/config.toml</code> lines 15-21;
@@ -2647,14 +2816,15 @@ codex exec \
         </thead>
         <tbody>
           <tr><td>Operator</td><td>Validate before listening.</td><td><code>tokenproxy --config ./tokenproxy.toml --dry-run</code></td><td>Exits 0 with non-secret config summary, or exits nonzero before listening.</td></tr>
-          <tr><td>Operator</td><td>Start local or server process.</td><td><code>tokenproxy --config ./tokenproxy.toml</code></td><td>Logs listener address, enabled account count, model count, and status labels.</td></tr>
+          <tr><td>Operator</td><td>Start the remote server process.</td><td><code>tokenproxy --config /etc/tokenproxy/tokenproxy.toml</code></td><td>Logs listener address, enabled account count, model count, and status labels.</td></tr>
           <tr><td>Operator</td><td>Check health and metrics.</td><td><code>GET /healthz</code>, <code>GET /metrics</code></td><td>Liveness, account health, route, retry, and WebSocket counters without secrets.</td></tr>
-          <tr><td>Codex user</td><td>Use the configured profile.</td><td><code>codex -p tokenproxy</code></td><td>Codex traffic goes to <code>http://127.0.0.1:8787/v1</code>; prompts and workflows stay unchanged.</td></tr>
-          <tr><td>Agent SDK</td><td>Use tokenproxy as OpenAI base URL.</td><td><code>base_url=http://127.0.0.1:8787/v1</code></td><td>Chat Completions, Responses HTTP/SSE, and Responses WebSocket use the same route contract.</td></tr>
+          <tr><td>Operator</td><td>Check account usage across connected servers.</td><td><code>GET /usage</code> on each remote tokenproxy instance, plus optional local development instances.</td><td>Per-server account cards show remaining usage, reset time, cooldown, and unknown values without secrets.</td></tr>
+          <tr><td>Codex user</td><td>Use the configured profile.</td><td><code>codex -p tokenproxy</code></td><td>Codex traffic goes to the configured tokenproxy <code>/v1</code> base; prompts and workflows stay unchanged.</td></tr>
+          <tr><td>Agent SDK</td><td>Use tokenproxy as OpenAI base URL.</td><td><code>base_url=https://tokenproxy.example.com/v1</code></td><td>Chat Completions, Responses HTTP/SSE, and Responses WebSocket use the same route contract.</td></tr>
         </tbody>
       </table>
       <p class="caption">
-        Caption: daily operation is intentionally small: one server command, two
+        Caption: daily operation is intentionally small: one server command, three
         operator endpoints, and existing OpenAI-compatible client configuration.
         Source: <a href="#normative-contract">Normative Stage-two Contract</a>,
         <a href="#configuration">Runtime Configuration</a>, and
@@ -2670,6 +2840,7 @@ codex exec \
               <tr><th>Healthy accounts</th><td><code>eligible / total</code>, per endpoint and model family</td></tr>
               <tr><th>Selected route</th><td><code>account_id</code>, endpoint, transport, service tier, prompt-cache key class</td></tr>
               <tr><th>Rate pressure</th><td>429 count, reset time, cooldown deadline, quarantine reason</td></tr>
+              <tr><th>Usage reset</th><td>per-account limit state, reset time when known, remaining percent only when an adapter reports it, source, observed time</td></tr>
               <tr><th>In flight</th><td>HTTP requests, SSE streams, one response per upstream WebSocket</td></tr>
               <tr><th>Retries</th><td>pre-commit retry count, post-commit terminal stream errors</td></tr>
             </tbody>
@@ -2688,11 +2859,85 @@ codex exec \
           </table>
         </div>
       </div>
+      <div class="usage-board mt-4">
+        <div class="usage-card">
+          <header>
+            <strong>remote-prod</strong>
+            <span class="mono">openai-primary</span>
+          </header>
+          <div class="usage-window">
+            <div class="usage-line"><span>codex usage limit</span><strong>limited</strong></div>
+            <div class="usage-bar"><span style="width: 0%"></span></div>
+            <p class="mono text-sm mt-3">resets 2026-05-27 3:07 PM PDT</p>
+            <p class="mono text-sm mt-2">source usage_limit_reached_error</p>
+          </div>
+          <div class="usage-window">
+            <div class="usage-line"><span>weekly usage</span><strong>47% remaining</strong></div>
+            <div class="usage-bar"><span style="width: 47%"></span></div>
+            <p class="mono text-sm mt-3">resets 2026-05-30 1:17 PM PDT</p>
+            <p class="mono text-sm mt-2">source account_adapter fixture</p>
+          </div>
+        </div>
+        <div class="usage-card">
+          <header>
+            <strong>remote-ubuntu</strong>
+            <span class="mono">chatgpt-work</span>
+          </header>
+          <div class="usage-window">
+            <div class="usage-line"><span>codex usage limit</span><strong>open</strong></div>
+            <div class="usage-bar"><span style="width: 0%"></span></div>
+            <p class="mono text-sm mt-3">no reset observed</p>
+            <p class="mono text-sm mt-2">source proxy account state</p>
+          </div>
+          <div class="usage-window">
+            <div class="usage-line"><span>weekly usage</span><strong>unknown</strong></div>
+            <div class="usage-bar"><span style="width: 0%"></span></div>
+            <p class="mono text-sm mt-3">reset not reported</p>
+            <p class="mono text-sm mt-2">source not available</p>
+          </div>
+        </div>
+        <div class="usage-card">
+          <header>
+            <strong>server-west</strong>
+            <span class="mono">openai-team</span>
+          </header>
+          <div class="usage-window">
+            <div class="usage-line"><span>codex usage limit</span><strong>limited</strong></div>
+            <div class="usage-bar"><span style="width: 0%"></span></div>
+            <p class="mono text-sm mt-3">resets 2026-05-27 2:42 PM PDT</p>
+            <p class="mono text-sm mt-2">source resets_in_seconds</p>
+          </div>
+          <div class="usage-window">
+            <div class="usage-line"><span>weekly usage</span><strong>unknown</strong></div>
+            <div class="usage-bar"><span style="width: 0%"></span></div>
+            <p class="mono text-sm mt-3">reset not reported</p>
+          </div>
+        </div>
+        <div class="viz-box">
+          <p class="font-bold">Usage collection rule</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>Remote</th><td>Poll the remote tokenproxy over its configured authenticated HTTPS operator URL.</td></tr>
+              <tr><th>Local dev</th><td>Poll <code>http://127.0.0.1:8787/usage</code> only for same-device development and diagnostic runs.</td></tr>
+              <tr><th>Hot path</th><td>Never fan out from an agent request. Usage aggregation is operator-side polling.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <p class="caption">
         Caption: the dashboard separates account-local routing facts from page-level
-        status context. Source: <a href="#network">Network and Status
+        status context and lists per-account usage windows for remote tokenproxy
+        servers, with local rows reserved for development and diagnostics. Reset rows
+        are source-backed by
+        CLIProxyAPI's Codex usage-limit retry parsing and quota cooldown state;
+        remaining-percent rows are shown only as adapter fixtures and are not measured
+        upstream usage. Source: <a href="#normative-contract">Normative
+        Stage-two Contract</a>, <a href="#anatomy">Anatomy of the Proxy</a>,
+        <a href="#metrics">Metrics</a>, <a href="#network">Network and Status
         Observations</a>, <a href="#performance-review-attestation">Performance-review
-        Attestation</a>, and
+        Attestation</a>, CLIProxyAPI (2026i, lines 1095-1113), CLIProxyAPI
+        (2026j, lines 1060-1067 and 414-427), CLIProxyAPI (2026k, lines
+        124-133, 2346-2366, 2806-2823, and 371-427), and
         <code>stage_one_evidence/2026-05-27T035544-0700-openai-transport-probes/openai_status_summary.json</code>.
       </p>
 
@@ -2943,12 +3188,13 @@ codex exec \
           <p class="font-bold">Proxy-internal routing state</p>
           <div class="flow mt-4">
             <span>healthy</span><span class="arrow">-&gt;</span><span>cooling</span><span class="arrow">-&gt;</span>
-            <span>quarantined</span><span class="arrow">-&gt;</span><span>restored</span>
-            <span>excluded</span>
+            <span>usage_limited</span><span class="arrow">-&gt;</span><span>reset due</span><span class="arrow">-&gt;</span>
+            <span>quarantined</span><span class="arrow">-&gt;</span><span>restored</span><span>excluded</span>
           </div>
           <p class="mt-4">
             Selection uses endpoint support, model support, transport support,
-            health, rate pressure, credential validity, and continuation ownership.
+            health, usage-limit reset, rate pressure, credential validity, and
+            continuation ownership.
           </p>
         </div>
       </div>
@@ -2971,6 +3217,7 @@ codex exec \
         <tbody>
           <tr><td>Upstream outage</td><td>Pre-commit failover or structured 502/503.</td><td>Mark observation, consult status context, keep committed streams terminal.</td></tr>
           <tr><td>Account throttling</td><td>Retry another eligible account before commitment; otherwise return rate envelope.</td><td>Set cooldown and rate-pressure counters for the throttled account.</td></tr>
+          <tr><td>Account usage limit</td><td>Retry another eligible account before commitment; if all compatible accounts are limited, return structured <code>no_eligible_account</code> with earliest known reset in logs and metrics.</td><td>Set <code>usage_limited</code>, store observed reset window when present, and exclude until the monotonic reset deadline.</td></tr>
           <tr><td>WebSocket drop</td><td>Reconnect only with complete replay state; otherwise terminal session error.</td><td>Close upstream leg, preserve transcript cursor, increment drop metric.</td></tr>
           <tr><td>Partial SSE frame</td><td>Client receives stream termination after commitment.</td><td>Do not retry invisibly; record parse and commitment state.</td></tr>
           <tr><td>Malformed upstream response</td><td>Structured tokenproxy error before commitment or terminal stream error after commitment.</td><td>Quarantine account only after repeated account-local observations.</td></tr>
@@ -2999,13 +3246,14 @@ codex exec \
           </tr>
         </thead>
         <tbody>
-          <tr><td>Routes Chat, Responses, Responses WebSocket, and local model-catalog traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
-          <tr><td>Lets Codex target a local tokenproxy provider without upstream credentials in Codex config.</td><td><code>config</code></td><td>Codex provider entry plus tokenproxy account table</td><td>Codex setup smoke test</td><td>Codex config source and Runtime Configuration</td></tr>
+          <tr><td>Routes Chat, Responses, Responses WebSocket, and configured model-catalog traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
+          <tr><td>Lets Codex target a remote tokenproxy provider without upstream credentials in Codex config.</td><td><code>config</code></td><td>Codex provider entry plus tokenproxy account table</td><td>Codex setup smoke test</td><td>Codex config source and Runtime Configuration</td></tr>
           <tr><td>Preserves continuation quality.</td><td><code>responses_state</code></td><td>ordered output-item log, <code>previous_response_id</code>, assistant <code>phase</code></td><td>replay and compaction tests</td><td>OpenAI and CLIProxyAPI rows</td></tr>
           <tr><td>Preserves Codex fast-mode intent.</td><td><code>routing</code></td><td>requested and actual <code>service_tier</code>, account tier allowlist</td><td>service-tier passthrough tests</td><td>OpenAI docs and Codex source</td></tr>
+          <tr><td>Shows per-account usage and reset windows for remote tokenproxy servers, plus optional local development instances.</td><td><code>usage</code></td><td><code>UsageSnapshot</code> with <code>server_id</code>, account hash, window, remaining percent, reset time, and source</td><td><code>/usage</code> snapshot tests plus dashboard fixture rendering</td><td>Route contract, Metrics, and dashboard mock</td></tr>
           <tr><td>Keeps streams correct under failure.</td><td><code>stream_relay</code></td><td>commit-state enum and SSE repair buffer</td><td>partial-frame and post-commit failure tests</td><td>CLIProxyAPI stream tests</td></tr>
           <tr><td>Avoids raw-IP upstream routing.</td><td><code>transport</code></td><td>host-based upstream origin and diagnostic pin config</td><td>config rejection tests</td><td>direct-IP probe artifacts and Cloudflare SNI docs</td></tr>
-          <tr><td>Uses one binary across roles.</td><td><code>config</code></td><td>role profile, listener, auth, optional outbound connector</td><td>role matrix tests</td><td>transport deployment policy</td></tr>
+          <tr><td>Uses one binary across remote, server-to-proxy, and diagnostic roles.</td><td><code>config</code></td><td>role profile, listener, downstream auth, TLS placement</td><td>role matrix tests</td><td>transport deployment policy</td></tr>
           <tr><td>Limits local overload.</td><td><code>backpressure</code></td><td>bounded per-account and per-session queues</td><td>overflow and head-of-line tests</td><td>Codex and Iggy rows</td></tr>
           <tr><td>Explains routing decisions to operators.</td><td><code>telemetry</code></td><td>labels for account, endpoint, model, transport, status, retry phase</td><td>metrics snapshot tests</td><td>Codex telemetry row</td></tr>
           <tr><td>Avoids unsupported complexity.</td><td><code>transport</code></td><td>Tokio HTTP/WS first; no custom QUIC/H3 in stage two</td><td>probe artifact plus source review</td><td>Quiche, s2n-quic, curl artifacts</td></tr>
@@ -3091,6 +3339,18 @@ codex exec \
         Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
       </p>
       <p class="mt-3">
+        CLIProxyAPI. (2026i). <em>internal/runtime/executor/codex_executor.go and codex_executor_retry_test.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026j). <em>internal/runtime/executor/codex_websockets_executor.go and codex_websockets_executor_test.go</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
+        CLIProxyAPI. (2026k). <em>Quota state, selector, and management usage source</em>.
+        Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
+      </p>
+      <p class="mt-3">
         Cloudflare. (2026b). <em>pingora-core/src/protocols/mod.rs</em>. Local submodule
         <code>pingora</code>, commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
       </p>
@@ -3117,6 +3377,10 @@ codex exec \
       <p class="mt-3">
         Cloudflare. (2026h). <em>Geographic traffic routing</em>.
         <a href="https://developers.cloudflare.com/support/troubleshooting/general-troubleshooting/geographic-traffic-routing/">https://developers.cloudflare.com/support/troubleshooting/general-troubleshooting/geographic-traffic-routing/</a>.
+      </p>
+      <p class="mt-3">
+        Cloudflare. (2026i). <em>WebSockets</em>.
+        <a href="https://developers.cloudflare.com/network/websockets/">https://developers.cloudflare.com/network/websockets/</a>.
       </p>
       <p class="mt-3">
         Codex. (2026b). <em>codex-rs/responses-api-proxy/src/lib.rs</em>. Local submodule
@@ -3158,6 +3422,33 @@ codex exec \
         Globalping. (2026). <em>Internet and web infrastructure monitoring and benchmarking</em>.
         <a href="https://globalping.io/">https://globalping.io/</a>; local API captures in
         <code>stage_one_evidence/2026-05-27T040928-0700-globalping-openai/</code>.
+      </p>
+      <p class="mt-3">
+        Grigorev, A. (2026). <em>ssh-auto-forward benchmark README and JSON results</em>.
+        GitHub repository <code>alexeygrigorev/ssh-auto-forward</code>,
+        <a href="https://github.com/alexeygrigorev/ssh-auto-forward/tree/main/benchmarks">https://github.com/alexeygrigorev/ssh-auto-forward/tree/main/benchmarks</a>.
+      </p>
+      <p class="mt-3">
+        OpenAI usage-source probe. (2026). <em>Responses, Chat Completions, model
+        inventory, rate-limit headers, and usage body fields</em>. Local artifacts in
+        <code>stage_one_evidence/2026-05-27T112339-0700-usage-source-probes/</code>.
+      </p>
+      <p class="mt-3">
+        Caddy. (2026). <em>reverse_proxy Caddyfile directive</em>.
+        <a href="https://caddyserver.com/docs/caddyfile/directives/reverse_proxy">https://caddyserver.com/docs/caddyfile/directives/reverse_proxy</a>.
+      </p>
+      <p class="mt-3">
+        NGINX. (2026). <em>WebSocket proxying</em>.
+        <a href="https://nginx.org/en/docs/http/websocket.html">https://nginx.org/en/docs/http/websocket.html</a>.
+      </p>
+      <p class="mt-3">
+        OpenBSD. (2026). <em>ssh_config(5) and ssh(1)</em>.
+        <a href="https://man.openbsd.org/ssh_config.5">https://man.openbsd.org/ssh_config.5</a> and
+        <a href="https://man.openbsd.org/ssh.1">https://man.openbsd.org/ssh.1</a>.
+      </p>
+      <p class="mt-3">
+        Jude, A. (2017). <em>SSH Performance</em>.
+        <a href="https://papers.freebsd.org/2017/bsdcan/jude-ssh_performance.files/Paper_-_SSH_Performance.pdf">https://papers.freebsd.org/2017/bsdcan/jude-ssh_performance.files/Paper_-_SSH_Performance.pdf</a>.
       </p>
       <p class="mt-3">
         IETF. (2018). <em>RFC 8446: The Transport Layer Security (TLS) Protocol Version 1.3</em>.
@@ -3437,6 +3728,61 @@ codex exec \
             <td>All four probes failed with TLS handshake alerts.</td>
             <td>Reinforces host-based upstream routing and rejects raw-IP route selection.</td>
           </tr>
+          <tr>
+            <td><code>stage_one_evidence/2026-05-27T112339-0700-usage-source-probes/usage_probe_summary.txt</code></td>
+            <td>
+              Redacted authenticated <code>curl</code> probes for <code>/v1/models</code>,
+              <code>/v1/responses</code>, and <code>/v1/chat/completions</code>;
+              timestamp <code>2026-05-27T18:23:39Z</code> through
+              <code>2026-05-27T18:24:41Z</code>.
+            </td>
+            <td>
+              One model inventory request, one invalid Responses request, one successful
+              Responses request, and one successful Chat Completions request from the
+              local macOS environment.
+            </td>
+            <td>
+              Successful Responses and Chat Completions calls returned
+              <code>x-ratelimit-limit-*</code>, <code>x-ratelimit-remaining-*</code>,
+              <code>x-ratelimit-reset-*</code>, and body <code>usage</code> fields. The
+              invalid Responses request returned an API validation error and no quota
+              window percentage.
+            </td>
+            <td>
+              Populate <code>/usage</code> from observed body usage and rate-limit
+              headers for API-key accounts; do not infer ChatGPT/Codex subscription
+              remaining percentages from standard OpenAI API probes.
+            </td>
+          </tr>
+          <tr>
+            <td><code>stage_one_evidence/2026-05-27T1203-0700-remote-setup-source-review/ssh_https_source_review.md</code></td>
+            <td>
+              <code>parallel-cli search ... -o /tmp/ssh-tunnel-websocket-benchmarks.json</code>,
+              <code>gh api</code> reads of ssh-auto-forward benchmark README and JSON
+              results, wstunnel README review, and official OpenSSH, NGINX, Caddy, and
+              Cloudflare WebSocket documentation review; timestamp
+              <code>2026-05-27 12:03 PM PDT</code>.
+            </td>
+            <td>
+              Source review plus upstream benchmark-artifact review. No local
+              SSH-vs-direct tokenproxy benchmark was run because stage-two product code
+              does not exist and this checkout has no remote tokenproxy/SSH benchmark
+              target.
+            </td>
+            <td>
+              Native SSH forwarding benchmarks in ssh-auto-forward artifacts handled
+              HTML requests with low median latency and 10 GB streaming at hundreds of
+              MB/s, but the reviewed artifacts compare SSH helpers to native
+              <code>ssh -L</code>, not direct HTTPS/WSS. NGINX, Caddy, and Cloudflare
+              document normal WebSocket proxy support over HTTP(S).
+            </td>
+            <td>
+              Use direct HTTPS/WSS plus downstream client authentication as the only
+              supported remote client setup. Do not implement SSH tunnel management,
+              document SSH as the default path, or claim SSH improves WebSocket
+              performance.
+            </td>
+          </tr>
         </tbody>
       </table>
       <table class="mt-4 text-sm">
@@ -3463,15 +3809,25 @@ codex exec \
               <code>sdk/api/handlers/openai/openai_responses_websocket_toolcall_repair.go</code>
               lines 14-83 and 138-153;
               <code>sdk/api/handlers/openai/openai_responses_websocket_test.go</code>
-              lines 342-494 and 625-909;
+              lines 342-494, 625-909, and 1438-1528;
               <code>internal/runtime/executor/codex_websockets_executor.go</code>
-              lines 42-82, 172-323, 647-688, 787-804, and 1044-1068;
+              lines 42-82, 172-323, 647-688, 787-804, 1044-1088,
+              and 1096-1128;
               <code>internal/runtime/executor/codex_executor.go</code>
-              lines 252-255, 412-445, and 853-890;
+              lines 252-255, 412-445, 853-890, 946-956, and 1095-1114;
               <code>internal/runtime/executor/codex_executor_cache_test.go</code>
               lines 40-64;
               <code>internal/runtime/executor/codex_executor_retry_test.go</code>
-              lines 64-109.
+              lines 11-61 and 64-109;
+              <code>sdk/cliproxy/auth/types.go</code> lines 124-149;
+              <code>sdk/cliproxy/auth/conductor.go</code> lines 2297-2366,
+              2468-2528, 2766-2823, and 2838-2854;
+              <code>sdk/cliproxy/auth/selector.go</code> lines 371-427;
+              <code>sdk/cliproxy/usage/manager.go</code> lines 13-31;
+              <code>internal/api/handlers/management/auth_files.go</code> lines
+              375-436;
+              <code>internal/api/handlers/management/usage.go</code> lines 23-42;
+              <code>internal/redisqueue/plugin.go</code> lines 118-126.
             </td>
             <td>
               The Go proxy exposes <code>/v1/models</code>, <code>/v1/chat/completions</code>,
@@ -3485,6 +3841,14 @@ codex exec \
               when no base URL is supplied and sends compact requests to
               <code>{base_url}/responses/compact</code>; and
               derives stable <code>prompt_cache_key</code> values from API-key identity.
+              Its Codex error handling treats <code>usage_limit_reached</code> 429 bodies
+              with <code>resets_at</code> or <code>resets_in_seconds</code> as retry deadlines
+              for HTTP and WebSocket paths, stores 429 retry deadlines in per-model
+              quota state, excludes unavailable models until their retry deadline, captures
+              upstream response headers for usage sinks, and exposes auth
+              <code>next_retry_after</code> through management auth-file entries. The
+              reviewed management auth-file and usage-queue handlers do not expose a
+              built-in remaining-percent quota field.
             </td>
             <td>
               Implement the same narrow generation/WebSocket surface, add a local
@@ -3492,7 +3856,9 @@ codex exec \
               repair output-item replay, maintain per-session WebSocket transcript/tool
               cache, keep capability routing, treat ChatGPT Codex aliases as
               account-selected upstream paths instead of broad public downstream routes,
-              and derive stable prompt-cache-key values.
+              derive stable prompt-cache-key values, and model tokenproxy usage visibility
+              as observed reset/cooldown state plus optional adapter-provided quota
+              percentages instead of invented remaining-capacity estimates.
             </td>
             <td>
               Source and test review only. No CLIProxyAPI benchmark or test command was
@@ -3811,7 +4177,14 @@ codex exec \
         legacy <code>fast</code> to <code>priority</code>; pass through service-tier intent
         only when account/model support allows it; and document Linux socket/sysctl
         settings as host-specific variables, not correctness requirements or stage-two
-        defaults.
+        defaults. Expose read-only usage snapshots from observed account state; publish
+        reset deadlines when a 429 usage-limit response or account adapter provides
+        them, and publish remaining percentages only when an adapter or upstream field
+        explicitly provides that value. Expose remote client access over normal
+        HTTPS/WSS with downstream client authentication; do not add SSH tunnel
+        management or keep SSH as a supported tokenproxy client setup. Treat
+        client-to-remote-proxy and server-to-proxy as the primary product workflows;
+        keep same-device loopback as a development and diagnostic workflow only.
       </p>
       <p class="mt-4">
         Measurements excluded from implementation decisions in this report:
@@ -3819,7 +4192,13 @@ codex exec \
         HTTP/3 workflow latency, product proxy overhead, JSON parser throughput under
         real Responses payloads, account-selection latency, service-tier latency,
         prompt-cache hit rate, and authenticated cross-network route variance. The
-        current report makes no implementation claim from those dimensions.
+        current report makes no implementation claim from those dimensions. Live
+        remaining-percent ChatGPT subscription or long-window OpenAI account quota
+        measurement is also excluded; remaining percentages in the dashboard are
+        fixtures unless rate-limit headers or a stage-two account adapter supplies
+        explicit quota snapshots. SSH-vs-direct tokenproxy latency is excluded because
+        no local comparison was run; the report makes no claim that SSH local
+        forwarding improves HTTP/SSE/WebSocket performance.
       </p>
     </section>
 
@@ -3833,6 +4212,34 @@ codex exec \
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-27 12:28 PM PDT</td>
+            <td>Re-reviewed dashboard and checklist labels; kept remote instances first and narrowed loopback examples to same-device diagnostics.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 12:24 PM PDT</td>
+            <td>Re-reviewed deployment wording and graphical setup flow; promoted remote client-to-proxy and server-to-proxy as primary workflows and limited same-device loopback to development diagnostics.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 12:08 PM PDT</td>
+            <td>Reviewed SSH tunnel versus HTTPS/WSS setup evidence; selected direct HTTPS/WSS as the only supported remote client path and removed SSH from the default setup contract.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 11:38 AM PDT</td>
+            <td>Re-reviewed usage attestation formatting and removed tab indentation before commit; no design claim changed.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 11:28 AM PDT</td>
+            <td>Ran redacted OpenAI usage-source probes; added rate-limit header and usage-body artifacts without treating fixture percentages as measured quota.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 11:24 AM PDT</td>
+            <td>Re-reviewed CLIProxyAPI usage-limit reset source; narrowed /usage percentage claims and added reset-deadline evidence to References and attestation.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 11:22 AM PDT</td>
+            <td>Reviewed operator usage-limit fit; added read-only usage snapshots, reset-window routing, dashboard cards, metrics, and required test rows without adding performance claims.</td>
+          </tr>
           <tr>
             <td>2026-05-27 10:55 AM PDT</td>
             <td>Applied self-contained Tailwind Typography-style prose defaults with max-width and overflow guards; no evidence values changed.</td>

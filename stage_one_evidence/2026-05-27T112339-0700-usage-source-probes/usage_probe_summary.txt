@@ -1,0 +1,43 @@
+Usage source probe summary
+timestamp_local=2026-05-27T11:23:39-0700
+models_timing=http_code=200 remote_ip=162.159.140.245 http_version=2 dns=0.010967 connect=0.019602 tls=0.032178 ttfb=0.636195 total=0.636548 exitcode=0 errormsg=
+responses_bad_timing=http_code=400 remote_ip=172.66.0.243 http_version=2 dns=0.010753 connect=0.019029 tls=0.031809 ttfb=0.950595 total=0.951964 exitcode=0 errormsg=
+responses_ok_timing=http_code=200 remote_ip=172.66.0.243 http_version=2 dns=0.002145 connect=0.010620 tls=0.022787 ttfb=0.998676 total=1.000303 exitcode=0 errormsg=
+chat_ok_timing=http_code=200 remote_ip=162.159.140.245 http_version=2 dns=0.010184 connect=0.018003 tls=0.031323 ttfb=1.100203 total=1.105789 exitcode=0 errormsg=
+
+Responses API headers carrying rate state:
+x-ratelimit-limit-requests: 500
+x-ratelimit-limit-tokens: 200000
+x-ratelimit-remaining-requests: 499
+x-ratelimit-remaining-tokens: 200000
+x-ratelimit-reset-requests: 120ms
+x-ratelimit-reset-tokens: 0s
+
+Chat Completions headers carrying rate state:
+x-ratelimit-limit-requests: 10000
+x-ratelimit-limit-tokens: 200000
+x-ratelimit-remaining-requests: 9999
+x-ratelimit-remaining-tokens: 199995
+x-ratelimit-reset-requests: 8.64s
+x-ratelimit-reset-tokens: 1ms
+
+Responses usage body fields:
+15:  "max_output_tokens": 16,
+61:  "usage": {
+62:    "input_tokens": 12,
+63:    "input_tokens_details": {
+64:      "cached_tokens": 0
+66:    "output_tokens": 5,
+67:    "output_tokens_details": {
+68:      "reasoning_tokens": 0
+70:    "total_tokens": 17
+
+Chat Completions usage body fields:
+19:  "usage": {
+20:    "prompt_tokens": 10,
+21:    "completion_tokens": 2,
+22:    "total_tokens": 12,
+23:    "prompt_tokens_details": {
+24:      "cached_tokens": 0,
+27:    "completion_tokens_details": {
+28:      "reasoning_tokens": 0,

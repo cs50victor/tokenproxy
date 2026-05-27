@@ -1,0 +1,25 @@
+HTTP/2 200
+date: Wed, 27 May 2026 18:24:41 GMT
+content-type: application/json
+cf-ray: a0270ec9b93826d3-SJC
+cf-cache-status: DYNAMIC
+server: cloudflare
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-content-type-options: nosniff
+access-control-expose-headers: X-Request-ID
+access-control-expose-headers: CF-Ray
+access-control-expose-headers: CF-Ray
+openai-organization: REDACTED
+openai-processing-ms: 487
+openai-project: REDACTED
+openai-version: 2020-10-01
+x-openai-proxy-wasm: v0.1
+x-ratelimit-limit-requests: 10000
+x-ratelimit-limit-tokens: 200000
+x-ratelimit-remaining-requests: 9999
+x-ratelimit-remaining-tokens: 199995
+x-ratelimit-reset-requests: 8.64s
+x-ratelimit-reset-tokens: 1ms
+x-request-id: req_0df94cc1928347fcb48b91714b7f843d
+set-cookie: REDACTED
+alt-svc: h3=":443"; ma=86400
