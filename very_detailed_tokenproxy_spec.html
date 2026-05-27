@@ -16,6 +16,18 @@
     th, td { border: 1px solid #111; padding: 0.45rem 0.55rem; vertical-align: top; }
     th { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 700; text-align: left; }
     .claim { border-left: 4px solid #111; padding-left: 1rem; }
+    .caption { font-size: 0.875rem; line-height: 1.45; margin-top: 0.5rem; }
+    .viz-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+    .viz-grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; }
+    .viz-box { border: 1px solid #111; padding: 0.75rem; }
+    .metric { border: 1px solid #111; padding: 0.75rem; min-height: 8.5rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .flow { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: stretch; }
+    .flow span { border: 1px solid #111; padding: 0.35rem 0.5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 0.82rem; }
+    .arrow { border: 0 !important; padding: 0.35rem 0 !important; }
+    details { border: 1px solid #111; padding: 0.75rem; margin-top: 0.75rem; }
+    summary { cursor: pointer; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 700; }
+    svg { max-width: 100%; height: auto; }
     .smallcaps { font-variant: small-caps; letter-spacing: 0.03em; }
     .mx-auto { margin-left: auto; margin-right: auto; }
     .mt-3 { margin-top: 0.75rem; }
@@ -50,6 +62,7 @@
     @media (max-width: 640px) {
       .px-6 { padding-left: 1rem; padding-right: 1rem; }
       .text-4xl { font-size: 2rem; }
+      .viz-grid, .viz-grid-3 { grid-template-columns: 1fr; }
       table { font-size: 0.82rem; }
     }
   </style>
@@ -66,8 +79,8 @@
       </p>
       <p class="mt-4 text-sm">
         Evidence snapshot: local checkout at <code>/Users/vic8or/dev/tokenproxy</code>,
-        passive probe artifacts through 2026-05-27 00:56:57 PDT / 2026-05-27
-        07:56:57 UTC; official OpenAI docs rechecked through 2026-05-27
+        passive probe artifacts through 2026-05-27 02:37:22 PDT / 2026-05-27
+        09:37:22 UTC; official OpenAI docs rechecked through 2026-05-27
         01:18:26 PDT / 2026-05-27 08:18:26 UTC.
       </p>
     </header>
@@ -136,9 +149,9 @@
           <strong>Claim 5.</strong> Network path facts are observations, not constants. In this
           checkout, DNS resolved <code>api.openai.com</code> to <code>172.66.0.243</code> and
           <code>162.159.140.245</code>. It resolved <code>status.openai.com</code> through
-          <code>cname.vercel-dns.com</code> to <code>76.76.21.93</code> and <code>66.33.60.194</code>.
+          <code>cname.vercel-dns.com</code> to <code>76.76.21.142</code> and <code>66.33.60.66</code>.
           These values came from
-          <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/dns.txt</code>
+          <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/dns.txt</code>
           and are inputs to the measurement log, not implementation constants.
         </p>
       </div>
@@ -466,8 +479,8 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         <code>model</code>, <code>stream</code>, <code>store</code>, <code>previous_response_id</code>,
         <code>prompt_cache_key</code>, <code>service_tier</code>, <code>reasoning.effort</code>, and
         <code>text.verbosity</code>. Use <code>serde_json</code> for stage two. Do not include
-        <code>simd-json</code> in the first implementation; parser throughput is an
-        unanswered research question until a product-payload benchmark exists.
+        <code>simd-json</code> in the first implementation; parser throughput is not
+        accepted as an implementation reason because no product-payload benchmark exists.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">2. Account router</h3>
@@ -580,9 +593,9 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
             <td>
               Concise route code and direct access to request bodies, headers, and WebSocket
               upgrades. This is a maintainability and ecosystem choice, not a measured
-              Axum-versus-Hyper performance result. A lower-level Hyper listener remains
-              an unanswered research question because no tokenproxy product code exists
-              for that comparison.
+              Axum-versus-Hyper performance result. A lower-level Hyper listener is not a
+              stage-two decision because no tokenproxy product code exists for that
+              comparison.
             </td>
           </tr>
           <tr>
@@ -610,8 +623,8 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
               Correctness and simplicity first. Use byte pass-through for full payloads and
               parse only fields needed for routing and telemetry. This parser choice rests
               on compatibility and code-size control, not a local throughput comparison.
-              <code>simd-json</code> remains an unanswered research question because no
-              real Responses payload benchmark exists in this checkout.
+              <code>simd-json</code> is excluded from stage two because no real Responses
+              payload benchmark exists in this checkout.
             </td>
           </tr>
           <tr>
@@ -622,7 +635,8 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
               during failures and rate-limit updates. Use <code>arc-swap</code> snapshots
               for routing tables, <code>DashMap</code> only for mutable per-account health,
               and <code>watch</code> channels for updates. This is a concurrency-shape
-              decision; lock-strategy latency remains an unanswered stage-two benchmark.
+              decision; lock-strategy latency is not used as evidence in this report
+              because no stage-two benchmark exists.
             </td>
           </tr>
           <tr>
@@ -680,7 +694,7 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         <code>/v1/responses</code>, but the sample was five 401 responses from one client
         network. That probe is insufficient evidence for custom H3 code. Keep QUIC/H3
         out of stage two; record HTTP version in probes and treat authenticated
-        HTTP/3 workflow comparison as an unanswered research question.
+        HTTP/3 workflow comparison as outside the accepted stage-two evidence.
       </p>
     </section>
 
@@ -1297,7 +1311,7 @@ After compacted window is used:
               curl 8.19.0 on macOS with OpenSSL 3.6.1, nghttp2 1.67.1,
               ngtcp2 1.17.0, nghttp3 1.12.0. Features include HTTP2 and HTTP3.
               Raw environment capture:
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/environment.txt</code>.
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/environment.txt</code>.
             </td>
             <td>Local probe tool can compare HTTP/1.1, HTTP/2, and HTTP/3 where network policy permits.</td>
           </tr>
@@ -1308,28 +1322,28 @@ After compacted window is used:
           </tr>
           <tr>
             <td><code>dig status.openai.com A +short</code></td>
-            <td><code>cname.vercel-dns.com.</code>, <code>76.76.21.93</code>, <code>66.33.60.194</code></td>
+            <td><code>cname.vercel-dns.com.</code>, <code>76.76.21.142</code>, <code>66.33.60.66</code></td>
             <td>Status is operational context, not routing substrate.</td>
           </tr>
           <tr>
             <td><code>curl</code> timing and TLS probes</td>
             <td>
-              At 2026-05-27 00:50:20 PDT, five uncredentialed 401 probes per
+              At 2026-05-27 02:37:22 PDT, five uncredentialed 401 probes per
               protocol to <code>https://api.openai.com/v1/responses</code> reached
-              <code>162.159.140.245</code> with zero curl errors. HTTP/2 total seconds:
-              p50 <code>0.150116</code>, p95 <code>1.821407</code>, p99
-              <code>1.821407</code>; run 1 was the outlier at <code>1.821407</code>.
-              HTTP/1.1 total seconds: p50 <code>0.103920</code>, p95
-              <code>0.181370</code>, p99 <code>0.181370</code>. HTTP/3 total seconds:
-              p50 <code>0.106089</code>, p95 <code>0.153120</code>, p99
-              <code>0.153120</code>. Raw timings:
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/curl_timings.csv</code>.
+              <code>172.66.0.243</code> with zero curl errors. HTTP/2 total seconds:
+              p50 <code>0.105338</code>, p95 <code>0.174139</code>, p99
+              <code>0.174139</code>; run 4 was the sample maximum at <code>0.174139</code>.
+              HTTP/1.1 total seconds: p50 <code>0.096160</code>, p95
+              <code>0.150913</code>, p99 <code>0.150913</code>. HTTP/3 total seconds:
+              p50 <code>0.097008</code>, p95 <code>0.177065</code>, p99
+              <code>0.177065</code>. Raw timings:
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/curl_timings.csv</code>.
               Command template:
               <code>curl --http2|--http1.1|--http3-only -sS -o /dev/null -w '%{remote_ip},%{http_version},%{http_code},%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total},%{exitcode},%{errormsg}' https://api.openai.com/v1/responses</code>.
-              Same-run TLS inspection connected to <code>162.159.140.245</code>,
+              Same-run TLS inspection connected to <code>172.66.0.243</code>,
               negotiated TLS 1.3 with <code>TLS_AES_256_GCM_SHA384</code>, and
               verified certificate CN <code>api.openai.com</code>. Raw TLS capture:
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/tls.txt</code>.
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/tls.txt</code>.
             </td>
             <td>
               The local 401 probe proves route reachability and records current path
@@ -1341,9 +1355,9 @@ After compacted window is used:
             <td>WebSocket handshake probe</td>
             <td>
               <code>websocat -v -1 -H='Authorization: Bearer invalid_tokenproxy_probe' wss://api.openai.com/v1/responses</code>
-              connected TCP to <code>162.159.140.245:443</code> and received
+              connected TCP to <code>172.66.0.243:443</code> and received
               <code>401 Unauthorized</code> during upgrade. Raw capture:
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/websocket_unauthenticated.txt</code>.
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/websocket_unauthenticated.txt</code>.
             </td>
             <td>
               This shows the route reaches an endpoint that handles WebSocket upgrade
@@ -1354,16 +1368,16 @@ After compacted window is used:
           <tr>
             <td>OpenAI status API</td>
             <td>
-              At the 2026-05-27 00:50 PDT refresh,
+              At the 2026-05-27 02:37 PDT refresh,
               <code>https://status.openai.com/api/v2/status.json</code> reported
               <code>minor</code> status with description <code>Partial System Degradation</code>
               and page update time <code>2026-05-27T05:31:12Z</code>. The summary API
               reported one active monitoring incident, "Login issues for FedRAMP users
               who recently logged out"; <code>Responses</code> and <code>Codex API</code>
               components were marked operational. Raw captures:
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/openai_status_status.json</code>
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/openai_status_status.json</code>
               and
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/openai_status_summary.json</code>.
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/openai_status_summary.json</code>.
               Commands:
               <code>curl -fsS --connect-timeout 5 --max-time 15 https://status.openai.com/api/v2/status.json</code>
               and
@@ -1842,7 +1856,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
           </tr>
           <tr>
             <td>Quiche source states the application owns QUIC sockets, event loop, and timers; the local curl artifact only measured five unauthenticated 401 HTTP/3 probes.</td>
-            <td>Keep QUIC/H3 out of stage-two code; treat authenticated HTTP/3 workflow comparison as unanswered research.</td>
+            <td>Keep QUIC/H3 out of stage-two code; do not use authenticated HTTP/3 workflow comparison as evidence in this report.</td>
           </tr>
           <tr>
             <td>OpenAI status API artifact showed page-level <code>minor</code> status while <code>Responses</code> and <code>Codex API</code> were operational.</td>
@@ -1910,6 +1924,353 @@ return e.httpExec.ExecuteStream(ctx, auth, req, opts)</code></pre>
       <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>const WEBSOCKET_OUTBOUND_CHANNEL_CAPACITY: usize = 32 * 1024;
 ...
 warn!("websocket control queue full while replying to ping; closing connection");</code></pre>
+    </section>
+
+    <section id="graphical-user-experience" class="mb-12">
+      <h2 class="mb-4 text-2xl font-bold">Graphical User Experience</h2>
+      <p>
+        These visuals describe what operators and agent clients see when tokenproxy
+        behaves correctly. Measured numbers in this section come only from the
+        2026-05-27 02:37 PDT passive probe directory. Unauthenticated 401 probes
+        are labeled as reachability data, not as product latency or stream stability.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Operator dashboard</h3>
+      <div class="viz-grid">
+        <div class="viz-box">
+          <p class="font-bold">Pool and route state</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>Healthy accounts</th><td><code>eligible / total</code>, per endpoint and model family</td></tr>
+              <tr><th>Selected route</th><td><code>account_id</code>, endpoint, transport, service tier, prompt-cache key class</td></tr>
+              <tr><th>Rate pressure</th><td>429 count, reset time, cooldown deadline, quarantine reason</td></tr>
+              <tr><th>In flight</th><td>HTTP requests, SSE streams, one response per upstream WebSocket</td></tr>
+              <tr><th>Retries</th><td>pre-commit retry count, post-commit terminal stream errors</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="viz-box">
+          <p class="font-bold">Upstream and incident state</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>OpenAI status</th><td><code>minor</code>, <code>Partial System Degradation</code></td></tr>
+              <tr><th>Active incident</th><td>FedRAMP login incident, monitoring</td></tr>
+              <tr><th>Responses</th><td><code>operational</code></td></tr>
+              <tr><th>Codex API</th><td><code>operational</code></td></tr>
+              <tr><th>Current probe path</th><td><code>172.66.0.243</code>, TLS 1.3, HTTP/1.1, HTTP/2, HTTP/3 reachable with 401</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: the dashboard separates account-local routing facts from page-level
+        status context. Source: <a href="#network">Network and Status
+        Observations</a>, <a href="#performance-review-attestation">Performance-review
+        Attestation</a>, and
+        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/openai_status_summary.json</code>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Agent-client lifecycle</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Client view</th>
+            <th>Chat Completions</th>
+            <th>Responses HTTP</th>
+            <th>Responses WebSocket</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Admission</th>
+            <td><code>POST /v1/chat/completions</code>; opaque body; stream flag detected.</td>
+            <td><code>POST /v1/responses</code>; route key includes model, account, and continuation fields.</td>
+            <td>Downstream WebSocket accepted only after account capability and endpoint checks.</td>
+          </tr>
+          <tr>
+            <th>Account choice</th>
+            <td colspan="3">Eligibility filters exclude disabled, cooled-down, quarantined, wrong-model, wrong-transport, or expired-credential accounts.</td>
+          </tr>
+          <tr>
+            <th>Fast path</th>
+            <td>Reuse pooled upstream HTTP connection when origin, TLS, proxy, and auth boundary match.</td>
+            <td>Forward <code>previous_response_id</code> when present; keep returned output items for replay.</td>
+            <td>Send repeated <code>response.create</code> events with new input plus <code>previous_response_id</code>.</td>
+          </tr>
+          <tr>
+            <th>State fidelity</th>
+            <td>Do not translate Chat body beyond routing headers.</td>
+            <td>Preserve assistant <code>phase</code>, tool preambles, compacted state marker, and output item order.</td>
+            <td>Maintain one in-flight upstream response per socket and replay full context only after state loss.</td>
+          </tr>
+          <tr>
+            <th>Error return</th>
+            <td>Before response commitment, fail over or return tokenproxy error envelope.</td>
+            <td>After SSE commitment, stop stream and emit telemetry; do not invisibly retry committed output.</td>
+            <td>On upstream WebSocket drop, reconnect only when replay state is complete; otherwise return terminal error.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="caption">
+        Caption: this lifecycle maps visible client behavior to the route, replay,
+        streaming, and failure contracts. Source: <a href="#normative-contract">Normative
+        Stage-two Contract</a>, <a href="#orchestration">Responses
+        Orchestration Rules</a>, and CLIProxyAPI/Codex rows in
+        <a href="#performance-review-attestation">Performance-review Attestation</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Interactive architecture map</h3>
+      <details open>
+        <summary>Synchronous hot path</summary>
+        <div class="flow mt-4">
+          <span>client request</span><span class="arrow">-&gt;</span>
+          <span>listener</span><span class="arrow">-&gt;</span>
+          <span>classifier</span><span class="arrow">-&gt;</span>
+          <span>account router</span><span class="arrow">-&gt;</span>
+          <span>upstream HTTP or WS leg</span><span class="arrow">-&gt;</span>
+          <span>stream relay</span><span class="arrow">-&gt;</span>
+          <span>client response</span>
+        </div>
+        <p class="mt-4">
+          The synchronous path does only admission, routing, header/body forwarding,
+          state replay decisions, and relay work. It does not run background health
+          scans or expensive status fetches inline.
+        </p>
+      </details>
+      <details>
+        <summary>Background health and status probes</summary>
+        <p class="mt-4">
+          Background workers update per-account health, cooldown, quarantine, and
+          status-page context. Health changes require consecutive observations before
+          traffic moves, following the conservative source-backed health-threshold rule.
+        </p>
+      </details>
+      <details>
+        <summary>Account, session, and credential bookkeeping</summary>
+        <p class="mt-4">
+          Credential material stays behind the account boundary. Route state stores
+          account health, supported endpoints, prompt-cache key derivation inputs,
+          WebSocket session identity, and replay cursor metadata.
+        </p>
+      </details>
+      <details>
+        <summary>Telemetry and failure handling</summary>
+        <p class="mt-4">
+          Telemetry records endpoint, model, transport, account, status, duration,
+          retry phase, upstream request id, Cloudflare Ray label when present, and
+          stream commitment state. Failover is allowed before downstream commitment
+          and forbidden after committed stream output.
+        </p>
+      </details>
+      <p class="caption">
+        Caption: the expandable map distinguishes request-time work from background
+        status, health, credential, telemetry, and failure responsibilities. Source:
+        <a href="#anatomy">Anatomy of the Proxy</a>,
+        <a href="#state-machines">State Machines</a>, and Pingora/Codex source rows in
+        <a href="#performance-review-attestation">Performance-review Attestation</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Latency and reliability visual pack</h3>
+      <div class="viz-grid-3">
+        <div class="metric">
+          <p class="font-bold">HTTP/2 reachability</p>
+          <p class="mono mt-4">samples=5</p>
+          <p class="mono">status=401</p>
+          <p class="mono">p50=0.105338s</p>
+          <p class="mono">p95=0.174139s</p>
+          <p class="mono">p99=0.174139s</p>
+        </div>
+        <div class="metric">
+          <p class="font-bold">HTTP/1.1 reachability</p>
+          <p class="mono mt-4">samples=5</p>
+          <p class="mono">status=401</p>
+          <p class="mono">p50=0.096160s</p>
+          <p class="mono">p95=0.150913s</p>
+          <p class="mono">p99=0.150913s</p>
+        </div>
+        <div class="metric">
+          <p class="font-bold">HTTP/3 reachability</p>
+          <p class="mono mt-4">samples=5</p>
+          <p class="mono">status=401</p>
+          <p class="mono">p50=0.097008s</p>
+          <p class="mono">p95=0.177065s</p>
+          <p class="mono">p99=0.177065s</p>
+        </div>
+      </div>
+      <svg class="mt-4 border border-black" viewBox="0 0 760 180" role="img" aria-label="Request timeline">
+        <line x1="40" y1="40" x2="720" y2="40" stroke="#111" stroke-width="1"/>
+        <line x1="40" y1="90" x2="720" y2="90" stroke="#111" stroke-width="1"/>
+        <line x1="40" y1="140" x2="720" y2="140" stroke="#111" stroke-width="1"/>
+        <text x="10" y="44" font-size="12" font-family="monospace">h2</text>
+        <text x="10" y="94" font-size="12" font-family="monospace">h1</text>
+        <text x="10" y="144" font-size="12" font-family="monospace">h3</text>
+        <rect x="40" y="28" width="330" height="24" fill="none" stroke="#111"/>
+        <rect x="40" y="78" width="300" height="24" fill="none" stroke="#111"/>
+        <rect x="40" y="128" width="305" height="24" fill="none" stroke="#111"/>
+        <text x="380" y="44" font-size="12" font-family="monospace">p50 total 0.105338s</text>
+        <text x="350" y="94" font-size="12" font-family="monospace">p50 total 0.096160s</text>
+        <text x="355" y="144" font-size="12" font-family="monospace">p50 total 0.097008s</text>
+        <text x="40" y="172" font-size="12" font-family="monospace">Scale is comparative only; bars use p50 total from unauthenticated 401 probes.</text>
+      </svg>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Visual</th>
+            <th>Implementation behavior</th>
+            <th>Measurement status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Connection reuse comparison</td>
+            <td>Track cold connect, warm pooled HTTP, and reconnected WebSocket paths separately.</td>
+            <td>No local product-code reuse benchmark exists; do not show a reuse delta.</td>
+          </tr>
+          <tr>
+            <td>Cache-hit path versus cold path</td>
+            <td>Record prompt-cache key class, cacheable prefix identity, and returned cache metadata when upstream exposes it.</td>
+            <td>No authenticated prompt-cache experiment exists; do not show cache-hit latency.</td>
+          </tr>
+          <tr>
+            <td>Retry/failover state machine</td>
+            <td><code>admitted -&gt; upstream attempt -&gt; pre-commit retry | committed stream -&gt; terminal stream error</code>.</td>
+            <td>Source-backed failure boundary only.</td>
+          </tr>
+          <tr>
+            <td>Backpressure queue behavior</td>
+            <td>Bound per-account and per-session queues; count overflow; close or reject instead of blocking reactor work.</td>
+            <td>Source-backed by Codex and Iggy rows in the attestation.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="caption">
+        Caption: the summary cards and timeline use only completed local 401 probes.
+        The other reliability visuals intentionally omit measured values where no
+        tokenproxy implementation or authenticated upstream probe exists. Source:
+        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/curl_timings.csv</code>
+        and <a href="#benchmark-method">Benchmark Methodology</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Endpoint and transport view</h3>
+      <div class="viz-grid">
+        <div class="viz-box">
+          <p class="font-bold">DNS and TLS</p>
+          <div class="flow mt-4">
+            <span>api.openai.com</span><span class="arrow">-&gt;</span>
+            <span>162.159.140.245</span><span>172.66.0.243</span>
+          </div>
+          <div class="flow mt-4">
+            <span>TLS 1.3</span><span>TLS_AES_256_GCM_SHA384</span><span>CN api.openai.com</span>
+          </div>
+        </div>
+        <div class="viz-box">
+          <p class="font-bold">Streaming transports</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>HTTP JSON</th><td>buffer response body until complete.</td></tr>
+              <tr><th>SSE</th><td>delay header commit until first data or immediate upstream error.</td></tr>
+              <tr><th>WebSocket</th><td>401 upgrade reachability measured; authenticated stability not measured.</td></tr>
+              <tr><th>HTTP/3</th><td>reachable with unauthenticated 401; custom QUIC/H3 remains out of scope.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: endpoint visuals show run-specific DNS, TLS, HTTP protocol, SSE
+        commitment, and WebSocket-upgrade facts. Source:
+        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/dns.txt</code>,
+        <code>tls.txt</code>, <code>curl_timings.csv</code>,
+        <code>websocket_unauthenticated.txt</code>, and
+        <a href="#data-paths">Data Paths</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Account routing view</h3>
+      <div class="viz-grid">
+        <div class="viz-box">
+          <p class="font-bold">Authenticated user intent</p>
+          <div class="flow mt-4">
+            <span>bearer token</span><span>model</span><span>endpoint</span><span>stream</span><span>continuation</span>
+          </div>
+          <p class="mt-4">
+            User intent identifies what the client asked for. It does not by itself
+            expose proxy-internal cooldown, quarantine, or credential state.
+          </p>
+        </div>
+        <div class="viz-box">
+          <p class="font-bold">Proxy-internal routing state</p>
+          <div class="flow mt-4">
+            <span>healthy</span><span class="arrow">-&gt;</span><span>cooling</span><span class="arrow">-&gt;</span>
+            <span>quarantined</span><span class="arrow">-&gt;</span><span>restored</span>
+            <span>excluded</span>
+          </div>
+          <p class="mt-4">
+            Selection uses endpoint support, model support, transport support,
+            health, rate pressure, credential validity, and continuation ownership.
+          </p>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: the routing view separates client-visible intent from internal
+        account selection and recovery state. Source:
+        <a href="#account-selection">Account Selection Algorithm</a> and
+        <a href="#failure">Failure Behavior</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Failure-mode view</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Failure</th>
+            <th>User-visible response</th>
+            <th>Internal recovery action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Upstream outage</td><td>Pre-commit failover or structured 502/503.</td><td>Mark observation, consult status context, keep committed streams terminal.</td></tr>
+          <tr><td>Account throttling</td><td>Retry another eligible account before commitment; otherwise return rate envelope.</td><td>Set cooldown and rate-pressure counters for the throttled account.</td></tr>
+          <tr><td>WebSocket drop</td><td>Reconnect only with complete replay state; otherwise terminal session error.</td><td>Close upstream leg, preserve transcript cursor, increment drop metric.</td></tr>
+          <tr><td>Partial SSE frame</td><td>Client receives stream termination after commitment.</td><td>Do not retry invisibly; record parse and commitment state.</td></tr>
+          <tr><td>Malformed upstream response</td><td>Structured tokenproxy error before commitment or terminal stream error after commitment.</td><td>Quarantine account only after repeated account-local observations.</td></tr>
+          <tr><td>Local overload</td><td>429 or 503 before admission; close overflowing control queues.</td><td>Count queue overflow, preserve reactor progress, avoid head-of-line blocking.</td></tr>
+          <tr><td>Credential expiration</td><td>401/403 mapped to account-auth error, not generic upstream outage.</td><td>Exclude credential until refresh or operator action.</td></tr>
+          <tr><td>Status-page incident</td><td>Dashboard warning only unless local probes fail.</td><td>Attach status labels to telemetry; do not reroute solely on aggregate page status.</td></tr>
+        </tbody>
+      </table>
+      <p class="caption">
+        Caption: each failure row names the user-visible boundary and the internal
+        action that preserves correctness. Source: <a href="#failure">Failure
+        Behavior</a>, <a href="#state-machines">State Machines</a>, and Pingora/Codex/Iggy
+        source-review rows in <a href="#performance-review-attestation">Performance-review
+        Attestation</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Correct system at a glance</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Visible behavior</th>
+            <th>Module</th>
+            <th>Data structure</th>
+            <th>Metric or test</th>
+            <th>Evidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Routes Chat, Responses, and Responses WebSocket traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
+          <tr><td>Preserves continuation quality.</td><td><code>responses_state</code></td><td>ordered output-item log, <code>previous_response_id</code>, assistant <code>phase</code></td><td>replay and compaction tests</td><td>OpenAI and CLIProxyAPI rows</td></tr>
+          <tr><td>Keeps streams correct under failure.</td><td><code>stream_relay</code></td><td>commit-state enum and SSE repair buffer</td><td>partial-frame and post-commit failure tests</td><td>CLIProxyAPI stream tests</td></tr>
+          <tr><td>Limits local overload.</td><td><code>backpressure</code></td><td>bounded per-account and per-session queues</td><td>overflow and head-of-line tests</td><td>Codex and Iggy rows</td></tr>
+          <tr><td>Explains routing decisions to operators.</td><td><code>telemetry</code></td><td>labels for account, endpoint, model, transport, status, retry phase</td><td>metrics snapshot tests</td><td>Codex telemetry row</td></tr>
+          <tr><td>Avoids unsupported complexity.</td><td><code>transport</code></td><td>Tokio HTTP/WS first; no custom QUIC/H3 in stage two</td><td>probe artifact plus source review</td><td>Quiche, s2n-quic, curl artifacts</td></tr>
+        </tbody>
+      </table>
+      <p class="caption">
+        Caption: the board maps UI-visible behavior to concrete implementation
+        modules, state, validation, and evidence artifacts for stage-two engineering.
+        Source: <a href="#implementation">Implementation Plan</a>,
+        <a href="#test-matrix">Required Test Matrix</a>, and
+        <a href="#performance-review-attestation">Performance-review Attestation</a>.
+      </p>
     </section>
 
     <section id="references" class="mb-12">
@@ -2075,7 +2436,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
       </p>
       <p class="mt-3">
         Tokenproxy Stage One. (2026). <em>Local passive network and status probe artifacts</em>.
-        <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/</code>.
+        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/</code>.
       </p>
     </section>
 
@@ -2085,10 +2446,10 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Before editing this attestation, I re-read this report and ran
         <code>git submodule status --recursive</code> in the current checkout. The raw
         submodule-status capture is
-        <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/submodule_status.txt</code>.
+        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/submodule_status.txt</code>.
         I also ran fresh passive network, TLS, unauthenticated WebSocket, and status
         probes; their raw artifacts are in
-        <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/</code>.
+        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/</code>.
       </p>
       <p class="mt-4">
         No stage-two product code exists in this checkout, so no integration test
@@ -2099,6 +2460,13 @@ warn!("websocket control queue full while replying to ping; closing connection")
         These probes support reachability and operational-context decisions only; they
         do not prove proxy overhead, model latency, authenticated stream stability, or
         account-routing performance.
+      </p>
+      <p class="mt-4">
+        The repeat probe narrowed the network-path claim. The <code>api.openai.com</code>
+        A-record set repeated, but the selected Cloudflare endpoint changed from the
+        earlier capture to <code>172.66.0.243</code>, and <code>status.openai.com</code>
+        returned different Vercel A records. Therefore this report treats IPs and
+        endpoint timing distributions as run-specific observations only.
       </p>
       <table class="mt-4 text-sm">
         <thead>
@@ -2171,7 +2539,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
             </td>
             <td>
               Passive endpoint probes in
-              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/</code>
+              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/</code>
               support route and protocol reachability only. They do not benchmark Codex
               or tokenproxy overhead.
             </td>
@@ -2275,7 +2643,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <td>
               <code>curl_timings.csv</code> includes five unauthenticated HTTP/3 401 route
               samples. That probe is insufficient for a custom H3 implementation and is
-              recorded as unanswered authenticated-workflow research.
+              not accepted as authenticated-workflow evidence.
             </td>
           </tr>
           <tr>
@@ -2397,14 +2765,31 @@ warn!("websocket control queue full while replying to ping; closing connection")
         keep Pingora, io_uring, and custom QUIC/H3 out of stage two.
       </p>
       <p class="mt-4">
-        Unanswered research questions kept out of implementation decisions: authenticated
-        WebSocket stability, 60-minute reconnect behavior, authenticated HTTP/3 workflow
-        latency, product proxy overhead, JSON parser throughput under real Responses
-        payloads, account-selection latency, service-tier latency, prompt-cache hit rate,
-        and cross-network route variance. Each requires a completed stage-two experiment
-        or credentialed upstream probe before the report may call it measured or accept
-        it as evidence.
+        Measurements excluded from implementation decisions in this report:
+        authenticated WebSocket stability, 60-minute reconnect behavior, authenticated
+        HTTP/3 workflow latency, product proxy overhead, JSON parser throughput under
+        real Responses payloads, account-selection latency, service-tier latency,
+        prompt-cache hit rate, and cross-network route variance. The current report makes
+        no implementation claim from those dimensions.
       </p>
+    </section>
+
+    <section id="review-log" class="mb-12 border-t border-black pt-8">
+      <h2 class="mb-4 text-2xl font-bold">Review Log</h2>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>2026-05-27</td>
+            <td>Reviewed report structure, evidence artifacts, and submodule status; added required graphical user-experience section and bottom Review Log without adding new performance claims.</td>
+          </tr>
+        </tbody>
+      </table>
     </section>
   </main>
 </body>
