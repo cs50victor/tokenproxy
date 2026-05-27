@@ -2333,6 +2333,311 @@ warn!("websocket control queue full while replying to ping; closing connection")
         data, not as product latency or stream stability.
       </p>
 
+      <h3 class="mt-8 mb-3 text-xl font-bold">What the user is running</h3>
+      <div class="quick-map">
+        <div class="viz-box">
+          <svg viewBox="0 0 720 330" role="img" aria-label="Tokenproxy product shape">
+            <rect x="20" y="34" width="135" height="76" fill="none" stroke="#111"/>
+            <text x="39" y="62" font-size="13" font-family="monospace">Codex CLI</text>
+            <text x="39" y="84" font-size="12" font-family="monospace">or agent SDK</text>
+            <text x="39" y="102" font-size="11" font-family="monospace">base_url=/v1</text>
+            <line x1="155" y1="72" x2="238" y2="72" stroke="#111"/>
+            <polygon points="238,72 228,67 228,77" fill="#111"/>
+            <text x="166" y="58" font-size="11" font-family="monospace">HTTP/SSE/WS</text>
+
+            <rect x="250" y="20" width="205" height="105" fill="none" stroke="#111"/>
+            <text x="280" y="48" font-size="14" font-family="monospace">tokenproxy</text>
+            <text x="280" y="71" font-size="12" font-family="monospace">one Rust binary</text>
+            <text x="280" y="91" font-size="12" font-family="monospace">listener + router + relay</text>
+            <text x="280" y="111" font-size="12" font-family="monospace">default 127.0.0.1:8787</text>
+
+            <line x1="455" y1="72" x2="533" y2="72" stroke="#111"/>
+            <polygon points="533,72 523,67 523,77" fill="#111"/>
+            <rect x="545" y="34" width="150" height="76" fill="none" stroke="#111"/>
+            <text x="570" y="62" font-size="13" font-family="monospace">OpenAI API</text>
+            <text x="570" y="84" font-size="12" font-family="monospace">or ChatGPT</text>
+            <text x="570" y="102" font-size="11" font-family="monospace">selected account</text>
+
+            <rect x="250" y="158" width="92" height="52" fill="none" stroke="#111"/>
+            <text x="267" y="180" font-size="12" font-family="monospace">/healthz</text>
+            <text x="267" y="199" font-size="11" font-family="monospace">liveness</text>
+            <rect x="363" y="158" width="92" height="52" fill="none" stroke="#111"/>
+            <text x="386" y="180" font-size="12" font-family="monospace">/metrics</text>
+            <text x="381" y="199" font-size="11" font-family="monospace">Prometheus</text>
+            <rect x="476" y="158" width="92" height="52" fill="none" stroke="#111"/>
+            <text x="499" y="180" font-size="12" font-family="monospace">/models</text>
+            <text x="493" y="199" font-size="11" font-family="monospace">local list</text>
+            <line x1="352" y1="125" x2="352" y2="148" stroke="#111"/>
+            <line x1="296" y1="148" x2="522" y2="148" stroke="#111"/>
+            <line x1="296" y1="148" x2="296" y2="158" stroke="#111"/>
+            <line x1="409" y1="148" x2="409" y2="158" stroke="#111"/>
+            <line x1="522" y1="148" x2="522" y2="158" stroke="#111"/>
+
+            <rect x="85" y="242" width="560" height="62" fill="none" stroke="#111"/>
+            <text x="110" y="267" font-size="13" font-family="monospace">CLI: tokenproxy --config ./tokenproxy.toml</text>
+            <text x="110" y="288" font-size="13" font-family="monospace">optional: --bind ADDR | --dry-run | --probe-network</text>
+          </svg>
+        </div>
+        <div class="viz-box">
+          <p class="font-bold">Thirty-second mental model</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>Is it a CLI?</th><td>Yes. The binary is a CLI that normally starts a long-running OpenAI-compatible server.</td></tr>
+              <tr><th>What changes in clients?</th><td>Only <code>base_url</code> and model-provider selection. Request bodies keep their OpenAI shape.</td></tr>
+              <tr><th>What changes for operators?</th><td>They own the TOML file, account token environment variables, process supervision, logs, health, and metrics.</td></tr>
+              <tr><th>What tokenproxy owns?</th><td>Account choice, upstream auth insertion, continuation state, SSE/WebSocket relay, and pre-commit failover.</td></tr>
+            </tbody>
+          </table>
+          <div class="kbd-row mt-4">
+            <code>tokenproxy</code>
+            <code>/v1/responses</code>
+            <code>/v1/chat/completions</code>
+            <code>Responses WS</code>
+            <code>/healthz</code>
+            <code>/metrics</code>
+          </div>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: the first screen must show tokenproxy as one CLI-started server
+        with OpenAI-compatible client traffic and operator endpoints. Source:
+        <a href="#normative-contract">Normative Stage-two Contract</a>,
+        <a href="#configuration">Runtime Configuration</a>, and
+        <a href="#transport-deployment-policy">Transport and Deployment Policy</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">First-run setup path</h3>
+      <div class="viz-grid">
+        <div class="viz-box">
+          <p class="font-bold">Codex client view</p>
+          <pre class="mt-4 overflow-x-auto border border-black p-4 text-sm"><code>model_provider = "tokenproxy"
+service_tier = "default"
+
+[model_providers.tokenproxy]
+name = "tokenproxy"
+base_url = "http://127.0.0.1:8787/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = true
+env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
+          <p class="mt-4">
+            The local Codex config names tokenproxy as an OpenAI-compatible Responses
+            provider. It does not hold upstream OpenAI or ChatGPT account credentials;
+            tokenproxy owns account selection and upstream auth insertion.
+          </p>
+        </div>
+        <div class="viz-box">
+          <p class="font-bold">Tokenproxy operator view</p>
+          <table class="mt-4 text-sm">
+            <tbody>
+              <tr><th>Start</th><td><code>tokenproxy --config tokenproxy.toml --bind 127.0.0.1:8787</code></td></tr>
+              <tr><th>Dry run</th><td>Validate config, account IDs, URLs, timeout bounds, and token env names without contacting upstream.</td></tr>
+              <tr><th>Probe</th><td>Passive DNS/TLS/HTTP timing only until the operator explicitly asks for credentialed probes.</td></tr>
+              <tr><th>Listen</th><td>Accept Chat Completions, Responses HTTP/SSE, Responses WebSocket, and local model-catalog requests.</td></tr>
+              <tr><th>Observe</th><td>Expose account state, route reason, transport, prompt-cache class, retry phase, and status-page context.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <svg class="mt-4 border border-black" viewBox="0 0 760 160" role="img" aria-label="First-run setup path">
+        <rect x="20" y="24" width="120" height="48" fill="none" stroke="#111"/>
+        <text x="38" y="44" font-size="12" font-family="monospace">Codex config</text>
+        <text x="38" y="62" font-size="12" font-family="monospace">provider=tokenproxy</text>
+        <text x="154" y="54" font-size="14" font-family="monospace">-&gt;</text>
+        <rect x="182" y="24" width="126" height="48" fill="none" stroke="#111"/>
+        <text x="206" y="44" font-size="12" font-family="monospace">loopback HTTP</text>
+        <text x="200" y="62" font-size="12" font-family="monospace">/v1/responses</text>
+        <text x="322" y="54" font-size="14" font-family="monospace">-&gt;</text>
+        <rect x="350" y="24" width="128" height="48" fill="none" stroke="#111"/>
+        <text x="374" y="44" font-size="12" font-family="monospace">tokenproxy</text>
+        <text x="366" y="62" font-size="12" font-family="monospace">route + relay</text>
+        <text x="492" y="54" font-size="14" font-family="monospace">-&gt;</text>
+        <rect x="520" y="24" width="120" height="48" fill="none" stroke="#111"/>
+        <text x="546" y="44" font-size="12" font-family="monospace">upstream</text>
+        <text x="536" y="62" font-size="12" font-family="monospace">account auth</text>
+        <line x1="580" y1="72" x2="580" y2="100" stroke="#111"/>
+        <text x="566" y="118" font-size="14" font-family="monospace">-&gt;</text>
+        <rect x="414" y="96" width="128" height="42" fill="none" stroke="#111"/>
+        <text x="440" y="113" font-size="12" font-family="monospace">stream back</text>
+        <text x="432" y="130" font-size="12" font-family="monospace">SSE or WS event</text>
+        <text x="386" y="118" font-size="14" font-family="monospace">&lt;-</text>
+        <rect x="220" y="96" width="128" height="42" fill="none" stroke="#111"/>
+        <text x="238" y="113" font-size="12" font-family="monospace">telemetry row</text>
+        <text x="238" y="130" font-size="12" font-family="monospace">route evidence</text>
+      </svg>
+      <p class="caption">
+        Caption: this setup view shows the smallest local Codex path: user-defined
+        Codex provider, loopback tokenproxy listener, tokenproxy-owned upstream account
+        credentials, and returned stream events. Source: <a href="#configuration">Runtime
+        Configuration</a>, <a href="#transport-deployment-policy">Transport and
+        Deployment Policy</a>, Codex <code>model-provider-info/src/lib.rs</code> lines
+        1-6, 49-78, and 81-135, Codex <code>config/src/thread_config.rs</code> lines
+        279-287, and Codex <code>config/src/profile_toml.rs</code> lines 24-31.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Normal local commands</h3>
+      <div class="quick-map">
+        <div class="command-card">
+          <p class="font-bold">Minimal tokenproxy config</p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>[server]
+bind = "127.0.0.1:8787"
+allow_non_loopback = false
+
+[[accounts]]
+id = "openai-primary"
+kind = "openai_api_key"
+base_url = "https://api.openai.com/v1"
+token_env = "OPENAI_API_KEY"
+models = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"]
+supports_chat_completions = true
+supports_responses = true
+supports_responses_ws = true</code></pre>
+        </div>
+        <div class="command-card">
+          <p class="font-bold">Operator shell</p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export OPENAI_API_KEY="set-outside-repo"
+export TOKENPROXY_CLIENT_KEY="local-client-token"
+
+tokenproxy --config ./tokenproxy.toml --dry-run
+tokenproxy --config ./tokenproxy.toml
+
+curl -s http://127.0.0.1:8787/healthz
+curl -s http://127.0.0.1:8787/v1/models</code></pre>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: the normal path is a config file, environment-held secrets, dry-run
+        validation, then a long-running server. Source:
+        <a href="#configuration">Runtime Configuration</a> and
+        <a href="#security">Security and Privacy Rules</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Server setup with local Codex</h3>
+      <div class="viz-box">
+        <svg viewBox="0 0 800 330" role="img" aria-label="Remote tokenproxy with local Codex over SSH tunnel">
+          <rect x="30" y="40" width="170" height="90" fill="none" stroke="#111"/>
+          <text x="60" y="70" font-size="14" font-family="monospace">local laptop</text>
+          <text x="60" y="94" font-size="12" font-family="monospace">Codex profile</text>
+          <text x="60" y="116" font-size="12" font-family="monospace">base_url local /v1</text>
+
+          <rect x="302" y="40" width="190" height="90" fill="none" stroke="#111"/>
+          <text x="337" y="70" font-size="14" font-family="monospace">SSH tunnel</text>
+          <text x="334" y="94" font-size="12" font-family="monospace">-L 8787:127.0.0.1:8787</text>
+          <text x="346" y="116" font-size="12" font-family="monospace">encrypted transport</text>
+
+          <rect x="598" y="40" width="170" height="90" fill="none" stroke="#111"/>
+          <text x="636" y="70" font-size="14" font-family="monospace">server</text>
+          <text x="626" y="94" font-size="12" font-family="monospace">tokenproxy</text>
+          <text x="620" y="116" font-size="12" font-family="monospace">loopback bind</text>
+
+          <line x1="200" y1="85" x2="302" y2="85" stroke="#111"/>
+          <polygon points="302,85 292,80 292,90" fill="#111"/>
+          <line x1="492" y1="85" x2="598" y2="85" stroke="#111"/>
+          <polygon points="598,85 588,80 588,90" fill="#111"/>
+
+          <rect x="598" y="200" width="170" height="70" fill="none" stroke="#111"/>
+          <text x="620" y="229" font-size="13" font-family="monospace">api.openai.com</text>
+          <text x="620" y="251" font-size="12" font-family="monospace">host-based TLS/SNI</text>
+          <line x1="683" y1="130" x2="683" y2="200" stroke="#111"/>
+          <polygon points="683,200 678,190 688,190" fill="#111"/>
+
+          <rect x="30" y="198" width="462" height="74" fill="none" stroke="#111"/>
+          <text x="54" y="225" font-size="13" font-family="monospace">Default remote pattern</text>
+          <text x="54" y="249" font-size="12" font-family="monospace">No public proxy listener is required. The local Codex config stays identical.</text>
+        </svg>
+      </div>
+      <div class="quick-map mt-4">
+        <div class="command-card">
+          <p class="font-bold">On the server</p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>sudo install -m 0600 tokenproxy.toml /etc/tokenproxy/tokenproxy.toml
+export OPENAI_API_KEY="set-in-server-secret-store"
+
+tokenproxy --config /etc/tokenproxy/tokenproxy.toml --log-json</code></pre>
+        </div>
+        <div class="command-card">
+          <p class="font-bold">On the laptop</p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>ssh -N -L 8787:127.0.0.1:8787 tokenproxy-host
+
+export TOKENPROXY_CLIENT_KEY="local-client-token"
+codex -p tokenproxy</code></pre>
+        </div>
+      </div>
+      <p class="caption">
+        Caption: server use starts with an SSH tunnel and loopback server bind.
+        A public non-loopback listener remains an explicit deployment role because
+        the stage-two contract requires opt-in before binding outside loopback.
+        Source: <a href="#normative-contract">Normative Stage-two Contract</a> and
+        <a href="#transport-deployment-policy">Transport and Deployment Policy</a>.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Codex config.toml changes</h3>
+      <div class="quick-map">
+        <div class="command-card">
+          <p class="font-bold">Persistent profile in <code>~/.codex/config.toml</code></p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>[profiles.tokenproxy]
+model_provider = "tokenproxy"
+
+[model_providers.tokenproxy]
+name = "tokenproxy"
+base_url = "http://127.0.0.1:8787/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = true
+env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
+        </div>
+        <div class="command-card">
+          <p class="font-bold">One-shot Codex command</p>
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export TOKENPROXY_CLIENT_KEY="local-client-token"
+
+codex exec \
+  -c "model_providers.tokenproxy={ name = 'tokenproxy', base_url = 'http://127.0.0.1:8787/v1', wire_api = 'responses', requires_openai_auth = false, supports_websockets = true, env_key = 'TOKENPROXY_CLIENT_KEY' }" \
+  -c model_provider="tokenproxy" \
+  "summarize this repository"</code></pre>
+        </div>
+      </div>
+      <div class="checkgrid mt-4 text-sm">
+        <div><strong><code>base_url</code></strong><br>Always points at tokenproxy's OpenAI-compatible <code>/v1</code> base, local or tunneled.</div>
+        <div><strong><code>wire_api</code></strong><br>Use <code>responses</code>; current Codex source accepts only the Responses wire API for providers.</div>
+        <div><strong><code>requires_openai_auth</code></strong><br>Use <code>false</code> so Codex does not start its OpenAI login flow for this proxy provider.</div>
+        <div><strong><code>supports_websockets</code></strong><br>Use <code>true</code> so Codex can use persistent Responses WebSocket traffic when the model path enables it.</div>
+      </div>
+      <p class="caption">
+        Caption: the Codex profile changes are provider selection, not a new
+        client protocol. They mirror the local config shape of
+        <code>model_provider</code> plus <code>[model_providers.&lt;id&gt;]</code>
+        with <code>base_url</code>, <code>wire_api</code>, and <code>env_key</code>.
+        Source: local <code>~/.codex/config.toml</code> lines 15-21;
+        <code>codex-rs/config/src/config_toml.rs</code> lines 141-142 and 266-269;
+        <code>codex-rs/model-provider-info/src/lib.rs</code> lines 81-136; and
+        <code>codex-rs/config/src/thread_config.rs</code> lines 280-288.
+      </p>
+
+      <h3 class="mt-8 mb-3 text-xl font-bold">Normal daily surfaces</h3>
+      <table class="mt-4 text-sm">
+        <thead>
+          <tr>
+            <th>Who</th>
+            <th>What they do</th>
+            <th>Surface</th>
+            <th>Correct visible result</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Operator</td><td>Validate before listening.</td><td><code>tokenproxy --config ./tokenproxy.toml --dry-run</code></td><td>Exits 0 with non-secret config summary, or exits nonzero before listening.</td></tr>
+          <tr><td>Operator</td><td>Start local or server process.</td><td><code>tokenproxy --config ./tokenproxy.toml</code></td><td>Logs listener address, enabled account count, model count, and status labels.</td></tr>
+          <tr><td>Operator</td><td>Check health and metrics.</td><td><code>GET /healthz</code>, <code>GET /metrics</code></td><td>Liveness, account health, route, retry, and WebSocket counters without secrets.</td></tr>
+          <tr><td>Codex user</td><td>Use the configured profile.</td><td><code>codex -p tokenproxy</code></td><td>Codex traffic goes to <code>http://127.0.0.1:8787/v1</code>; prompts and workflows stay unchanged.</td></tr>
+          <tr><td>Agent SDK</td><td>Use tokenproxy as OpenAI base URL.</td><td><code>base_url=http://127.0.0.1:8787/v1</code></td><td>Chat Completions, Responses HTTP/SSE, and Responses WebSocket use the same route contract.</td></tr>
+        </tbody>
+      </table>
+      <p class="caption">
+        Caption: daily operation is intentionally small: one server command, two
+        operator endpoints, and existing OpenAI-compatible client configuration.
+        Source: <a href="#normative-contract">Normative Stage-two Contract</a>,
+        <a href="#configuration">Runtime Configuration</a>, and
+        <a href="#test-matrix">Required Test Matrix</a>.
+      </p>
+
       <h3 class="mt-8 mb-3 text-xl font-bold">Operator dashboard</h3>
       <div class="viz-grid">
         <div class="viz-box">
@@ -2672,6 +2977,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
         </thead>
         <tbody>
           <tr><td>Routes Chat, Responses, Responses WebSocket, and local model-catalog traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
+          <tr><td>Lets Codex target a local tokenproxy provider without upstream credentials in Codex config.</td><td><code>config</code></td><td>Codex provider entry plus tokenproxy account table</td><td>Codex setup smoke test</td><td>Codex config source and Runtime Configuration</td></tr>
           <tr><td>Preserves continuation quality.</td><td><code>responses_state</code></td><td>ordered output-item log, <code>previous_response_id</code>, assistant <code>phase</code></td><td>replay and compaction tests</td><td>OpenAI and CLIProxyAPI rows</td></tr>
           <tr><td>Preserves Codex fast-mode intent.</td><td><code>routing</code></td><td>requested and actual <code>service_tier</code>, account tier allowlist</td><td>service-tier passthrough tests</td><td>OpenAI docs and Codex source</td></tr>
           <tr><td>Keeps streams correct under failure.</td><td><code>stream_relay</code></td><td>commit-state enum and SSE repair buffer</td><td>partial-frame and post-commit failure tests</td><td>CLIProxyAPI stream tests</td></tr>
@@ -2820,9 +3126,10 @@ warn!("websocket control queue full while replying to ping; closing connection")
         commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
       </p>
       <p class="mt-3">
-        Codex. (2026i). <em>FastMode, service-tier model metadata, request filtering,
-        and Responses request construction sources</em>. Local submodule
-        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+        Codex. (2026i). <em>Model-provider config, FastMode, service-tier model
+        metadata, request filtering, and Responses request construction sources</em>.
+        Local submodule <code>codex</code>, commit
+        <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
       </p>
       <p class="mt-3">
         Globalping. (2026). <em>Internet and web infrastructure monitoring and benchmarking</em>.
@@ -3180,7 +3487,8 @@ warn!("websocket control queue full while replying to ping; closing connection")
               <code>codex-rs/codex-api/src/endpoint/compact.rs</code> lines 33-54;
               <code>codex-rs/codex-api/src/endpoint/responses_websocket.rs</code>
               lines 376-386;
-              <code>codex-rs/model-provider-info/src/lib.rs</code> lines 35-37;
+              <code>codex-rs/model-provider-info/src/lib.rs</code> lines 1-6,
+              35-37, 49-78, and 81-135;
               <code>codex-rs/login/src/auth/manager.rs</code> lines 94-98;
               <code>codex-rs/cloud-tasks/src/env_detect.rs</code> lines 35-75;
               <code>codex-rs/codex-mcp/src/mcp/mod.rs</code> lines 425-448;
@@ -3193,6 +3501,8 @@ warn!("websocket control queue full while replying to ping; closing connection")
               <code>codex-rs/features/src/lib.rs</code> lines 193-194 and
               1132-1137;
               <code>codex-rs/config/src/config_toml.rs</code> lines 349-351;
+              <code>codex-rs/config/src/thread_config.rs</code> lines 279-287;
+              <code>codex-rs/config/src/profile_toml.rs</code> lines 24-31;
               <code>codex-rs/protocol/src/config_types.rs</code> lines 430-455;
               <code>codex-rs/protocol/src/openai_models.rs</code> lines 485-509;
               <code>codex-rs/tui/src/service_tier_resolution.rs</code> lines 1-64;
@@ -3219,6 +3529,11 @@ warn!("websocket control queue full while replying to ping; closing connection")
               control-plane paths from generation endpoints, gives outbound WebSocket
               traffic a bounded channel, closes on control-queue overflow, and records WebSocket connect/request/event metrics
               with status, duration, error, endpoint, request-id, and Cloudflare Ray labels.
+              Codex accepts user-defined model providers under <code>model_providers</code>,
+              uses <code>wire_api = "responses"</code> as the supported wire protocol,
+              and has a source test that builds a local provider with
+              <code>requires_openai_auth = false</code> and
+              <code>supports_websockets = true</code>.
               Codex FastMode is stable and default-enabled, maps legacy <code>fast</code>
               to upstream <code>priority</code>, preserves explicit <code>default</code> as a
               request sentinel, filters unsupported tiers before request construction,
@@ -3231,7 +3546,8 @@ warn!("websocket control queue full while replying to ping; closing connection")
               Keep tokenproxy narrow, avoid global stream read timeouts, isolate upstream
               auth, use explicit provider-base path joining for API and ChatGPT Codex
               accounts, exclude ChatGPT WHAM/Apps/agent-identity paths from downstream
-              proxying, use the Tokio ecosystem first, bound WebSocket queues, close on
+              proxying, document a local Codex provider setup that points at tokenproxy
+              without storing upstream credentials in Codex config, use the Tokio ecosystem first, bound WebSocket queues, close on
               control-plane overload, emit tagged WebSocket timing metrics, normalize
               legacy <code>fast</code> to <code>priority</code>, pass official service-tier
               values through only when supported, record requested and actual
@@ -3494,6 +3810,10 @@ warn!("websocket control queue full while replying to ping; closing connection")
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-27 5:04 AM PDT</td>
+            <td>Re-reviewed graphical UX and local Codex config evidence; added setup, command, SSH tunnel, and Codex profile visuals without changing performance values.</td>
+          </tr>
           <tr>
             <td>2026-05-27 4:44 AM PDT</td>
             <td>Polished module-map tree indentation and latency SVG label placement; no evidence values changed.</td>
