@@ -66,7 +66,7 @@
       </p>
       <p class="mt-4 text-sm">
         Evidence snapshot: local checkout at <code>/Users/vic8or/dev/tokenproxy</code>,
-        observed through 2026-05-27 00:14:12 PDT and 2026-05-27 07:14:12 UTC.
+        observed through 2026-05-27 00:56:57 PDT and 2026-05-27 07:56:57 UTC.
       </p>
     </header>
 
@@ -134,8 +134,10 @@
           <strong>Claim 5.</strong> Network path facts are observations, not constants. In this
           checkout, DNS resolved <code>api.openai.com</code> to <code>172.66.0.243</code> and
           <code>162.159.140.245</code>. It resolved <code>status.openai.com</code> through
-          <code>cname.vercel-dns.com</code> to <code>76.76.21.241</code> and <code>66.33.60.193</code>.
-          These values are inputs to the measurement log, not implementation constants.
+          <code>cname.vercel-dns.com</code> to <code>76.76.21.93</code> and <code>66.33.60.194</code>.
+          These values came from
+          <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/dns.txt</code>
+          and are inputs to the measurement log, not implementation constants.
         </p>
       </div>
     </section>
@@ -159,7 +161,7 @@
         route set return <code>403</code> or <code>404</code> with a small JSON error. This mirrors the
         strictness in Codex's local Responses proxy, which accepts exactly
         <code>POST /v1/responses</code>, overrides upstream auth and Host, and rejects other
-        requests (Codex, 2026a, lines 31-64; Codex, 2026b, lines 170-178).
+        requests (Codex, 2026b, lines 170-178 and 196-228).
       </p>
       <p class="mt-4">
         Tokenproxy is allowed to run benchmark probes and diagnostic commands. It is not
@@ -461,9 +463,9 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         The classifier reads no more JSON than needed: method, path, body size,
         <code>model</code>, <code>stream</code>, <code>store</code>, <code>previous_response_id</code>,
         <code>prompt_cache_key</code>, <code>service_tier</code>, <code>reasoning.effort</code>, and
-        <code>text.verbosity</code>. Use <code>serde_json</code> for stage two. Consider
-        <code>simd-json</code> only after a local parse benchmark shows body parsing is a top
-        contributor to proxy overhead.
+        <code>text.verbosity</code>. Use <code>serde_json</code> for stage two. Do not include
+        <code>simd-json</code> in the first implementation; parser throughput is an
+        unanswered research question until a product-payload benchmark exists.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">2. Account router</h3>
@@ -497,12 +499,12 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         response streams continue flowing (Codex, 2026b, lines 102-107).
       </p>
       <p class="mt-4">
-        Pingora's pooling documentation gives the correctness rule to copy: reuse only
-        connections to the exact same peer identity, including IP:port, scheme, SNI,
-        certificate verification settings, and proxy settings; mark errored
-        connections non-reusable (Cloudflare, 2026b, lines 1-22). Reqwest handles the
-        pool internally, but tokenproxy must keep client instances separated by
-        upstream origin and TLS/proxy configuration.
+        Pingora's source gives the correctness rule to copy: a reusable pooled
+        connection must still match the expected peer, retryability is explicit, and
+        errors after proxying default to conservative downstream non-reuse (Cloudflare,
+        2026b, lines 344-397; Cloudflare, 2026c, lines 530-609). Reqwest handles the
+        pool internally, but tokenproxy must keep client instances separated by upstream
+        origin and TLS/proxy configuration.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">4. Streaming relay</h3>
@@ -561,9 +563,13 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
             <td><code>tokio</code></td>
             <td>
               The ecosystem fit is stronger for Hyper, Reqwest, Axum, Tokio Tungstenite,
-              tracing, metrics, and existing Codex-style clients. LiveKit's Rust SDK
-              currently requires Tokio (LiveKit, 2026a, line 58), and s2n-quic's examples
-              use Tokio for server/client tasks (AWS, 2026a, lines 45-104).
+              tracing, metrics, and existing Codex-style clients. Codex's Rust workspace
+              already selects <code>axum</code>, <code>reqwest</code>, <code>tokio</code>, and
+              <code>tokio-tungstenite</code> (Codex, 2026f, lines 260, 344, 392-398).
+              LiveKit spawns separate session tasks through its runtime wrapper
+              (LiveKit, 2026a, lines 562-569), and s2n-quic's example server and client
+              use Tokio entrypoints and tasks (AWS, 2026a, lines 18-41; AWS, 2026b,
+              lines 13-39).
             </td>
           </tr>
           <tr>
@@ -635,33 +641,38 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         Pingora is a strong reference for pooling, health checks, failover, and graceful
         upgrade. It also brings a larger proxy framework. Stage two needs OpenAI-specific
         JSON, SSE, and WebSocket continuation logic more than a general reverse-proxy
-        stack. Use Pingora's rules, not its framework, until a benchmark shows the
-        Hyper/Axum implementation misses overhead targets.
+        stack. The decision to use Hyper/Axum first rests on source-backed scope and
+        maintainability evidence, not on a measured Pingora-versus-Hyper performance
+        result for tokenproxy. Use Pingora's pooling, retry, and health-check rules as
+        implementation constraints; do not adopt its framework in stage two.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Why not io_uring first</h3>
       <p>
         Monoio shows the performance appeal of thread-per-core and io_uring for
-        network-bound servers, but it also documents platform constraints, runtime
-        configuration requirements, unstable features, and compatibility costs (Bytedance,
-        2026a, lines 21-31; Bytedance, 2026b, lines 63-87). Tokenproxy's upstream work is
+        network-bound servers, but its source also shows platform/feature branching,
+        io_uring entry configuration, legacy fallback, and driver completion constraints
+        (Bytedance, 2026a, lines 17-28 and 148-215; Bytedance, 2026b, lines 199-236).
+        Tokenproxy's upstream work is
         TLS, HTTP/2, SSE, and WebSocket heavy; Tokio support is better across the chosen
-        libraries. Use io_uring only after a local Tokio implementation has a measured
-        kernel or scheduler bottleneck.
+        libraries. The Tokio default is a compatibility and code-size decision. It is
+        not a performance proof against io_uring, and the report does not accept any
+        io_uring latency claim for tokenproxy without a completed local comparison.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Why not QUIC/H3 first</h3>
       <p>
         Quiche and s2n-quic show that QUIC/H3 is powerful and complex. Quiche provides
         a low-level QUIC packet API and makes the application provide sockets, an event
-        loop, and timers (Cloudflare, 2026d, lines 8-11). It also requires QUIC flow
-        control, ALPN, TLS configuration, and BoringSSL build machinery (Cloudflare,
-        2026d, lines 81-103; Cloudflare, 2026e, lines 330-343). s2n-quic is extensively
-        tested and provider-driven, but it requires QUIC-specific provider choices and
-        has GSO requirements on older Linux kernels (AWS, 2026a, lines 3-10, 116-118).
-        Tokenproxy should measure HTTP/3 with curl and external probes first. It should
-        not implement custom H3 until repeated measurements from target networks show
-        a durable advantage for OpenAI endpoints.
+        loop, timers, connection configuration, and HTTP/3 handling (Cloudflare, 2026d,
+        lines 27-33 and 51-75; Cloudflare, 2026e, lines 107-185). s2n-quic examples
+        configure explicit TLS and IO providers and run Tokio tasks per connection or
+        stream (AWS, 2026a, lines 18-41; AWS, 2026b, lines 13-39).
+        A 2026-05-27 local uncredentialed curl probe observed reachable HTTP/3 for
+        <code>/v1/responses</code>, but the sample was five 401 responses from one client
+        network. That probe is insufficient evidence for custom H3 code. Keep QUIC/H3
+        out of stage two; record HTTP version in probes and treat authenticated
+        HTTP/3 workflow comparison as an unanswered research question.
       </p>
     </section>
 
@@ -1116,7 +1127,7 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
       <p>
         The fast path is allowed only when the session has a completed response ID,
         the selected account supports WebSocket incremental input, and no prior event
-        invalidated connection-local state. The forwarded request keeps
+        cleared connection-local state. The forwarded request keeps
         <code>previous_response_id</code> and includes only new input items. OpenAI
         documents this pattern for long-running tool-call workflows (OpenAI, 2026g).
       </p>
@@ -1270,6 +1281,8 @@ After compacted window is used:
             <td>
               curl 8.19.0 on macOS with OpenSSL 3.6.1, nghttp2 1.67.1,
               ngtcp2 1.17.0, nghttp3 1.12.0. Features include HTTP2 and HTTP3.
+              Raw environment capture:
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/environment.txt</code>.
             </td>
             <td>Local probe tool can compare HTTP/1.1, HTTP/2, and HTTP/3 where network policy permits.</td>
           </tr>
@@ -1280,52 +1293,66 @@ After compacted window is used:
           </tr>
           <tr>
             <td><code>dig status.openai.com A +short</code></td>
-            <td><code>cname.vercel-dns.com.</code>, <code>76.76.21.241</code>, <code>66.33.60.193</code></td>
+            <td><code>cname.vercel-dns.com.</code>, <code>76.76.21.93</code>, <code>66.33.60.194</code></td>
             <td>Status is operational context, not routing substrate.</td>
           </tr>
           <tr>
             <td><code>curl</code> timing and TLS probes</td>
             <td>
-              A 2026-05-27 00:14:12 PDT uncredentialed <code>curl</code> refresh
-              to <code>https://api.openai.com/v1/responses</code> reached
-              <code>162.159.140.245</code>. HTTP/2 measured DNS 0.003008 s,
-              connect 0.065906 s, TLS 0.080019 s, TTFB 0.158154 s, total
-              0.158240 s. HTTP/1.1 measured total 0.153534 s. HTTP/3 measured
-              total 0.140877 s. <code>curl</code> to
-              <code>https://status.openai.com/</code> reached <code>66.33.60.193</code>
-              over HTTP/2 with total 0.322172 s. Earlier same-environment TLS
-              inspection negotiated TLS 1.3 with <code>TLS_AES_256_GCM_SHA384</code>
-              and certificate CN <code>api.openai.com</code>.
+              At 2026-05-27 00:50:20 PDT, five uncredentialed 401 probes per
+              protocol to <code>https://api.openai.com/v1/responses</code> reached
+              <code>162.159.140.245</code> with zero curl errors. HTTP/2 total seconds:
+              p50 <code>0.150116</code>, p95 <code>1.821407</code>, p99
+              <code>1.821407</code>; run 1 was the outlier at <code>1.821407</code>.
+              HTTP/1.1 total seconds: p50 <code>0.103920</code>, p95
+              <code>0.181370</code>, p99 <code>0.181370</code>. HTTP/3 total seconds:
+              p50 <code>0.106089</code>, p95 <code>0.153120</code>, p99
+              <code>0.153120</code>. Raw timings:
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/curl_timings.csv</code>.
+              Command template:
+              <code>curl --http2|--http1.1|--http3-only -sS -o /dev/null -w '%{remote_ip},%{http_version},%{http_code},%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total},%{exitcode},%{errormsg}' https://api.openai.com/v1/responses</code>.
+              Same-run TLS inspection connected to <code>162.159.140.245</code>,
+              negotiated TLS 1.3 with <code>TLS_AES_256_GCM_SHA384</code>, and
+              verified certificate CN <code>api.openai.com</code>. Raw TLS capture:
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/tls.txt</code>.
             </td>
             <td>
-              Stage two must run reproducible timing probes from the target deployment
-              networks before any endpoint, HTTP-version, or account-routing claim is
-              accepted.
+              The local 401 probe proves route reachability and records current path
+              variance. It does not prove authenticated model latency, account latency,
+              stream stability, or product proxy overhead.
             </td>
           </tr>
           <tr>
             <td>WebSocket handshake probe</td>
             <td>
               <code>websocat -v -1 -H='Authorization: Bearer invalid_tokenproxy_probe' wss://api.openai.com/v1/responses</code>
-              connected TCP to <code>172.66.0.243:443</code> and received
-              <code>401 Unauthorized</code>. This validates the route reaches a WebSocket
-              endpoint but does not measure authenticated stream stability.
+              connected TCP to <code>162.159.140.245:443</code> and received
+              <code>401 Unauthorized</code> during upgrade. Raw capture:
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/websocket_unauthenticated.txt</code>.
             </td>
             <td>
-              Stage two needs credentialed test-project probes for WebSocket event
-              ordering, reconnect behavior, and 60-minute-limit handling.
+              This shows the route reaches an endpoint that handles WebSocket upgrade
+              requests. It does not measure authenticated event ordering, reconnect
+              behavior, 60-minute-limit handling, or stream stability.
             </td>
           </tr>
           <tr>
-            <td>OpenAI status history</td>
+            <td>OpenAI status API</td>
             <td>
-              At the 2026-05-27 refresh, the live status page reported an ongoing FedRAMP login
-              incident, API aggregate uptime of 99.98%, ChatGPT aggregate uptime of
-              99.84%, Codex aggregate uptime of 99.98%, and FedRAMP aggregate uptime
-              of 99.95%. The history page also showed recent May 2026 incidents
-              affecting Responses API, Codex, GPT-5.4/GPT-5.5, and Codex rate
-              limits, and states that availability metrics are aggregate across tiers,
-              models, and error types (OpenAI Status, 2026).
+              At the 2026-05-27 00:50 PDT refresh,
+              <code>https://status.openai.com/api/v2/status.json</code> reported
+              <code>minor</code> status with description <code>Partial System Degradation</code>
+              and page update time <code>2026-05-27T05:31:12Z</code>. The summary API
+              reported one active monitoring incident, "Login issues for FedRAMP users
+              who recently logged out"; <code>Responses</code> and <code>Codex API</code>
+              components were marked operational. Raw captures:
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/openai_status_status.json</code>
+              and
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/openai_status_summary.json</code>.
+              Commands:
+              <code>curl -fsS --connect-timeout 5 --max-time 15 https://status.openai.com/api/v2/status.json</code>
+              and
+              <code>curl -fsS --connect-timeout 5 --max-time 15 https://status.openai.com/api/v2/summary.json</code>.
             </td>
             <td>
               Account routing and operator diagnostics must include model, endpoint,
@@ -1341,10 +1368,10 @@ After compacted window is used:
       <h2 class="mb-4 text-2xl font-bold">Benchmark Methodology</h2>
       <p>
         Benchmarks must be workflow benchmarks, not microbenchmarks alone. Ripgrep's
-        README warns that a single benchmark is never enough and shows performance
-        cliffs where output volume or pattern shape dominates tool differences
-        (BurntSushi, 2026a, lines 47-49; BurntSushi, 2026b, lines 87-108). Uv's
-        benchmark notes separate warm and cold cases and warn that OS, filesystem,
+        benchmark harness separates large-file and many-small-file corpora, distinguishes
+        default behavior from fairer command comparisons, and fixes locale where it
+        changes grep behavior (BurntSushi, 2026b, lines 19-41 and 53-110). Uv's
+        benchmark notes separate warm and cold cases and warns that OS, filesystem,
         package set, and network behavior can change results (Astral, 2026, lines
         3-13, 18-48). Tokenproxy inherits the same rule: label the environment,
         distinguish warm/cold connection and cache states, and report tails.
@@ -1533,9 +1560,9 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       <p class="mt-4">
         Codex telemetry supports this metric shape: it records WebSocket connect
         duration, request duration, event kind, parse failures, response failures, and
-        timing events (Codex, 2026d, lines 574-790). Iggy provides a benchmark-report
-        example with latency, throughput, p50, p90, p95, p99, p999, and p9999 summaries
-        (Apache Iggy, 2026b, lines 52-105; Apache Iggy, 2026c, lines 143-165).
+        timing events (Codex, 2026d, lines 574-790). Iggy's benchmark analytics compute
+        p50, p95, and p99 latency distribution data and render P50/P95/P99 markers
+        (Apache Iggy, 2026b, lines 35-45; Apache Iggy, 2026c, lines 255-260).
       </p>
     </section>
 
@@ -1693,9 +1720,10 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       </ul>
       <p class="mt-4">
         Codex's local proxy is strict because it is intended to protect an API key held
-        by a privileged process from unprivileged callers. It reads the key from stdin,
-        redacts sensitive dump headers, marks auth header values sensitive, and limits
-        allowed requests (Codex, 2026a, lines 35-67; Codex, 2026a, lines 96-108).
+        by a privileged process from unprivileged callers. Its source accepts only
+        <code>POST /v1/responses</code>, skips inbound Authorization and Host headers,
+        marks the inserted auth header sensitive, and sets the upstream Host from
+        configuration (Codex, 2026b, lines 170-178 and 196-228).
         Tokenproxy has more account-routing behavior, but the same secret discipline.
       </p>
     </section>
@@ -1715,7 +1743,7 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
         <li>Add account health transitions, backoff, and retry-before-commit behavior.</li>
         <li>Add Prometheus metrics and JSON logs.</li>
         <li>Add benchmark harness with direct-upstream and through-proxy modes.</li>
-        <li>Run workflow benchmarks and update this spec only when measured results require design changes.</li>
+        <li>Run workflow benchmarks and update this spec only when completed artifacts require design changes.</li>
       </ol>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Minimal module map</h3>
@@ -1782,27 +1810,27 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
             <td>Implement reconnect and full-context fallback; expose terminal error when replay state is incomplete.</td>
           </tr>
           <tr>
-            <td>CLIProxyAPI repairs missing completed Responses output from output-item events.</td>
+            <td>CLIProxyAPI repairs missing completed Responses output from output-item events in <code>openai_responses_handlers_stream_test.go</code> lines 35-234.</td>
             <td>Add <code>sse_repair</code> module and output-item replay tests.</td>
           </tr>
           <tr>
-            <td>Codex proxy disables default stream timeout.</td>
+            <td>Codex proxy disables reqwest's default timeout in <code>responses-api-proxy/src/lib.rs</code> lines 102-107.</td>
             <td>Do not use global read timeout for upstream streaming requests.</td>
           </tr>
           <tr>
-            <td>Pingora pooling and failover docs define reusable peer identity and retry boundary.</td>
+            <td>Pingora source defines retry types, retry decision on reused connections, and safe default non-reuse in <code>pingora-error/src/lib.rs</code> lines 59-80 and <code>pingora-proxy/src/proxy_trait.rs</code> lines 530-609.</td>
             <td>Separate upstream clients by origin/TLS/proxy config; retry only before downstream commitment.</td>
           </tr>
           <tr>
-            <td>Monoio and Iggy show thread-per-core benefits but also runtime constraints and hot-path backpressure design.</td>
+            <td>Monoio source shows io_uring/legacy runtime branching, while Iggy source and tests show bounded per-peer queues and finite backpressure.</td>
             <td>Use Tokio first; copy bounded-channel and no-blocking-reactor rules.</td>
           </tr>
           <tr>
-            <td>Quiche and s2n-quic show QUIC/H3 complexity and provider/build requirements.</td>
-            <td>Keep QUIC/H3 out of stage-two code until endpoint measurements justify it.</td>
+            <td>Quiche source states the application owns QUIC sockets, event loop, and timers; the local curl artifact only measured five unauthenticated 401 HTTP/3 probes.</td>
+            <td>Keep QUIC/H3 out of stage-two code; treat authenticated HTTP/3 workflow comparison as unanswered research.</td>
           </tr>
           <tr>
-            <td>OpenAI status history shows recent API, Responses, and Codex incidents with aggregate availability reporting.</td>
+            <td>OpenAI status API artifact showed page-level <code>minor</code> status while <code>Responses</code> and <code>Codex API</code> were operational.</td>
             <td>Metrics must label endpoint, model family, transport, account, and status class; operators cannot rely on aggregate status alone.</td>
           </tr>
         </tbody>
@@ -1872,15 +1900,11 @@ warn!("websocket control queue full while replying to ping; closing connection")
     <section id="references" class="mb-12">
       <h2 class="mb-4 text-2xl font-bold">References</h2>
       <p class="mt-3">
-        Apache Iggy. (2026a). <em>README.md</em>. Local submodule
-        <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
-      </p>
-      <p class="mt-3">
-        Apache Iggy. (2026b). <em>core/bench/src/analytics/metrics/group.rs</em>.
+        Apache Iggy. (2026b). <em>core/bench/src/analytics/metrics/latency_distribution.rs</em>.
         Local submodule <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
       </p>
       <p class="mt-3">
-        Apache Iggy. (2026c). <em>core/bench/src/analytics/record.rs</em> and benchmark analytics.
+        Apache Iggy. (2026c). <em>core/bench/report/src/lib.rs</em> and benchmark analytics.
         Local submodule <code>iggy</code>, commit <code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code>.
       </p>
       <p class="mt-3">
@@ -1892,27 +1916,23 @@ warn!("websocket control queue full while replying to ping; closing connection")
         commit <code>d190665157a18a288a1a13591793002f1ae767aa</code>.
       </p>
       <p class="mt-3">
-        AWS. (2026a). <em>s2n-quic README.md</em>. Local submodule <code>s2n-quic</code>,
+        AWS. (2026a). <em>s2n-quic examples/echo/src/bin/quic_echo_server.rs</em>. Local submodule <code>s2n-quic</code>,
         commit <code>993102359e8bf4f633808a7977a34acbf0f64433</code>.
       </p>
       <p class="mt-3">
-        AWS. (2026b). <em>s2n-quic Continuous Integration</em> and TLS offloading example.
+        AWS. (2026b). <em>s2n-quic examples/echo/src/bin/quic_echo_client.rs and benchmark harnesses</em>.
         Local submodule <code>s2n-quic</code>, commit <code>993102359e8bf4f633808a7977a34acbf0f64433</code>.
       </p>
       <p class="mt-3">
-        BurntSushi. (2026a). <em>ripgrep README.md</em>. Local submodule
+        BurntSushi. (2026b). <em>ripgrep benchsuite/benchsuite and captured raw benchmark CSVs</em>. Local submodule
         <code>ripgrep</code>, commit <code>4857d6fa67db69a95cd4b6f2adda5d807d4d0119</code>.
       </p>
       <p class="mt-3">
-        BurntSushi. (2026b). <em>ripgrep README.md performance discussion</em>. Local submodule
-        <code>ripgrep</code>, commit <code>4857d6fa67db69a95cd4b6f2adda5d807d4d0119</code>.
-      </p>
-      <p class="mt-3">
-        Bytedance. (2026a). <em>Monoio README.md</em>. Local submodule <code>monoio</code>,
+        Bytedance. (2026a). <em>monoio/src/builder.rs</em>. Local submodule <code>monoio</code>,
         commit <code>2c05c4a257d7a145eb8befb7ae23d8a09b20c6de</code>.
       </p>
       <p class="mt-3">
-        Bytedance. (2026b). <em>Monoio configuration and benchmark docs</em>. Local submodule
+        Bytedance. (2026b). <em>monoio/src/runtime.rs and monoio/src/driver/uring/mod.rs</em>. Local submodule
         <code>monoio</code>, commit <code>2c05c4a257d7a145eb8befb7ae23d8a09b20c6de</code>.
       </p>
       <p class="mt-3">
@@ -1948,28 +1968,20 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Local submodule <code>CLIProxyAPI</code>, commit <code>4b681031bff2acd922c51c34786f20b505b62fd4</code>.
       </p>
       <p class="mt-3">
-        Cloudflare. (2026a). <em>Pingora quick start</em>. Local submodule <code>pingora</code>,
-        commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
-      </p>
-      <p class="mt-3">
-        Cloudflare. (2026b). <em>Pingora connection pooling and reuse</em>. Local submodule
+        Cloudflare. (2026b). <em>pingora-core/src/protocols/mod.rs</em>. Local submodule
         <code>pingora</code>, commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
       </p>
       <p class="mt-3">
-        Cloudflare. (2026c). <em>Pingora handling failures and failover</em>. Local submodule
+        Cloudflare. (2026c). <em>pingora-error/src/lib.rs and pingora-proxy/src/proxy_trait.rs</em>. Local submodule
         <code>pingora</code>, commit <code>c0845a8693b0792a6ccd0626e8475990f7269af2</code>.
       </p>
       <p class="mt-3">
-        Cloudflare. (2026d). <em>quiche README.md</em>. Local submodule <code>quiche</code>,
+        Cloudflare. (2026d). <em>quiche/src/lib.rs</em>. Local submodule <code>quiche</code>,
         commit <code>1acc5babb9ed8512457681be4361bcee927583ee</code>.
       </p>
       <p class="mt-3">
-        Cloudflare. (2026e). <em>quiche HTTP/3 module source</em>. Local submodule
+        Cloudflare. (2026e). <em>quiche/examples/http3-client.rs and apps/src/client.rs</em>. Local submodule
         <code>quiche</code>, commit <code>1acc5babb9ed8512457681be4361bcee927583ee</code>.
-      </p>
-      <p class="mt-3">
-        Codex. (2026a). <em>codex-rs/responses-api-proxy/README.md</em>. Local submodule
-        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
       </p>
       <p class="mt-3">
         Codex. (2026b). <em>codex-rs/responses-api-proxy/src/lib.rs</em>. Local submodule
@@ -1988,7 +2000,11 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Local submodule <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
       </p>
       <p class="mt-3">
-        LiveKit. (2026a). <em>rust-sdks README.md and runtime source</em>. Local submodule
+        Codex. (2026f). <em>codex-rs/Cargo.toml</em>. Local submodule
+        <code>codex</code>, commit <code>0d37db4b2b10b56991566b3512b0677754733835</code>.
+      </p>
+      <p class="mt-3">
+        LiveKit. (2026a). <em>livekit/src/rtc_engine/rtc_session.rs</em>. Local submodule
         <code>rust-sdks</code>, commit <code>1848e77a32ca2f302a58323a7a21858165d81aad</code>.
       </p>
       <p class="mt-3">
@@ -2037,156 +2053,342 @@ warn!("websocket control queue full while replying to ping; closing connection")
         OpenAI Status. (2026). <em>Status dashboard and history</em>.
         <a href="https://status.openai.com/">https://status.openai.com/</a> and
         <a href="https://status.openai.com/history">https://status.openai.com/history</a>.
+        Status API captures also use
+        <a href="https://status.openai.com/api/v2/status.json">https://status.openai.com/api/v2/status.json</a>
+        and
+        <a href="https://status.openai.com/api/v2/summary.json">https://status.openai.com/api/v2/summary.json</a>.
+      </p>
+      <p class="mt-3">
+        Tokenproxy Stage One. (2026). <em>Local passive network and status probe artifacts</em>.
+        <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/</code>.
       </p>
     </section>
 
     <section id="performance-review-attestation" class="mb-12 border-t border-black pt-8">
       <h2 class="mb-4 text-2xl font-bold">Performance-review Attestation</h2>
       <p>
-        I reviewed every initialized top-level repository submodule present in this
-        checkout and recorded the design choice each reference supports. Two nested
-        submodules under <code>rust-sdks</code> were not initialized in the checkout and could
-        not be reviewed as source.
+        Before editing this attestation, I re-read this report and ran
+        <code>git submodule status --recursive</code> in the current checkout. The raw
+        submodule-status capture is
+        <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/submodule_status.txt</code>.
+        I also ran fresh passive network, TLS, unauthenticated WebSocket, and status
+        probes; their raw artifacts are in
+        <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/</code>.
+      </p>
+      <p class="mt-4">
+        No stage-two product code exists in this checkout, so no integration test
+        against tokenproxy was run. No Rust performance experiment was run in this
+        update. The only current local measurements are passive endpoint probes:
+        five unauthenticated 401 curl samples per HTTP protocol, one TLS inspection,
+        one unauthenticated WebSocket upgrade attempt, and OpenAI status API captures.
+        These probes support reachability and operational-context decisions only; they
+        do not prove proxy overhead, model latency, authenticated stream stability, or
+        account-routing performance.
       </p>
       <table class="mt-4 text-sm">
         <thead>
           <tr>
             <th>Submodule</th>
-            <th>Reviewed references</th>
-            <th>Supported implementation choices</th>
+            <th>Source paths with line ranges</th>
+            <th>Verified source fact</th>
+            <th>Implementation decision supported</th>
+            <th>Benchmark or probe artifact</th>
           </tr>
         </thead>
         <tbody>
           <tr>
             <td><code>CLIProxyAPI</code><br><code>4b681031bff2acd922c51c34786f20b505b62fd4</code></td>
             <td>
-              Chat handler, streaming first-chunk logic, Responses SSE repair, Responses
-              WebSocket normalization, account capability checks, prompt-cache-key test.
+              <code>internal/api/server.go</code> lines 397-408;
+              <code>sdk/api/handlers/openai/openai_handlers.go</code> lines 458-524;
+              <code>sdk/api/handlers/openai/openai_responses_handlers_stream_test.go</code>
+              lines 35-234;
+              <code>sdk/api/handlers/openai/openai_responses_websocket_test.go</code>
+              lines 342-494 and 625-909;
+              <code>internal/runtime/executor/codex_websockets_executor.go</code>
+              lines 678-687 and 1589-1645;
+              <code>internal/runtime/executor/codex_executor_cache_test.go</code>
+              lines 40-64.
             </td>
             <td>
-              Implement strict route support, delayed SSE header commit, output item repair,
-              WebSocket transcript fallback, auth capability routing, and stable cache-key
-              derivation.
+              The Go proxy exposes <code>/v1/responses</code>, <code>/v1/responses/compact</code>,
+              and Codex direct aliases; delays SSE header commit until first data or
+              immediate error; repairs missing completed output from output-item events;
+              normalizes Responses WebSocket requests; preserves incremental
+              <code>previous_response_id</code>; repairs tool-call transcript pairs; gates
+              WebSocket execution by downstream transport and auth capability; and
+              derives stable <code>prompt_cache_key</code> values from API-key identity.
+            </td>
+            <td>
+              Implement the same route surface, delayed SSE commit, output-item replay
+              repair, per-session WebSocket transcript/tool cache, capability routing,
+              and stable prompt-cache-key derivation.
+            </td>
+            <td>
+              Source and test review only. No CLIProxyAPI benchmark or test command was
+              run in this update, so no performance claim depends on this row.
             </td>
           </tr>
           <tr>
             <td><code>codex</code><br><code>0d37db4b2b10b56991566b3512b0677754733835</code></td>
             <td>
-              Responses API proxy README and source, WebSocket request structs, telemetry
-              events, feature flags, app-server WebSocket transport.
+              <code>codex-rs/responses-api-proxy/src/lib.rs</code> lines 102-107,
+              170-178, and 196-228;
+              <code>codex-rs/app-server-transport/src/transport/websocket.rs</code>
+              lines 46-49 and 362-369;
+              <code>codex-rs/otel/src/events/session_telemetry.rs</code>
+              lines 574-790;
+              <code>codex-rs/Cargo.toml</code> lines 260, 344, and 392-398.
             </td>
             <td>
-              Keep the proxy narrow, protect upstream auth, disable stream read timeout,
-              model WebSocket messages as <code>response.create</code>, and emit WebSocket
-              connect/request/event timing metrics.
+              The local Codex proxy disables reqwest's default timeout for long streams,
+              accepts only <code>POST /v1/responses</code>, strips inbound auth and host
+              headers before inserting sensitive upstream auth, uses Tokio/Axum/Reqwest
+              and Tokio Tungstenite dependencies, gives outbound WebSocket traffic a
+              bounded channel, closes on control-queue overflow, and records WebSocket
+              connect/request/event metrics with status, duration, error, endpoint,
+              request-id, and Cloudflare Ray labels.
+            </td>
+            <td>
+              Keep tokenproxy narrow, avoid global stream read timeouts, isolate upstream
+              auth, use the Tokio ecosystem first, bound WebSocket queues, close on
+              control-plane overload, and emit tagged WebSocket timing metrics.
+            </td>
+            <td>
+              Passive endpoint probes in
+              <code>stage_one_evidence/2026-05-27T005200-0700-network-probes/</code>
+              support route and protocol reachability only. They do not benchmark Codex
+              or tokenproxy overhead.
             </td>
           </tr>
           <tr>
             <td><code>iggy</code><br><code>c5fde76acfd500bda68aac8ccfc38d0c528ed668</code></td>
             <td>
-              README architecture and benchmark section, benchmark record and report
-              analytics, shard router no-blocking drop rules.
+              <code>core/bench/src/analytics/metrics/latency_distribution.rs</code>
+              lines 35-45;
+              <code>core/bench/report/src/lib.rs</code> lines 255-260;
+              <code>core/message_bus/src/installer/tcp.rs</code> lines 69-72;
+              <code>core/message_bus/src/lifecycle/connection_registry.rs</code>
+              lines 240-252;
+              <code>core/message_bus/tests/backpressure.rs</code> lines 18-110;
+              <code>core/message_bus/tests/head_of_line.rs</code> lines 100-160;
+              <code>core/shard/src/router.rs</code> lines 178-227.
             </td>
             <td>
-              Benchmark real workflows with p99+ tails, include throughput and latency time
-              series, use bounded hot-path channels, and record drops rather than blocking
-              reactor tasks.
+              Iggy's benchmark code reports p50, p95, and p99 latency distribution data.
+              Its message bus creates bounded per-peer queues, sends with
+              <code>try_send</code>, returns finite backpressure when a peer queue is full,
+              and tests that a saturated peer does not block sends to a healthy peer. Its
+              shard router drops full or disconnected shard inbox sends and records the
+              drop reason instead of blocking the reactor.
+            </td>
+            <td>
+              Report p50/p95/p99 at minimum, use bounded hot-path queues, surface
+              backpressure as a counted event, and avoid head-of-line blocking between
+              accounts or upstream sessions.
+            </td>
+            <td>
+              Source and test review only. No local Iggy benchmark was run; the decision
+              is about observable benchmark dimensions and backpressure semantics, not a
+              tokenproxy performance result.
             </td>
           </tr>
           <tr>
             <td><code>monoio</code><br><code>2c05c4a257d7a145eb8befb7ae23d8a09b20c6de</code></td>
             <td>
-              README design goal, configuration guide, benchmark guide, comparison guide,
-              runtime builder.
+              <code>monoio/src/builder.rs</code> lines 17-28, 148-215;
+              <code>monoio/src/runtime.rs</code> lines 199-236;
+              <code>monoio/src/driver/uring/mod.rs</code> lines 87-96 and 439-448.
             </td>
             <td>
-              Do not choose io_uring by default. Treat thread-per-core and zero-copy as
-              benchmark-backed options with platform and compatibility cost.
+              Monoio's runtime builder carries io_uring entry configuration and can build
+              either io_uring or legacy drivers depending on platform/features. Its
+              io_uring driver requires in-flight operations to complete before driver drop
+              and submits when the submission queue is full.
+            </td>
+            <td>
+              Do not choose io_uring for stage two. The decision rests on ecosystem
+              compatibility and code-size risk, not on a tokenproxy performance comparison.
+            </td>
+            <td>
+              No local monoio benchmark was run. No tokenproxy performance claim is made
+              from monoio in this report.
             </td>
           </tr>
           <tr>
             <td><code>pingora</code><br><code>c0845a8693b0792a6ccd0626e8475990f7269af2</code></td>
             <td>
-              Quick start load balancer, pooling guide, failover guide, TCP/HTTP health
-              checks.
+              <code>pingora-error/src/lib.rs</code> lines 34-80 and 343-349;
+              <code>pingora-proxy/src/proxy_trait.rs</code> lines 530-609;
+              <code>pingora-core/src/protocols/mod.rs</code> lines 344-397;
+              <code>pingora-load-balancing/src/health_check.rs</code> lines 59-63,
+              127-143, and 393-407.
             </td>
             <td>
-              Copy pooling identity rules, health-threshold ideas, and retry-before-commit
-              boundaries. Do not adopt the framework until Hyper/Axum overhead fails targets.
+              Pingora marks retryability explicitly, retries reused-connection errors only
+              when the retry buffer is still usable, defaults failed downstream reuse to
+              false, checks pooled file descriptors against the expected peer, and flips
+              health only after a configured count of consecutive observations.
+            </td>
+            <td>
+              Copy retry-before-commit boundaries, per-origin pool identity checks,
+              conservative downstream reuse, and consecutive health thresholds. Do not
+              adopt the Pingora framework in stage two.
+            </td>
+            <td>
+              Source review only. No Pingora-vs-Hyper benchmark was run; the framework
+              decision is source-backed scope control, not a performance result.
             </td>
           </tr>
           <tr>
             <td><code>quiche</code><br><code>1acc5babb9ed8512457681be4361bcee927583ee</code></td>
             <td>
-              README QUIC/H3 API, HTTP/3 module, app client event-loop setup.
+              <code>quiche/src/lib.rs</code> lines 27-33 and 51-75;
+              <code>quiche/examples/http3-client.rs</code> lines 107-185;
+              <code>apps/src/client.rs</code> lines 363-423;
+              <code>quiche/src/h3/mod.rs</code> lines 348-365.
             </td>
             <td>
-              Keep custom H3 out of stage two. Measure HTTP/3 externally before accepting
-              QUIC/H3 code complexity.
+              Quiche exposes a low-level QUIC/H3 API where the application owns socket
+              I/O, event-loop polling, timers, ALPN selection, flow-control configuration,
+              and HTTP/3 request/response handling.
+            </td>
+            <td>
+              Keep custom QUIC/H3 out of stage two. Record HTTP version in probes and use
+              external client measurements before accepting QUIC code into the proxy.
+            </td>
+            <td>
+              <code>curl_timings.csv</code> includes five unauthenticated HTTP/3 401 route
+              samples. That probe is insufficient for a custom H3 implementation and is
+              recorded as unanswered authenticated-workflow research.
             </td>
           </tr>
           <tr>
             <td><code>ripgrep</code><br><code>4857d6fa67db69a95cd4b6f2adda5d807d4d0119</code></td>
             <td>
-              README benchmark caveats, performance cliffs, reasons not to use ripgrep,
-              and implementation summary.
+              <code>benchsuite/benchsuite</code> lines 19-41 and 53-110;
+              <code>benchsuite/runs/2022-12-16-archlinux-duff/raw.csv</code> reviewed as
+              a captured upstream benchmark artifact.
             </td>
             <td>
-              Require multiple workflow benchmarks, label cliffs and output-dominated cases,
-              and include anti-pitch notes.
+              The benchmark suite separates corpora with different file-count and file-size
+              shapes, distinguishes default-behavior benchmarks from fairer comparisons,
+              fixes locale for grep comparisons, and keeps raw benchmark CSV output.
+            </td>
+            <td>
+              Tokenproxy benchmark cases must cover multiple workflows, include raw output,
+              record environment knobs, and call out cases where defaults change the result.
+            </td>
+            <td>
+              Reviewed upstream benchmark artifacts only. They support report method,
+              not tokenproxy runtime performance.
             </td>
           </tr>
           <tr>
             <td><code>rust-sdks</code><br><code>1848e77a32ca2f302a58323a7a21858165d81aad</code></td>
             <td>
-              README, runtime selection source, data-channel backpressure sender.
+              <code>livekit/src/rtc_engine/dc_sender.rs</code> lines 108-146 and
+              177-228;
+              <code>livekit/src/rtc_engine/rtc_session.rs</code> lines 562-569.
             </td>
             <td>
-              Use Tokio for ecosystem fit and model WebSocket/SSE backpressure with bounded
-              queues, ordered in-flight data, and explicit drain thresholds.
+              LiveKit's data-channel sender holds only the freshest pending frame,
+              preserves packet order within an in-flight frame, drains only under a
+              buffered-amount threshold, and spawns separate Tokio-backed session tasks.
+            </td>
+            <td>
+              Use bounded queues for optional/drop-tolerant traffic, preserve ordered
+              in-flight frames for protocol-critical traffic, and model WebSocket/SSE
+              writers as separate tasks with explicit drain thresholds.
+            </td>
+            <td>
+              Source review only. No LiveKit benchmark was run; the decision uses
+              backpressure design evidence, not tokenproxy latency evidence.
             </td>
           </tr>
           <tr>
             <td><code>s2n-quic</code><br><code>993102359e8bf4f633808a7977a34acbf0f64433</code></td>
             <td>
-              README, CI guide, Tokio IO provider, client provider builder, TLS offloading
-              example.
+              <code>examples/echo/src/bin/quic_echo_server.rs</code> lines 18-41;
+              <code>examples/echo/src/bin/quic_echo_client.rs</code> lines 13-39;
+              <code>quic/s2n-quic-bench/benches/bench.rs</code> lines 4-7;
+              <code>dc/s2n-quic-dc-benches/benches/bench.rs</code> lines 4-7.
             </td>
             <td>
-              Treat QUIC as a specialized transport with provider, TLS, test, simulation,
-              and platform requirements. Use it only after endpoint measurements justify it.
+              s2n-quic examples configure explicit TLS and IO providers, run on Tokio,
+              spawn per-connection/per-stream work, and include Criterion benchmark entry
+              points for QUIC and data-channel benchmark crates.
+            </td>
+            <td>
+              Treat QUIC as a specialized transport with provider and benchmark-harness
+              obligations. Do not add it to tokenproxy stage two.
+            </td>
+            <td>
+              Source and benchmark-harness review only. The only OpenAI HTTP/3 artifact is
+              <code>curl_timings.csv</code>, which is unauthenticated and not a reason to
+              adopt s2n-quic.
             </td>
           </tr>
           <tr>
             <td><code>uv</code><br><code>d190665157a18a288a1a13591793002f1ae767aa</code></td>
             <td>
-              Benchmark methodology and reproduction notes.
+              <code>scripts/benchmark/src/benchmark/resolver.py</code> lines 61-155;
+              <code>BENCHMARKS.md</code> lines 1-107;
+              <code>crates/uv-dev/src/render_benchmarks.rs</code> lines 12-23 and 53-72.
             </td>
             <td>
-              Separate warm/cold cases, record environment, use repeatable scripts, and
-              document network variance.
+              uv's benchmark tooling separates cold, warm, incremental, noop, install,
+              and resolve cases; its benchmark document records OS, Python version,
+              cache/filesystem caveats, reproduction commands, and graph rendering from
+              hyperfine JSON.
+            </td>
+            <td>
+              Separate tokenproxy cold-connect, warm-pool, reconnect, incremental
+              Responses, and stateless-replay benchmarks; keep raw JSON/CSV artifacts and
+              environment notes.
+            </td>
+            <td>
+              Benchmark-harness review only. No uv benchmark was run for tokenproxy.
             </td>
           </tr>
           <tr>
             <td><code>rust-sdks/livekit-protocol/protocol</code><br><code>a0e714995ccbf0a2f4c8df29630e4910c8c9a09a</code></td>
-            <td>Not reviewed: recursive submodule is not initialized in this checkout.</td>
+            <td>
+              Exact status line:
+              <code>-a0e714995ccbf0a2f4c8df29630e4910c8c9a09a rust-sdks/livekit-protocol/protocol</code>.
+            </td>
+            <td>Uninitialized recursive submodule. No source was reviewed.</td>
             <td>No stage-two implementation choice depends on this nested submodule.</td>
+            <td>No benchmark or probe artifact.</td>
           </tr>
           <tr>
             <td><code>rust-sdks/yuv-sys/libyuv</code><br><code>917276084a49be726c90292ff0a6b0a3d571a6af</code></td>
-            <td>Not reviewed: recursive submodule is not initialized in this checkout.</td>
+            <td>
+              Exact status line:
+              <code>-917276084a49be726c90292ff0a6b0a3d571a6af rust-sdks/yuv-sys/libyuv</code>.
+            </td>
+            <td>Uninitialized recursive submodule. No source was reviewed.</td>
             <td>No stage-two implementation choice depends on this nested submodule.</td>
+            <td>No benchmark or probe artifact.</td>
           </tr>
         </tbody>
       </table>
       <p class="mt-4">
-        Attestation result: stage two should implement a minimal Tokio-based proxy,
-        not a general reverse proxy or custom QUIC transport. The selected design is
-        supported by OpenAI's current Responses/WebSocket documentation, CLIProxyAPI's
-        existing OpenAI-compatible proxy behavior, Codex's strict local Responses proxy
-        and telemetry, Pingora's pooling and failure rules, Iggy's benchmark and
-        backpressure patterns, uv and ripgrep benchmark discipline, LiveKit's runtime
-        and backpressure examples, and the QUIC submodules' complexity evidence.
+        Accepted implementation decisions from this audit: implement a minimal
+        Tokio-based proxy; keep Responses WebSocket first-class; use delayed SSE commit;
+        repair Responses output-item replay; isolate upstream auth; bound WebSocket and
+        per-account queues; retry only before downstream commitment; record endpoint,
+        account, model, transport, status, p50, p95, p99, error, and outlier data; and
+        keep Pingora, io_uring, and custom QUIC/H3 out of stage two.
+      </p>
+      <p class="mt-4">
+        Unanswered research questions kept out of implementation decisions: authenticated
+        WebSocket stability, 60-minute reconnect behavior, authenticated HTTP/3 workflow
+        latency, product proxy overhead, JSON parser throughput under real Responses
+        payloads, account-selection latency, service-tier latency, prompt-cache hit rate,
+        and cross-network route variance. Each requires a completed stage-two experiment
+        or credentialed upstream probe before the report may call it measured or accept
+        it as evidence.
       </p>
     </section>
   </main>
