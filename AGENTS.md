@@ -70,8 +70,8 @@ Review Log requirements:
 
 - `very_detailed_tokenproxy_spec.html` must end with a Review Log section after the performance-review attestation.
 - The Review Log must use a simple HTML `<table>` with one row per review entry.
-- Each review row must use plain cells for date and one-line summary. Add more columns only when they reduce ambiguity.
-- Every new review pass must add one entry dated `YYYY-MM-DD` with a one-line review summary.
+- Each review row must use plain cells for date/time and one-line summary. Add more columns only when they reduce ambiguity.
+- Every new review pass must add one entry dated `YYYY-MM-DD h:MM AM/PM TZ` with a one-line review summary. The timestamp must include hour, minute, and AM or PM, not only the calendar date or a 24-hour time, and must be current within the last five minutes at edit time.
 - Each entry must name what was reviewed and the main result, such as citation drift found, experiment reproduced, claim narrowed, or no material mismatch found.
 - Do not use the Review Log as evidence for a design claim. Cite the source, command, artifact, or attestation row that proves the claim.
 
