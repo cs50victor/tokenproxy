@@ -414,7 +414,9 @@
         <li>Running tokenproxy on the same device as the client is a local development and diagnostic path only.</li>
         <li>The default bind address must be <code>127.0.0.1:8787</code> so local development is safe and production servers can place tokenproxy behind a TLS reverse proxy.</li>
         <li>Binding to a non-loopback address must require <code>server.allow_non_loopback = true</code>.</li>
-        <li>Startup must fail before listening when the config file is invalid, no account is enabled, or an enabled account references a missing token environment variable.</li>
+        <li>Every OpenAI-compatible route and every operator route except <code>GET /healthz</code> must require downstream client authentication with <code>Authorization: Bearer &lt;client key&gt;</code>.</li>
+        <li>Startup must fail before listening when the config file is invalid, no account is enabled, an enabled account references a missing token environment variable, or <code>downstream_auth.token_env</code> is unset, empty, or missing from the process environment.</li>
+        <li>Tokenproxy must never autogenerate, print, or persist downstream client keys. The operator must create the client key outside tokenproxy and provide the same value to tokenproxy and authorized clients.</li>
         <li>Startup must not make credentialed OpenAI requests unless the operator explicitly runs a probe command.</li>
         <li>Shutdown must stop accepting new sockets, let active HTTP/SSE/WebSocket sessions drain for <code>shutdown_grace_ms</code>, then close remaining sessions with metrics.</li>
         <li>All timestamps in logs and benchmark artifacts must include timezone offset and UTC.</li>
@@ -477,7 +479,7 @@
             <td><code>GET /usage</code></td>
             <td>No body.</td>
             <td>Return a non-secret usage snapshot for this tokenproxy instance: server ID, observed time, account label or hash, health, observed usage-limit windows, remaining percent when rate-limit headers or an account adapter explicitly report enough fields, reset time when headers, errors, or adapters report it, rate-limit pressure, and cooldown state. Do not call upstream while serving. Operator dashboards and CLI clients combine remote tokenproxy servers and optional local development instances by polling each instance.</td>
-            <td>Non-GET returns <code>405</code>. Remote operator requests without configured downstream auth return <code>401</code>. Unknown upstream reset data stays <code>null</code>.</td>
+            <td>Non-GET returns <code>405</code>. Requests without valid downstream auth return <code>401</code>. Unknown upstream reset data stays <code>null</code>.</td>
           </tr>
         </tbody>
       </table>
@@ -664,6 +666,10 @@ allow_non_loopback = false
 max_body_bytes = 10485760
 shutdown_grace_ms = 30000
 
+[downstream_auth]
+mode = "bearer"
+token_env = "TOKENPROXY_CLIENT_KEY"
+
 [timeouts]
 connect_ms = 3000
 request_header_ms = 10000
@@ -701,6 +707,10 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
         Validation rules are part of the contract: account IDs must be unique;
         <code>server.id</code> must be a non-secret operator label and should be unique
         across connected usage sources;
+        <code>downstream_auth.mode</code> must be <code>bearer</code>;
+        <code>downstream_auth.token_env</code> must name an environment variable with
+        the client key before tokenproxy listens; tokenproxy must not create a fallback
+        key when the variable is absent;
         <code>base_url</code> must use <code>https</code> unless
         <code>allow_insecure_upstream</code> is explicitly enabled for local tests;
         <code>token_env</code> must be set for enabled accounts; booleans must not be
@@ -724,8 +734,8 @@ prompt_cache_key_seed_env = "TOKENPROXY_PROMPT_CACHE_SEED"</code></pre>
       <p>
         The listener accepts HTTP/1.1 and HTTP/2 client traffic on a local interface
         or configured bind address. The request classifier matches method and path,
-        rejects unsupported routes before reading large bodies, and classifies the
-        request as <code>chat_json</code>, <code>chat_sse</code>, <code>responses_json</code>,
+        checks downstream bearer auth before reading large bodies, rejects unsupported
+        routes, and classifies the request as <code>chat_json</code>, <code>chat_sse</code>, <code>responses_json</code>,
         <code>responses_sse</code>, or <code>responses_ws</code>.
       </p>
       <p class="mt-4">
@@ -1800,6 +1810,23 @@ After compacted window is used:
             </td>
           </tr>
           <tr>
+            <td>Client-to-proxy traffic security</td>
+            <td>
+              Secure remote traffic with TLS plus the downstream bearer client key.
+              The client key is an operator-provisioned shared secret named by
+              <code>downstream_auth.token_env</code> on the server and by the client
+              provider <code>env_key</code>. Tokenproxy does not autogenerate a key, and it
+              does not start listening when the key is missing.
+            </td>
+            <td>
+              This is a startup and admission rule, not a performance claim. It keeps
+              upstream account credentials out of client config while preventing an
+              anonymous exposed proxy. Source: <a href="#normative-contract">Normative
+              Stage-two Contract</a>, <a href="#configuration">Runtime Configuration</a>,
+              and <a href="#security">Security and Secret Handling</a>.
+            </td>
+          </tr>
+          <tr>
             <td>Proxy server to Ubuntu relay</td>
             <td>
               Prefer HTTP/2 over TLS for normal upstream-like server-to-server traffic
@@ -2252,6 +2279,9 @@ websocat -v wss://api.openai.com/v1/responses</code></pre>
       <h2 class="mb-4 text-2xl font-bold">Security and Secret Handling</h2>
       <ul class="list-disc pl-6">
         <li>Bind to loopback by default. Non-loopback bind requires an explicit config flag.</li>
+        <li>Require a downstream bearer client key before listening. The key comes from <code>downstream_auth.token_env</code>; tokenproxy must not autogenerate one.</li>
+        <li>Compare the downstream bearer key with constant-time equality.</li>
+        <li>Reject requests without <code>Authorization: Bearer &lt;client key&gt;</code> before reading large bodies or dialing upstream.</li>
         <li>Reject unsupported routes. Do not proxy arbitrary URLs.</li>
         <li>Strip incoming Authorization before upstream forwarding.</li>
         <li>Attach upstream Authorization only from selected account state.</li>
@@ -2569,16 +2599,18 @@ supports_websockets = true
 env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
           <p class="mt-4">
             The Codex config points at the remote tokenproxy HTTPS/WSS origin. It does
-            not hold upstream OpenAI or ChatGPT account credentials; tokenproxy owns
-            account selection and upstream auth insertion.
+            not hold upstream OpenAI or ChatGPT account credentials. Its
+            <code>env_key</code> supplies the downstream client key that tokenproxy checks
+            before admission; tokenproxy owns account selection and upstream auth insertion.
           </p>
         </div>
         <div class="viz-box">
           <p class="font-bold">Tokenproxy operator view</p>
           <table class="mt-4 text-sm">
             <tbody>
+              <tr><th>Client key</th><td>Set <code>TOKENPROXY_CLIENT_KEY</code> in the process environment. Tokenproxy never creates a key for the operator.</td></tr>
               <tr><th>Start</th><td><code>tokenproxy --config /etc/tokenproxy/tokenproxy.toml --bind 127.0.0.1:8787</code> behind a TLS reverse proxy.</td></tr>
-              <tr><th>Dry run</th><td>Validate config, account IDs, URLs, timeout bounds, and token env names without contacting upstream.</td></tr>
+              <tr><th>Dry run</th><td>Validate config, account IDs, URLs, timeout bounds, and downstream plus upstream token env names without contacting upstream.</td></tr>
               <tr><th>Probe</th><td>Passive DNS/TLS/HTTP timing only until the operator explicitly asks for credentialed probes.</td></tr>
               <tr><th>Listen</th><td>Accept Chat Completions, Responses HTTP/SSE, Responses WebSocket, and model-catalog requests from authenticated remote clients.</td></tr>
               <tr><th>Observe</th><td>Expose account state, route reason, transport, prompt-cache class, retry phase, and status-page context.</td></tr>
@@ -2593,7 +2625,7 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
         <text x="154" y="54" font-size="14" font-family="monospace">-&gt;</text>
         <rect x="182" y="24" width="126" height="48" fill="none" stroke="#111"/>
         <text x="206" y="44" font-size="12" font-family="monospace">HTTPS/WSS</text>
-        <text x="200" y="62" font-size="12" font-family="monospace">/v1/responses</text>
+        <text x="196" y="62" font-size="12" font-family="monospace">client key</text>
         <text x="322" y="54" font-size="14" font-family="monospace">-&gt;</text>
         <rect x="350" y="24" width="128" height="48" fill="none" stroke="#111"/>
         <text x="358" y="44" font-size="12" font-family="monospace">remote tokenproxy</text>
@@ -2614,8 +2646,9 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
       </svg>
       <p class="caption">
         Caption: this setup view shows the primary remote Codex path: user-defined
-        Codex provider, HTTPS/WSS tokenproxy origin, tokenproxy-owned upstream account
-        credentials, and returned stream events. Source: <a href="#configuration">Runtime
+        Codex provider, HTTPS/WSS tokenproxy origin, downstream client-key admission,
+        tokenproxy-owned upstream account credentials, and returned stream events.
+        Source: <a href="#configuration">Runtime
         Configuration</a>, <a href="#transport-deployment-policy">Transport and
         Deployment Policy</a>, Codex <code>model-provider-info/src/lib.rs</code> lines
         1-6, 49-78, and 81-135, Codex <code>config/src/thread_config.rs</code> lines
@@ -2629,6 +2662,10 @@ env_key = "TOKENPROXY_CLIENT_KEY"</code></pre>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>[server]
 bind = "127.0.0.1:8787"
 allow_non_loopback = false
+
+[downstream_auth]
+mode = "bearer"
+token_env = "TOKENPROXY_CLIENT_KEY"
 
 [[accounts]]
 id = "openai-primary"
@@ -2649,8 +2686,8 @@ tokenproxy --config ./tokenproxy.toml --dry-run
 tokenproxy --config ./tokenproxy.toml
 
 curl -s http://127.0.0.1:8787/healthz
-curl -s http://127.0.0.1:8787/v1/models
-curl -s http://127.0.0.1:8787/usage</code></pre>
+curl -s -H "Authorization: Bearer $TOKENPROXY_CLIENT_KEY" http://127.0.0.1:8787/v1/models
+curl -s -H "Authorization: Bearer $TOKENPROXY_CLIENT_KEY" http://127.0.0.1:8787/usage</code></pre>
         </div>
       </div>
       <p class="caption">
@@ -2658,7 +2695,7 @@ curl -s http://127.0.0.1:8787/usage</code></pre>
         diagnostics. They exercise the same route contract as the remote server path,
         but they are not the primary production setup. Source:
         <a href="#configuration">Runtime Configuration</a> and
-        <a href="#security">Security and Privacy Rules</a>.
+        <a href="#security">Security and Secret Handling</a>.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Client-to-remote-proxy example</h3>
@@ -2700,6 +2737,7 @@ curl -s http://127.0.0.1:8787/usage</code></pre>
           <p class="font-bold">On the server</p>
           <pre class="overflow-x-auto border border-black p-4 text-sm"><code>sudo install -m 0600 tokenproxy.toml /etc/tokenproxy/tokenproxy.toml
 export OPENAI_API_KEY="set-in-server-secret-store"
+export TOKENPROXY_CLIENT_KEY="set-in-server-secret-store"
 
 tokenproxy --config /etc/tokenproxy/tokenproxy.toml --bind 127.0.0.1:8787 --log-json
 
@@ -2710,7 +2748,7 @@ tokenproxy.example.com {
         </div>
         <div class="command-card">
           <p class="font-bold">On the laptop</p>
-          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export TOKENPROXY_CLIENT_KEY="remote-client-token"
+          <pre class="overflow-x-auto border border-black p-4 text-sm"><code>export TOKENPROXY_CLIENT_KEY="same-value-as-server"
 
 codex exec \
   -c "model_providers.tokenproxy={ name = 'tokenproxy', base_url = 'https://tokenproxy.example.com/v1', wire_api = 'responses', requires_openai_auth = false, supports_websockets = true, env_key = 'TOKENPROXY_CLIENT_KEY' }" \
@@ -3248,6 +3286,7 @@ codex exec \
         <tbody>
           <tr><td>Routes Chat, Responses, Responses WebSocket, and configured model-catalog traffic.</td><td><code>router</code></td><td>endpoint and model capability map</td><td>route matrix tests</td><td>CLIProxyAPI and OpenAI rows</td></tr>
           <tr><td>Lets Codex target a remote tokenproxy provider without upstream credentials in Codex config.</td><td><code>config</code></td><td>Codex provider entry plus tokenproxy account table</td><td>Codex setup smoke test</td><td>Codex config source and Runtime Configuration</td></tr>
+          <tr><td>Rejects anonymous proxy exposure.</td><td><code>config</code> and <code>listener</code></td><td><code>DownstreamAuth</code>, client-key env name, constant-time bearer comparison</td><td>missing-env startup test plus unauthenticated request admission tests</td><td>Normative contract, Runtime Configuration, and Security rules</td></tr>
           <tr><td>Preserves continuation quality.</td><td><code>responses_state</code></td><td>ordered output-item log, <code>previous_response_id</code>, assistant <code>phase</code></td><td>replay and compaction tests</td><td>OpenAI and CLIProxyAPI rows</td></tr>
           <tr><td>Preserves Codex fast-mode intent.</td><td><code>routing</code></td><td>requested and actual <code>service_tier</code>, account tier allowlist</td><td>service-tier passthrough tests</td><td>OpenAI docs and Codex source</td></tr>
           <tr><td>Shows per-account usage and reset windows for remote tokenproxy servers, plus optional local development instances.</td><td><code>usage</code></td><td><code>UsageSnapshot</code> with <code>server_id</code>, account hash, window, remaining percent, reset time, and source</td><td><code>/usage</code> snapshot tests plus dashboard fixture rendering</td><td>Route contract, Metrics, and dashboard mock</td></tr>
@@ -4212,6 +4251,10 @@ codex exec \
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-27 12:36 PM PDT</td>
+            <td>Re-reviewed downstream traffic security; added explicit bearer client-key startup and admission rules with no autogenerated key.</td>
+          </tr>
           <tr>
             <td>2026-05-27 12:28 PM PDT</td>
             <td>Re-reviewed dashboard and checklist labels; kept remote instances first and narrowed loopback examples to same-device diagnostics.</td>
