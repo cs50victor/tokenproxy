@@ -79,9 +79,9 @@
       </p>
       <p class="mt-4 text-sm">
         Evidence snapshot: local checkout at <code>/Users/vic8or/dev/tokenproxy</code>,
-        passive probe artifacts through 2026-05-27 02:37:22 PDT / 2026-05-27
-        09:37:22 UTC; official OpenAI docs rechecked through 2026-05-27
-        01:18:26 PDT / 2026-05-27 08:18:26 UTC.
+        passive probe artifacts through 2026-05-27 03:05:53 PDT / 2026-05-27
+        10:05:53 UTC; official OpenAI docs rechecked through 2026-05-27
+        03:10:50 PDT / 2026-05-27 10:10:51 UTC.
       </p>
     </header>
 
@@ -149,9 +149,9 @@
           <strong>Claim 5.</strong> Network path facts are observations, not constants. In this
           checkout, DNS resolved <code>api.openai.com</code> to <code>172.66.0.243</code> and
           <code>162.159.140.245</code>. It resolved <code>status.openai.com</code> through
-          <code>cname.vercel-dns.com</code> to <code>76.76.21.142</code> and <code>66.33.60.66</code>.
+          <code>cname.vercel-dns.com</code> to <code>66.33.60.129</code> and <code>76.76.21.22</code>.
           These values came from
-          <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/dns.txt</code>
+          <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/dns.txt</code>
           and are inputs to the measurement log, not implementation constants.
         </p>
       </div>
@@ -1311,7 +1311,7 @@ After compacted window is used:
               curl 8.19.0 on macOS with OpenSSL 3.6.1, nghttp2 1.67.1,
               ngtcp2 1.17.0, nghttp3 1.12.0. Features include HTTP2 and HTTP3.
               Raw environment capture:
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/environment.txt</code>.
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/environment.txt</code>.
             </td>
             <td>Local probe tool can compare HTTP/1.1, HTTP/2, and HTTP/3 where network policy permits.</td>
           </tr>
@@ -1322,28 +1322,29 @@ After compacted window is used:
           </tr>
           <tr>
             <td><code>dig status.openai.com A +short</code></td>
-            <td><code>cname.vercel-dns.com.</code>, <code>76.76.21.142</code>, <code>66.33.60.66</code></td>
+            <td><code>cname.vercel-dns.com.</code>, <code>66.33.60.129</code>, <code>76.76.21.22</code></td>
             <td>Status is operational context, not routing substrate.</td>
           </tr>
           <tr>
             <td><code>curl</code> timing and TLS probes</td>
             <td>
-              At 2026-05-27 02:37:22 PDT, five uncredentialed 401 probes per
+              At 2026-05-27 03:05:53 PDT, five uncredentialed 401 probes per
               protocol to <code>https://api.openai.com/v1/responses</code> reached
               <code>172.66.0.243</code> with zero curl errors. HTTP/2 total seconds:
-              p50 <code>0.105338</code>, p95 <code>0.174139</code>, p99
-              <code>0.174139</code>; run 4 was the sample maximum at <code>0.174139</code>.
-              HTTP/1.1 total seconds: p50 <code>0.096160</code>, p95
-              <code>0.150913</code>, p99 <code>0.150913</code>. HTTP/3 total seconds:
-              p50 <code>0.097008</code>, p95 <code>0.177065</code>, p99
-              <code>0.177065</code>. Raw timings:
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/curl_timings.csv</code>.
+              p50 <code>0.098917</code>, p95 <code>0.153814</code>, p99
+              <code>0.153814</code>; run 3 was the sample maximum at <code>0.153814</code>.
+              HTTP/1.1 total seconds: p50 <code>0.099588</code>, p95
+              <code>0.166897</code>, p99 <code>0.166897</code>. HTTP/3 total seconds:
+              p50 <code>0.089513</code>, p95 <code>0.118058</code>, p99
+              <code>0.118058</code>. Raw timings:
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/curl_timings.csv</code>.
               Command template:
               <code>curl --http2|--http1.1|--http3-only -sS -o /dev/null -w '%{remote_ip},%{http_version},%{http_code},%{time_namelookup},%{time_connect},%{time_appconnect},%{time_starttransfer},%{time_total},%{exitcode},%{errormsg}' https://api.openai.com/v1/responses</code>.
               Same-run TLS inspection connected to <code>172.66.0.243</code>,
               negotiated TLS 1.3 with <code>TLS_AES_256_GCM_SHA384</code>, and
-              verified certificate CN <code>api.openai.com</code>. Raw TLS capture:
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/tls.txt</code>.
+              verified certificate CN <code>api.openai.com</code>; the negotiated
+              TLS 1.3 group was <code>X25519MLKEM768</code>. Raw TLS capture:
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/tls.txt</code>.
             </td>
             <td>
               The local 401 probe proves route reachability and records current path
@@ -1357,7 +1358,7 @@ After compacted window is used:
               <code>websocat -v -1 -H='Authorization: Bearer invalid_tokenproxy_probe' wss://api.openai.com/v1/responses</code>
               connected TCP to <code>172.66.0.243:443</code> and received
               <code>401 Unauthorized</code> during upgrade. Raw capture:
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/websocket_unauthenticated.txt</code>.
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/websocket_unauthenticated.txt</code>.
             </td>
             <td>
               This shows the route reaches an endpoint that handles WebSocket upgrade
@@ -1368,16 +1369,16 @@ After compacted window is used:
           <tr>
             <td>OpenAI status API</td>
             <td>
-              At the 2026-05-27 02:37 PDT refresh,
+              At the 2026-05-27 03:05 PDT refresh,
               <code>https://status.openai.com/api/v2/status.json</code> reported
               <code>minor</code> status with description <code>Partial System Degradation</code>
               and page update time <code>2026-05-27T05:31:12Z</code>. The summary API
               reported one active monitoring incident, "Login issues for FedRAMP users
               who recently logged out"; <code>Responses</code> and <code>Codex API</code>
               components were marked operational. Raw captures:
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/openai_status_status.json</code>
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/openai_status_status.json</code>
               and
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/openai_status_summary.json</code>.
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/openai_status_summary.json</code>.
               Commands:
               <code>curl -fsS --connect-timeout 5 --max-time 15 https://status.openai.com/api/v2/status.json</code>
               and
@@ -1931,7 +1932,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
       <p>
         These visuals describe what operators and agent clients see when tokenproxy
         behaves correctly. Measured numbers in this section come only from the
-        2026-05-27 02:37 PDT passive probe directory. Unauthenticated 401 probes
+        2026-05-27 03:05 PDT passive probe directory. Unauthenticated 401 probes
         are labeled as reachability data, not as product latency or stream stability.
       </p>
 
@@ -1967,7 +1968,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
         status context. Source: <a href="#network">Network and Status
         Observations</a>, <a href="#performance-review-attestation">Performance-review
         Attestation</a>, and
-        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/openai_status_summary.json</code>.
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/openai_status_summary.json</code>.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">Agent-client lifecycle</h3>
@@ -2076,25 +2077,25 @@ warn!("websocket control queue full while replying to ping; closing connection")
           <p class="font-bold">HTTP/2 reachability</p>
           <p class="mono mt-4">samples=5</p>
           <p class="mono">status=401</p>
-          <p class="mono">p50=0.105338s</p>
-          <p class="mono">p95=0.174139s</p>
-          <p class="mono">p99=0.174139s</p>
+          <p class="mono">p50=0.098917s</p>
+          <p class="mono">p95=0.153814s</p>
+          <p class="mono">p99=0.153814s</p>
         </div>
         <div class="metric">
           <p class="font-bold">HTTP/1.1 reachability</p>
           <p class="mono mt-4">samples=5</p>
           <p class="mono">status=401</p>
-          <p class="mono">p50=0.096160s</p>
-          <p class="mono">p95=0.150913s</p>
-          <p class="mono">p99=0.150913s</p>
+          <p class="mono">p50=0.099588s</p>
+          <p class="mono">p95=0.166897s</p>
+          <p class="mono">p99=0.166897s</p>
         </div>
         <div class="metric">
           <p class="font-bold">HTTP/3 reachability</p>
           <p class="mono mt-4">samples=5</p>
           <p class="mono">status=401</p>
-          <p class="mono">p50=0.097008s</p>
-          <p class="mono">p95=0.177065s</p>
-          <p class="mono">p99=0.177065s</p>
+          <p class="mono">p50=0.089513s</p>
+          <p class="mono">p95=0.118058s</p>
+          <p class="mono">p99=0.118058s</p>
         </div>
       </div>
       <svg class="mt-4 border border-black" viewBox="0 0 760 180" role="img" aria-label="Request timeline">
@@ -2104,12 +2105,12 @@ warn!("websocket control queue full while replying to ping; closing connection")
         <text x="10" y="44" font-size="12" font-family="monospace">h2</text>
         <text x="10" y="94" font-size="12" font-family="monospace">h1</text>
         <text x="10" y="144" font-size="12" font-family="monospace">h3</text>
-        <rect x="40" y="28" width="330" height="24" fill="none" stroke="#111"/>
-        <rect x="40" y="78" width="300" height="24" fill="none" stroke="#111"/>
-        <rect x="40" y="128" width="305" height="24" fill="none" stroke="#111"/>
-        <text x="380" y="44" font-size="12" font-family="monospace">p50 total 0.105338s</text>
-        <text x="350" y="94" font-size="12" font-family="monospace">p50 total 0.096160s</text>
-        <text x="355" y="144" font-size="12" font-family="monospace">p50 total 0.097008s</text>
+        <rect x="40" y="28" width="335" height="24" fill="none" stroke="#111"/>
+        <rect x="40" y="78" width="337" height="24" fill="none" stroke="#111"/>
+        <rect x="40" y="128" width="303" height="24" fill="none" stroke="#111"/>
+        <text x="385" y="44" font-size="12" font-family="monospace">p50 total 0.098917s</text>
+        <text x="387" y="94" font-size="12" font-family="monospace">p50 total 0.099588s</text>
+        <text x="353" y="144" font-size="12" font-family="monospace">p50 total 0.089513s</text>
         <text x="40" y="172" font-size="12" font-family="monospace">Scale is comparative only; bars use p50 total from unauthenticated 401 probes.</text>
       </svg>
       <table class="mt-4 text-sm">
@@ -2147,7 +2148,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Caption: the summary cards and timeline use only completed local 401 probes.
         The other reliability visuals intentionally omit measured values where no
         tokenproxy implementation or authenticated upstream probe exists. Source:
-        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/curl_timings.csv</code>
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/curl_timings.csv</code>
         and <a href="#benchmark-method">Benchmark Methodology</a>.
       </p>
 
@@ -2160,7 +2161,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
             <span>162.159.140.245</span><span>172.66.0.243</span>
           </div>
           <div class="flow mt-4">
-            <span>TLS 1.3</span><span>TLS_AES_256_GCM_SHA384</span><span>CN api.openai.com</span>
+            <span>TLS 1.3</span><span>TLS_AES_256_GCM_SHA384</span><span>X25519MLKEM768</span><span>CN api.openai.com</span>
           </div>
         </div>
         <div class="viz-box">
@@ -2178,7 +2179,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
       <p class="caption">
         Caption: endpoint visuals show run-specific DNS, TLS, HTTP protocol, SSE
         commitment, and WebSocket-upgrade facts. Source:
-        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/dns.txt</code>,
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/dns.txt</code>,
         <code>tls.txt</code>, <code>curl_timings.csv</code>,
         <code>websocket_unauthenticated.txt</code>, and
         <a href="#data-paths">Data Paths</a>.
@@ -2436,7 +2437,12 @@ warn!("websocket control queue full while replying to ping; closing connection")
       </p>
       <p class="mt-3">
         Tokenproxy Stage One. (2026). <em>Local passive network and status probe artifacts</em>.
-        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/</code>.
+        Latest complete capture:
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>.
+        Intermediate complete capture:
+        <code>stage_one_evidence/2026-05-27T025959-0700-network-probes/</code>.
+        Adjacent blocked capture:
+        <code>stage_one_evidence/2026-05-27T030504-0700-network-probes/</code>.
       </p>
     </section>
 
@@ -2446,10 +2452,10 @@ warn!("websocket control queue full while replying to ping; closing connection")
         Before editing this attestation, I re-read this report and ran
         <code>git submodule status --recursive</code> in the current checkout. The raw
         submodule-status capture is
-        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/submodule_status.txt</code>.
-        I also ran fresh passive network, TLS, unauthenticated WebSocket, and status
-        probes; their raw artifacts are in
-        <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/</code>.
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/submodule_status.txt</code>.
+        I also reviewed the latest passive network, TLS, unauthenticated WebSocket,
+        and status probes; their raw artifacts are in
+        <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>.
       </p>
       <p class="mt-4">
         No stage-two product code exists in this checkout, so no integration test
@@ -2462,11 +2468,21 @@ warn!("websocket control queue full while replying to ping; closing connection")
         account-routing performance.
       </p>
       <p class="mt-4">
-        The repeat probe narrowed the network-path claim. The <code>api.openai.com</code>
-        A-record set repeated, but the selected Cloudflare endpoint changed from the
-        earlier capture to <code>172.66.0.243</code>, and <code>status.openai.com</code>
-        returned different Vercel A records. Therefore this report treats IPs and
-        endpoint timing distributions as run-specific observations only.
+        The repeated probes narrowed the network-path claim. Across captured artifacts,
+        the <code>api.openai.com</code> A-record set repeated; the 2026-05-27T005200
+        curl artifact selected <code>162.159.140.245</code>, while the later complete
+        2026-05-27T025959 and 2026-05-27T030553 curl artifacts selected
+        <code>172.66.0.243</code>; and
+        <code>status.openai.com</code> returned different Vercel A records. Therefore
+        this report treats IPs and endpoint timing distributions as run-specific
+        observations only.
+      </p>
+      <p class="mt-4">
+        The 2026-05-27T030504 probe directory is recorded as a blocked probe, not a
+        latency sample: <code>dig</code> failed with <code>isc_socket_bind: unexpected error</code>,
+        curl returned exit code 6 for every endpoint sample, TLS lookup failed, and the
+        status API could not resolve <code>status.openai.com</code>. The next complete
+        capture at 2026-05-27T030553 is the latest accepted reachability sample.
       </p>
       <table class="mt-4 text-sm">
         <thead>
@@ -2539,7 +2555,7 @@ warn!("websocket control queue full while replying to ping; closing connection")
             </td>
             <td>
               Passive endpoint probes in
-              <code>stage_one_evidence/2026-05-27T023722-0700-network-probes/</code>
+              <code>stage_one_evidence/2026-05-27T030553-0700-network-probes/</code>
               support route and protocol reachability only. They do not benchmark Codex
               or tokenproxy overhead.
             </td>
@@ -2784,6 +2800,22 @@ warn!("websocket control queue full while replying to ping; closing connection")
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-27 3:10 AM PDT</td>
+            <td>Fetched current OpenAI docs for WebSocket mode, GPT-5.5 Responses state handling, prompt caching, and Responses overview; no material mismatch found.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:07 AM PDT</td>
+            <td>Recorded the adjacent 2026-05-27T030504 DNS-blocked probe as excluded from latency evidence and kept the 03:05:53 complete capture as the accepted sample.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:06 AM PDT</td>
+            <td>Selected the latest complete passive probe capture and refreshed report DNS/status/timing values, visual cards, reference paths, and attestation paths to 2026-05-27T030553-0700.</td>
+          </tr>
+          <tr>
+            <td>2026-05-27 3:03 AM PDT</td>
+            <td>Re-read report and refreshed network, status, visual, reference, and attestation claims against the 2026-05-27T025959 passive probe artifacts.</td>
+          </tr>
           <tr>
             <td>2026-05-27 2:52 AM PDT</td>
             <td>Reviewed report structure, evidence artifacts, and submodule status; added required graphical user-experience section and bottom Review Log without adding new performance claims.</td>

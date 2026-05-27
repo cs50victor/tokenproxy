@@ -1,0 +1,16 @@
+protocol,run,remote_ip,http_version,http_code,time_namelookup,time_connect,time_appconnect,time_starttransfer,time_total,exitcode,errormsg
+http2,1,,0,000,0.000000,0.000000,0.000000,0.000000,0.001167,6,Could not resolve host: api.openai.com
+http2,2,,0,000,0.000000,0.000000,0.000000,0.000000,0.000026,6,Could not resolve host: api.openai.com
+http2,3,,0,000,0.000000,0.000000,0.000000,0.000000,0.000026,6,Could not resolve host: api.openai.com
+http2,4,,0,000,0.000000,0.000000,0.000000,0.000000,0.000026,6,Could not resolve host: api.openai.com
+http2,5,,0,000,0.000000,0.000000,0.000000,0.000000,0.000028,6,Could not resolve host: api.openai.com
+http1.1,1,,0,000,0.000000,0.000000,0.000000,0.000000,0.000029,6,Could not resolve host: api.openai.com
+http1.1,2,,0,000,0.000000,0.000000,0.000000,0.000000,0.000020,6,Could not resolve host: api.openai.com
+http1.1,3,,0,000,0.000000,0.000000,0.000000,0.000000,0.000021,6,Could not resolve host: api.openai.com
+http1.1,4,,0,000,0.000000,0.000000,0.000000,0.000000,0.000022,6,Could not resolve host: api.openai.com
+http1.1,5,,0,000,0.000000,0.000000,0.000000,0.000000,0.000028,6,Could not resolve host: api.openai.com
+http3,1,,0,000,0.000000,0.000000,0.000000,0.000000,0.000028,6,Could not resolve host: api.openai.com
+http3,2,,0,000,0.000000,0.000000,0.000000,0.000000,0.000031,6,Could not resolve host: api.openai.com
+http3,3,,0,000,0.000000,0.000000,0.000000,0.000000,0.000026,6,Could not resolve host: api.openai.com
+http3,4,,0,000,0.000000,0.000000,0.000000,0.000000,0.000029,6,Could not resolve host: api.openai.com
+http3,5,,0,000,0.000000,0.000000,0.000000,0.000000,0.000026,6,Could not resolve host: api.openai.com
