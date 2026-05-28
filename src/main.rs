@@ -13,7 +13,6 @@ use tokenproxy::benchmark::{
     UsageCachedTokensField, WorkflowRecordInput, parse_openai_status_context, record_jsonl_line,
     summarize_records, summary_json,
 };
-use tokenproxy::build_info::version_text;
 use tokenproxy::config::{
     EffectiveConfig, ProcessEnv, StdFileProvider, load_effective_config, parse_config,
 };
@@ -41,12 +40,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(3_000);
 
 #[derive(Debug, Parser)]
 #[command(
-    disable_version_flag = true,
+    version,
     about = "Small Rust proxy for OpenAI-compatible agent traffic"
 )]
 struct Cli {
-    #[arg(long)]
-    version: bool,
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
@@ -420,11 +417,6 @@ fn json_bytes(value: serde_json::Value) -> Vec<u8> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-
-    if cli.version {
-        println!("{}", version_text());
-        return Ok(());
-    }
 
     if cli.probe_network && !cli.probe_auth {
         run_probe_network(cli.probe_artifact_dir.as_deref(), None).await?;
@@ -1523,11 +1515,12 @@ mod tests {
     use tokenproxy::config::{AccountConfig, Config, EffectiveAccount};
 
     #[test]
-    fn should_accept_custom_version_flag_without_config() {
-        let cli = Cli::try_parse_from(["tokenproxy", "--version"]).unwrap();
+    fn should_render_cargo_package_version_without_config() {
+        let err = Cli::try_parse_from(["tokenproxy", "--version"])
+            .expect_err("--version should render through clap before config loading");
 
-        assert!(cli.version);
-        assert!(cli.config.is_none());
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

@@ -1,15 +1,5 @@
 pub fn version_text() -> String {
-    format!(
-        "tokenproxy version={} os={} kernel={} cpu={} git_sha={} rustc={} curl={} submodules={}",
-        env!("CARGO_PKG_VERSION"),
-        os(),
-        kernel(),
-        cpu(),
-        git_sha(),
-        rustc_version(),
-        curl_version(),
-        submodule_status()
-    )
+    format!("tokenproxy {}", env!("CARGO_PKG_VERSION"))
 }
 
 pub fn os() -> &'static str {
@@ -45,16 +35,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_render_version_with_git_rust_and_submodule_snapshot() {
+    fn should_render_normal_cargo_package_version() {
         let text = version_text();
 
-        assert!(text.contains("tokenproxy version="));
-        assert!(text.contains("os="));
-        assert!(text.contains("kernel="));
-        assert!(text.contains("cpu="));
-        assert!(text.contains("git_sha="));
-        assert!(text.contains("rustc="));
-        assert!(text.contains("curl="));
-        assert!(text.contains("submodules="));
+        assert_eq!(text, format!("tokenproxy {}", env!("CARGO_PKG_VERSION")));
     }
 }
