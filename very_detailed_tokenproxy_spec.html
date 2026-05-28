@@ -857,7 +857,7 @@ tokenproxy --config /etc/tokenproxy/tokenproxy.toml</code></pre>
         <li><code>kind</code>: <code>openai_api_key</code> or later ChatGPT-account adapter kind.</li>
         <li><code>base_url</code>: default <code>https://api.openai.com/v1</code>.</li>
         <li><code>models</code>: explicit allowlist or discovered model map.</li>
-        <li><code>supports_responses</code>, <code>supports_chat_completions</code>, <code>supports_responses_ws</code>.</li>
+        <li><code>supports_responses</code>, <code>supports_chat_completions</code>, <code>supports_responses_ws</code>, and <code>supports_incremental_previous_response_id</code>.</li>
         <li><code>health</code>: open, throttled, auth_failed, disabled, or unknown.</li>
         <li><code>next_retry_at</code>: monotonic deadline for retrying throttled accounts.</li>
         <li><code>usage_windows</code>: latest observed rate-limit, usage-limit, or adapter windows, each with <code>limited</code>, optional <code>remaining_percent</code>, <code>reset_at</code>, <code>source</code>, and <code>observed_at</code>. OpenAI <code>x-ratelimit-*</code> headers can populate limit, remaining, and reset duration; Codex <code>usage_limit_reached</code> errors can populate <code>reset_at</code>; the reviewed CLIProxyAPI management and usage-queue sources did not expose a remaining-percent field, so subscription-window percentages require a future account adapter (CLIProxyAPI, 2026i, lines 1095-1113; CLIProxyAPI, 2026k, lines 375-436).</li>
@@ -869,6 +869,15 @@ tokenproxy --config /etc/tokenproxy/tokenproxy.toml</code></pre>
         headers across requests by construction. Codex's local proxy uses an
         in-memory auth header, marks it sensitive, and overrides Authorization and Host
         on each forwarded request (Codex, 2026b, lines 196-228).
+      </p>
+      <p class="mt-4">
+        A WebSocket <code>response.create</code> frame that carries
+        <code>previous_response_id</code> requires an account with
+        <code>supports_incremental_previous_response_id = true</code> at selection time.
+        Accounts without that capability are excluded with
+        <code>websocket_continuation_unsupported</code>; tokenproxy must not select them
+        and then discover during replay planning that the fast continuation path cannot
+        run.
       </p>
 
       <h3 class="mt-8 mb-3 text-xl font-bold">3. HTTP upstream client</h3>
@@ -1350,7 +1359,10 @@ tokenproxy --config /etc/tokenproxy/tokenproxy.toml</code></pre>
               Preserve it for HTTP and WebSocket. In WebSocket mode, continue from the
               most recent completed response on that socket. If an uncached ID fails,
               replay full context when tokenproxy has it; otherwise return the upstream
-              error unchanged.
+              error unchanged. Route selection for WebSocket frames that already contain
+              <code>previous_response_id</code> must set
+              <code>requires_incremental_previous_response_id</code> and exclude accounts whose
+              capability flag is false.
             </td>
             <td>
               OpenAI documents connection-local most-recent response cache, <code>store=false</code>
@@ -2064,6 +2076,11 @@ After compacted window is used:
             <td>Codex 25 tool-call loop over Responses WebSocket</td>
             <td>Persistent connection continuation with <code>previous_response_id</code>.</td>
             <td>Beat HTTP loop total time when upstream WebSocket support is active; quantify percent.</td>
+          </tr>
+          <tr>
+            <td>Responses WebSocket continuation on mixed-capability account pool</td>
+            <td>Route selection for <code>response.create</code> frames that include <code>previous_response_id</code>.</td>
+            <td>Select only accounts with <code>supports_incremental_previous_response_id</code>; emit <code>websocket_continuation_unsupported</code> route exclusion metrics for incompatible accounts.</td>
           </tr>
           <tr>
             <td>Compacted long agent session</td>
@@ -3721,8 +3738,9 @@ codex exec \
       <h2 class="mb-4 text-2xl font-bold">Performance-review Attestation</h2>
       <p>
         Before editing this attestation, I re-read this report and ran
-        <code>git submodule status --recursive</code> in the current checkout. The raw
-        submodule-status capture is
+        <code>git submodule status --recursive</code> in the current checkout at
+        2026-05-28 01:18 PDT. The output matched the initialized and uninitialized
+        submodule commits recorded in
         <code>stage_one_evidence/2026-05-27T035544-0700-openai-transport-probes/submodule_status.txt</code>.
         I also reviewed the latest local passive network, TLS, unauthenticated
         WebSocket, direct-IP, and status probes; their raw artifacts are in
@@ -3738,9 +3756,21 @@ codex exec \
         2026-05-27 11:04 UTC.
       </p>
       <p class="mt-4">
-        No stage-two product code exists in this checkout, so no integration test
-        against tokenproxy was run. No Rust performance experiment was run in this
-        update. The only current local measurements are passive endpoint probes:
+        This checkout now contains a Rust tokenproxy implementation draft under
+        <code>src/</code>. For this review I inspected the current Responses WebSocket,
+        replay, state, SSE repair, metrics, and server code paths at
+        <code>src/server.rs</code> lines 618-1224 and 1383-1484,
+        <code>src/responses/replay.rs</code> lines 26-132,
+        <code>src/responses/state.rs</code> lines 3-50,
+        <code>src/responses/websocket.rs</code> lines 20-76,
+        <code>src/http/sse_repair.rs</code> lines 19-97, and
+        <code>src/metrics.rs</code> lines 11-500 and 668-853. I ran
+        <code>cargo test --lib</code> at 2026-05-28 03:42 PDT; it completed with
+        201 passed, 0 failed, 26 ignored, and 0 measured tests. The ignored tests
+        are local TCP-listener and fake-upstream integration-style cases, so they
+        are not accepted as completed integration evidence in this attestation.
+        No Rust performance experiment was run in this update. The only current
+        latency measurements remain passive endpoint probes:
         five unauthenticated 401 curl samples per endpoint/protocol in the transport
         matrix, one TLS/SNI inspection across API and ChatGPT A records, one
         unauthenticated WebSocket upgrade attempt, one unauthenticated endpoint
@@ -4403,6 +4433,18 @@ codex exec \
           </tr>
         </thead>
         <tbody>
+          <tr>
+            <td>2026-05-28 3:42 AM PDT</td>
+            <td>Reviewed Responses replay deduplication against current Rust source; changed full replay to deduplicate function-call outputs by call_id.</td>
+          </tr>
+          <tr>
+            <td>2026-05-28 3:23 AM PDT</td>
+            <td>Reviewed WebSocket continuation routing against current Rust source; required incremental previous-response capability at account selection.</td>
+          </tr>
+          <tr>
+            <td>2026-05-28 1:18 AM PDT</td>
+            <td>Re-reviewed current Rust implementation draft, submodule status, and cargo test output; narrowed attestation from absent product code to unit-tested code with ignored integration-style cases.</td>
+          </tr>
           <tr>
             <td>2026-05-27 3:55 PM PDT</td>
             <td>Changed ChatGPT/Codex account config from path env indirection to direct per-account auth_json_path entries for multi-account servers.</td>
