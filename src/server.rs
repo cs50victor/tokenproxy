@@ -389,13 +389,14 @@ impl AppState {
         let upstream_clients = Arc::new(upstream_clients_by_origin(&effective)?);
         let account_routing = Arc::new(ArcSwap::from_pointee(effective.accounts.clone()));
         let account_health = Arc::new(account_health_cells(&effective));
+        let metrics_enabled = effective.config.observability.metrics;
 
         Ok(Self {
             effective: Arc::new(effective),
             account_routing,
             upstream_clients,
             request_counter: Arc::new(AtomicU64::new(1)),
-            metrics: Metrics::default(),
+            metrics: Metrics::with_enabled(metrics_enabled),
             usage_windows: Arc::new(Mutex::new(BTreeMap::new())),
             account_health,
             log_format,
@@ -585,7 +586,18 @@ async fn metrics(
     headers: HeaderMap,
 ) -> Result<Response, TokenproxyError> {
     require_auth(&state, &headers)?;
-    let usage_windows = state.usage_windows.lock().await;
+    if !state.effective.config.observability.metrics {
+        return Err(TokenproxyError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::UnsupportedRoute,
+            "metrics endpoint is disabled",
+        ));
+    }
+    let usage_windows = state
+        .usage_windows
+        .try_lock()
+        .map(|usage_windows| usage_windows.clone())
+        .unwrap_or_default();
     let account_health = state.account_health_snapshot();
     let observed_at = now_rfc3339();
     let usage_snapshot = snapshot_from_account_configs_with_health_and_key(

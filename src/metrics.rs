@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::time_parse::unix_seconds_from_rfc3339;
 use crate::usage::UsageSnapshot;
@@ -10,6 +10,7 @@ const REQUEST_DURATION_BUCKETS_MS: &[u64] = &[5, 10, 25, 50, 100, 250, 500, 1_00
 
 #[derive(Debug, Clone)]
 pub struct Metrics {
+    enabled: Arc<AtomicBool>,
     requests_total: Arc<AtomicU64>,
     request_outcomes: Arc<Mutex<BTreeMap<RequestMetricKey, u64>>>,
     request_shapes: Arc<Mutex<BTreeMap<RequestShapeMetricKey, u64>>>,
@@ -45,7 +46,12 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn new() -> Self {
+        Self::with_enabled(true)
+    }
+
+    pub fn with_enabled(enabled: bool) -> Self {
         Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
             requests_total: Arc::new(AtomicU64::new(0)),
             request_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
             request_shapes: Arc::new(Mutex::new(BTreeMap::new())),
@@ -100,6 +106,9 @@ impl Metrics {
     }
 
     pub fn increment_requests(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.requests_total.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -111,10 +120,12 @@ impl Metrics {
         model_family: &str,
         account_id_hash: &str,
     ) {
-        let mut request_outcomes = self
-            .request_outcomes
-            .lock()
-            .expect("request outcome metrics lock is not poisoned");
+        if !self.is_enabled() {
+            return;
+        }
+        let Ok(mut request_outcomes) = self.request_outcomes.try_lock() else {
+            return;
+        };
         let key = RequestMetricKey {
             endpoint: endpoint.to_string(),
             transport: transport.to_string(),
@@ -134,10 +145,12 @@ impl Metrics {
         verbosity: &str,
         store: &str,
     ) {
-        let mut request_shapes = self
-            .request_shapes
-            .lock()
-            .expect("request shape metrics lock is not poisoned");
+        if !self.is_enabled() {
+            return;
+        }
+        let Ok(mut request_shapes) = self.request_shapes.try_lock() else {
+            return;
+        };
         let key = RequestShapeMetricKey {
             endpoint: endpoint.to_string(),
             model_family: model_family.to_string(),
@@ -150,10 +163,12 @@ impl Metrics {
     }
 
     pub fn increment_route_exclusion(&self, reason: &str) {
-        let mut route_exclusions = self
-            .route_exclusions
-            .lock()
-            .expect("route exclusion metrics lock is not poisoned");
+        if !self.is_enabled() {
+            return;
+        }
+        let Ok(mut route_exclusions) = self.route_exclusions.try_lock() else {
+            return;
+        };
         let key = RouteExclusionMetricKey {
             reason: reason.to_string(),
         };
@@ -169,11 +184,13 @@ impl Metrics {
         retry_phase: &str,
         outcome: &str,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         self.upstream_attempts_total.fetch_add(1, Ordering::Relaxed);
-        let mut upstream_attempts = self
-            .upstream_attempts
-            .lock()
-            .expect("upstream attempt metrics lock is not poisoned");
+        let Ok(mut upstream_attempts) = self.upstream_attempts.try_lock() else {
+            return;
+        };
         let key = UpstreamAttemptMetricKey {
             endpoint: endpoint.to_string(),
             transport: transport.to_string(),
@@ -186,11 +203,17 @@ impl Metrics {
     }
 
     pub fn increment_active_websocket_sessions(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.active_websocket_sessions
             .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn decrement_active_websocket_sessions(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         let _ = self.active_websocket_sessions.fetch_update(
             Ordering::Relaxed,
             Ordering::Relaxed,
@@ -199,15 +222,20 @@ impl Metrics {
     }
 
     pub fn increment_websocket_events(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.websocket_events_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn increment_websocket_event_outcome(&self, event_type: &str, success: bool) {
+        if !self.is_enabled() {
+            return;
+        }
         self.websocket_events_total.fetch_add(1, Ordering::Relaxed);
-        let mut websocket_event_outcomes = self
-            .websocket_event_outcomes
-            .lock()
-            .expect("websocket event metrics lock is not poisoned");
+        let Ok(mut websocket_event_outcomes) = self.websocket_event_outcomes.try_lock() else {
+            return;
+        };
         let key = WebSocketEventMetricKey {
             event_type: event_type.to_string(),
             success,
@@ -226,11 +254,13 @@ impl Metrics {
         model_family: &str,
         account_id_hash: &str,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         self.sse_events_total.fetch_add(1, Ordering::Relaxed);
-        let mut sse_event_outcomes = self
-            .sse_event_outcomes
-            .lock()
-            .expect("SSE event metrics lock is not poisoned");
+        let Ok(mut sse_event_outcomes) = self.sse_event_outcomes.try_lock() else {
+            return;
+        };
         let key = SseEventMetricKey {
             event_type: event_type.to_string(),
             success,
@@ -241,15 +271,20 @@ impl Metrics {
     }
 
     pub fn add_replay_items(&self, count: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.replay_items_total.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn add_replay_items_for_reason(&self, transport: &str, reason: &str, count: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         self.replay_items_total.fetch_add(count, Ordering::Relaxed);
-        let mut replay_item_outcomes = self
-            .replay_item_outcomes
-            .lock()
-            .expect("replay item metrics lock is not poisoned");
+        let Ok(mut replay_item_outcomes) = self.replay_item_outcomes.try_lock() else {
+            return;
+        };
         let key = ReplayItemMetricKey {
             transport: transport.to_string(),
             reason: reason.to_string(),
@@ -258,10 +293,12 @@ impl Metrics {
     }
 
     pub fn add_cached_input_tokens(&self, endpoint: &str, model_family: &str, count: u64) {
-        let mut cached_input_tokens = self
-            .cached_input_tokens
-            .lock()
-            .expect("cached input token metrics lock is not poisoned");
+        if !self.is_enabled() {
+            return;
+        }
+        let Ok(mut cached_input_tokens) = self.cached_input_tokens.try_lock() else {
+            return;
+        };
         let key = CachedInputTokensMetricKey {
             endpoint: endpoint.to_string(),
             model_family: model_family.to_string(),
@@ -270,6 +307,9 @@ impl Metrics {
     }
 
     pub fn record_request_duration_ms(&self, duration_ms: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         record_histogram(
             &self.request_duration_buckets,
             &self.request_duration_count,
@@ -286,11 +326,13 @@ impl Metrics {
         stream: &str,
         duration_ms: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         self.record_request_duration_ms(duration_ms);
-        let mut labels = self
-            .request_duration_labels
-            .lock()
-            .expect("request duration metrics lock is not poisoned");
+        let Ok(mut labels) = self.request_duration_labels.try_lock() else {
+            return;
+        };
         let key = RequestDurationMetricKey {
             endpoint: endpoint.to_string(),
             transport: transport.to_string(),
@@ -309,16 +351,18 @@ impl Metrics {
         transport: &str,
         duration_ms: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         record_histogram(
             &self.upstream_connect_duration_buckets,
             &self.upstream_connect_duration_count,
             &self.upstream_connect_duration_sum_ms,
             duration_ms,
         );
-        let mut labels = self
-            .upstream_connect_duration_labels
-            .lock()
-            .expect("upstream connect duration metrics lock is not poisoned");
+        let Ok(mut labels) = self.upstream_connect_duration_labels.try_lock() else {
+            return;
+        };
         let key = UpstreamConnectDurationMetricKey {
             origin: origin.to_string(),
             transport: transport.to_string(),
@@ -330,6 +374,9 @@ impl Metrics {
     }
 
     pub fn record_ws_connect_duration_ms(&self, duration_ms: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         record_histogram(
             &self.ws_connect_duration_buckets,
             &self.ws_connect_duration_count,
@@ -345,11 +392,13 @@ impl Metrics {
         reused: bool,
         duration_ms: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         self.record_ws_connect_duration_ms(duration_ms);
-        let mut labels = self
-            .ws_connect_duration_labels
-            .lock()
-            .expect("websocket connect duration metrics lock is not poisoned");
+        let Ok(mut labels) = self.ws_connect_duration_labels.try_lock() else {
+            return;
+        };
         let key = WsConnectDurationMetricKey {
             origin: origin.to_string(),
             model_family: model_family.to_string(),
@@ -362,6 +411,9 @@ impl Metrics {
     }
 
     pub fn record_first_event_duration_ms(&self, duration_ms: u64) {
+        if !self.is_enabled() {
+            return;
+        }
         record_histogram(
             &self.first_event_duration_buckets,
             &self.first_event_duration_count,
@@ -377,11 +429,13 @@ impl Metrics {
         model_family: &str,
         duration_ms: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         self.record_first_event_duration_ms(duration_ms);
-        let mut labels = self
-            .first_event_duration_labels
-            .lock()
-            .expect("first event duration metrics lock is not poisoned");
+        let Ok(mut labels) = self.first_event_duration_labels.try_lock() else {
+            return;
+        };
         let key = FirstEventDurationMetricKey {
             endpoint: endpoint.to_string(),
             transport: transport.to_string(),
@@ -394,6 +448,9 @@ impl Metrics {
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
+        if !self.is_enabled() {
+            return MetricsSnapshot::default();
+        }
         MetricsSnapshot {
             requests_total: self.requests_total.load(Ordering::Relaxed),
             request_outcomes: self
@@ -534,6 +591,10 @@ impl Metrics {
                 .map(|(key, counts)| (key.clone(), counts.snapshot()))
                 .collect(),
         }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 }
 
@@ -1616,5 +1677,30 @@ mod counter_tests {
         assert_eq!(snapshot.upstream_connect_duration_count, 1);
         assert_eq!(snapshot.first_event_duration_count, 1);
         assert_eq!(snapshot.ws_connect_duration_count, 1);
+    }
+
+    #[test]
+    fn should_skip_labeled_metric_update_when_store_is_contended() {
+        let metrics = Metrics::default();
+        let guard = metrics
+            .request_outcomes
+            .lock()
+            .expect("test metrics lock is not poisoned");
+
+        metrics.increment_request_outcome("/v1/responses", "sse", "2xx", "gpt", "acct");
+
+        drop(guard);
+        assert!(metrics.snapshot().request_outcomes.is_empty());
+    }
+
+    #[test]
+    fn should_make_disabled_metrics_noop() {
+        let metrics = Metrics::with_enabled(false);
+
+        metrics.increment_requests();
+        metrics.increment_websocket_event_outcome("upstream_text", true);
+        metrics.record_request_duration_labeled("/v1/responses", "sse", "gpt", "true", 7);
+
+        assert_eq!(metrics.snapshot(), MetricsSnapshot::default());
     }
 }
