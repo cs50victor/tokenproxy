@@ -1,0 +1,78 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  RUST_TOOLCHAIN: nightly-2026-02-16
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_TARGET_DIR: target
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Build
+        run: cargo build --locked --profile fast-build
+
+      - name: Test
+        run: cargo test --locked --profile fast-build
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Package
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          asset_dir="tokenproxy-${tag}-linux-x86_64"
+          mkdir -p "dist/${asset_dir}"
+          cp target/release/tokenproxy "dist/${asset_dir}/tokenproxy"
+          chmod +x "dist/${asset_dir}/tokenproxy"
+          tar -C dist -czf "dist/${asset_dir}.tar.gz" "${asset_dir}"
+          shasum -a 256 "dist/${asset_dir}.tar.gz" > "dist/${asset_dir}.tar.gz.sha256"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --verify-tag --generate-notes
+          gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber

@@ -863,8 +863,10 @@ async fn should_hash_compact_request_and_response_bodies_without_dumping_raw_bod
         .unwrap()
         .as_nanos();
     effective.config.observability.request_body_dumps = true;
-    effective.config.observability.dump_dir =
-        format!("/private/tmp/tokenproxy-compact-hashes-{unique}");
+    effective.config.observability.dump_dir = std::env::temp_dir()
+        .join(format!("tokenproxy-compact-hashes-{unique}"))
+        .to_string_lossy()
+        .into_owned();
     let dump_dir = effective.config.observability.dump_dir.clone();
     let state = AppState::new(effective).unwrap();
 
@@ -1441,8 +1443,10 @@ async fn should_write_redacted_request_body_dump_before_json_route_rejection() {
         .unwrap()
         .as_nanos();
     effective.config.observability.request_body_dumps = true;
-    effective.config.observability.dump_dir =
-        format!("/private/tmp/tokenproxy-request-dumps-{unique}");
+    effective.config.observability.dump_dir = std::env::temp_dir()
+        .join(format!("tokenproxy-request-dumps-{unique}"))
+        .to_string_lossy()
+        .into_owned();
     effective.config.observability.redact_json_pointers = vec!["/api_key".to_string()];
     let dump_dir = effective.config.observability.dump_dir.clone();
     let state = AppState::new(effective).unwrap();
