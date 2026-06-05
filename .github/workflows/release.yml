@@ -11,7 +11,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   RUST_TOOLCHAIN: nightly-2026-02-16
@@ -20,14 +20,21 @@ env:
   CARGO_TARGET_DIR: target
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  verify:
+    runs-on: ubuntu-24.04
+
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Resolve release tag
+        id: release-tag
+        run: echo "tag=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
         run: |
@@ -56,23 +63,149 @@ jobs:
       - name: Test
         run: cargo test --locked --profile fast-build
 
-      - name: Build release binary
-        run: cargo build --locked --release
+  build-artifacts:
+    needs: verify
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
 
-      - name: Package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            archive: tar.gz
+            musl: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+            musl: true
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            archive: zip
+          - target: i686-pc-windows-msvc
+            runner: windows-2025
+            archive: zip
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            archive: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install Rust
+        shell: bash
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
-          asset_dir="tokenproxy-${tag}-linux-x86_64"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+          cargo --version
+
+      - name: Install musl tools
+        if: ${{ matrix.musl }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-cargo-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Smoke release binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/tokenproxy"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          "$binary" --version
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          tag="${{ needs.verify.outputs.tag }}"
+          target="${{ matrix.target }}"
+          asset_dir="tokenproxy-${tag}-${target}"
           mkdir -p "dist/${asset_dir}"
-          cp target/release/tokenproxy "dist/${asset_dir}/tokenproxy"
+          cp "target/${target}/release/tokenproxy" "dist/${asset_dir}/tokenproxy"
           chmod +x "dist/${asset_dir}/tokenproxy"
           tar -C dist -czf "dist/${asset_dir}.tar.gz" "${asset_dir}"
           shasum -a 256 "dist/${asset_dir}.tar.gz" > "dist/${asset_dir}.tar.gz.sha256"
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.verify.outputs.tag }}"
+          $target = "${{ matrix.target }}"
+          $assetDir = "tokenproxy-$tag-$target"
+          New-Item -ItemType Directory -Path "dist/$assetDir" -Force | Out-Null
+          Copy-Item "target/$target/release/tokenproxy.exe" "dist/$assetDir/tokenproxy.exe"
+          Compress-Archive -Path "dist/$assetDir" -DestinationPath "dist/$assetDir.zip" -Force
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$assetDir.zip").Hash.ToLowerInvariant()
+          "$hash  dist/$assetDir.zip" | Out-File -FilePath "dist/$assetDir.zip.sha256" -Encoding ascii
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokenproxy-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [verify, build-artifacts]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Download workflow artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tokenproxy-*
+          merge-multiple: true
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="${{ needs.verify.outputs.tag }}"
           gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --verify-tag --generate-notes
-          gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber
+          gh release upload "$tag" dist/*.tar.gz dist/*.zip dist/*.sha256 --clobber
