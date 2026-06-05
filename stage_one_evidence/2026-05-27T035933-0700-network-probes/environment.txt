@@ -1,9 +1,0 @@
-local_timestamp=2026-05-27T03:59:33-0700
-utc_timestamp=2026-05-27T10:59:33Z
-cwd=/Users/vic8or/dev/tokenproxy
-uname=Darwin mac-5.local 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64 arm Darwin
-curl=curl 8.19.0 (aarch64-apple-darwin25.3.0) libcurl/8.19.0 OpenSSL/3.6.1 zlib/1.3.2 brotli/1.1.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 libssh2/1.11.1 nghttp2/1.67.1 ngtcp2/1.17.0 nghttp3/1.12.0 mit-krb5/1.22.1
-openssl=OpenSSL 3.6.2 7 Apr 2026 (Library: OpenSSL 3.6.2 7 Apr 2026)
-websocat=websocat 1.14.0
-rustc=rustc 1.95.0-nightly (873b4beb0 2026-02-15)
-cargo=cargo 1.95.0-nightly (ce69df6f7 2026-02-12)

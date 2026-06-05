@@ -1,9 +1,0 @@
-continent	country	city	network	status_code	total_ms	dns_ms	tcp_ms	tls_ms	first_byte_ms	resolved_address
-NA	US	San Francisco	Comcast Cable Communications	401	296	37	16	204	39	162.159.140.245
-NA	US	New York	M247	401	160	4	1	12	143	162.159.140.245
-EU	GB	London	OVH	401	155	2	2	11	140	162.159.140.245
-EU	DE	Frankfurt	Oracle	401	168	7	1	7	153	172.66.0.243
-AS	JP	Tokyo	xTom	401	257	5	1	7	244	162.159.140.245
-AS	SG	Singapore	LeaseWeb	401	677	410	2	7	258	172.66.0.243
-OC	AU	Sydney	Oracle	401	238	6	2	8	222	162.159.140.245
-SA	BR	Sao Paulo	Oracle	401	142	4	2	7	129	162.159.140.245
