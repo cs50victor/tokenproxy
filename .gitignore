@@ -1,1 +1,14 @@
 /target/
+/stage_one_evidence/
+/uv/
+/CLIProxyAPI/
+/codex/
+/rust-sdks/
+/rust-sdks/livekit-protocol/protocol/
+/rust-sdks/yuv-sys/libyuv/
+/pingora/
+/iggy/
+/monoio/
+/s2n-quic/
+/quiche/
+/ripgrep/
