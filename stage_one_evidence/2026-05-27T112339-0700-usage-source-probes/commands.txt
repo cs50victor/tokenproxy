@@ -1,6 +1,0 @@
-timestamp_local=2026-05-27T11:23:39-0700
-timestamp_utc=2026-05-27T18:23:39Z
-command=curl -sS -D models.headers -o models.body -w status/timing -H Authorization: Bearer REDACTED https://api.openai.com/v1/models
-command=curl -sS -D responses.headers -o responses.body -w status/timing -H Authorization: Bearer REDACTED -H Content-Type: application/json -d @responses.request.json https://api.openai.com/v1/responses
-command=curl -sS -D responses_ok.headers -o responses_ok.body -w status/timing -H Authorization: Bearer REDACTED -H Content-Type: application/json -d @responses_ok.request.json https://api.openai.com/v1/responses
-command=curl -sS -D chat_ok.headers -o chat_ok.body -w status/timing -H Authorization: Bearer REDACTED -H Content-Type: application/json -d @chat_ok.request.json https://api.openai.com/v1/chat/completions

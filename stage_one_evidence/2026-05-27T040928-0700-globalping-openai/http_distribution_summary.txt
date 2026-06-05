@@ -1,9 +1,0 @@
-measurement_id=2SjbprAcKf8Wxdvt700020T8K
-target=api.openai.com /v1/models unauthenticated GET
-samples=8
-total_ms_min=142
-total_ms_p50=203
-total_ms_p95=544
-total_ms_max=677
-first_byte_ms_p50=148
-first_byte_ms_p95=253

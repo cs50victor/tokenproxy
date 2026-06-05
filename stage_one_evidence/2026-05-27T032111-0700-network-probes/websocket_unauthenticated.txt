@@ -1,6 +1,0 @@
-websocat -v -1 wss://api.openai.com/v1/responses
-[INFO  websocat::lints] Auto-inserting the line mode
-[INFO  websocat::ws_client_peer] get_ws_client_peer
-[INFO  websocat::net_peer] Connected to TCP 172.66.0.243:443
-websocat: WebSocketError: WebSocketError: Received unexpected status code (401 Unauthorized)
-websocat: error running
