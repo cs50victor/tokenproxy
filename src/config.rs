@@ -3,6 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde::de::Error as SerdeError;
+use toml::Value as TomlValue;
 
 use crate::auth::{ChatGptAuth, parse_chatgpt_auth_json};
 use crate::error::TokenproxyError;
@@ -236,9 +238,116 @@ impl FileProvider for StdFileProvider {
 }
 
 pub fn parse_config(input: &str) -> Result<Config, TokenproxyError> {
+    parse_config_value(input)?
+        .try_into()
+        .map_err(|error: toml::de::Error| {
+            TokenproxyError::invalid_config(format!("failed to parse tokenproxy config: {error}"))
+        })
+}
+
+pub fn parse_config_with_cli_overrides(
+    input: Option<&str>,
+    overrides: &[String],
+) -> Result<Config, TokenproxyError> {
+    let mut config = match input {
+        Some(input) => parse_config_value(input)?,
+        None => TomlValue::Table(toml::map::Map::new()),
+    };
+    apply_cli_overrides(&mut config, overrides)?;
+    config.try_into().map_err(|error: toml::de::Error| {
+        TokenproxyError::invalid_config(format!("failed to parse tokenproxy config: {error}"))
+    })
+}
+
+fn parse_config_value(input: &str) -> Result<TomlValue, TokenproxyError> {
     toml::from_str(input).map_err(|error| {
         TokenproxyError::invalid_config(format!("failed to parse tokenproxy config: {error}"))
     })
+}
+
+fn apply_cli_overrides(
+    config: &mut TomlValue,
+    overrides: &[String],
+) -> Result<(), TokenproxyError> {
+    for raw_override in overrides {
+        let (path, value) = parse_cli_override(raw_override)?;
+        apply_single_override(config, &path, value);
+    }
+    Ok(())
+}
+
+fn parse_cli_override(raw: &str) -> Result<(String, TomlValue), TokenproxyError> {
+    let mut parts = raw.splitn(2, '=');
+    let key = parts.next().unwrap_or_default().trim();
+    let value = parts.next().ok_or_else(|| {
+        TokenproxyError::invalid_config(format!("invalid -c override (missing '='): {raw}"))
+    })?;
+
+    if key.is_empty() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "empty key in -c override: {raw}"
+        )));
+    }
+
+    let value = match parse_toml_value(value.trim()) {
+        Ok(value) => value,
+        Err(_) => TomlValue::String(
+            value
+                .trim()
+                .trim_matches(|character| character == '"' || character == '\'')
+                .to_string(),
+        ),
+    };
+
+    Ok((key.to_string(), value))
+}
+
+fn parse_toml_value(raw: &str) -> Result<TomlValue, toml::de::Error> {
+    let wrapped = format!("_x_ = {raw}");
+    let table: toml::Table = toml::from_str(&wrapped)?;
+    table
+        .get("_x_")
+        .cloned()
+        .ok_or_else(|| SerdeError::custom("missing sentinel key"))
+}
+
+fn apply_single_override(root: &mut TomlValue, path: &str, value: TomlValue) {
+    let mut current = root;
+    let parts = path.split('.').collect::<Vec<_>>();
+
+    for (index, part) in parts.iter().enumerate() {
+        let is_last = index == parts.len() - 1;
+
+        if is_last {
+            match current {
+                TomlValue::Table(table) => {
+                    table.insert((*part).to_string(), value);
+                }
+                _ => {
+                    let mut table = toml::map::Map::new();
+                    table.insert((*part).to_string(), value);
+                    *current = TomlValue::Table(table);
+                }
+            }
+            return;
+        }
+
+        match current {
+            TomlValue::Table(table) => {
+                current = table
+                    .entry((*part).to_string())
+                    .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+            }
+            _ => {
+                *current = TomlValue::Table(toml::map::Map::new());
+                if let TomlValue::Table(table) = current {
+                    current = table
+                        .entry((*part).to_string())
+                        .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+                }
+            }
+        }
+    }
 }
 
 pub fn load_effective_config(
@@ -677,6 +786,59 @@ mod tests {
                 .config
                 .supports_incremental_previous_response_id
         );
+    }
+
+    #[test]
+    fn should_apply_codex_style_cli_config_overrides() {
+        let config = parse_config_with_cli_overrides(
+            Some(
+                r#"
+                [server]
+                id = "from-file"
+                max_body_bytes = 1024
+                [downstream_auth]
+                token_env = "TOKENPROXY_CLIENT_KEY"
+                [[accounts]]
+                id = "openai-primary"
+                kind = "openai_api_key"
+                token_env = "OPENAI_API_KEY"
+                base_url = "https://api.openai.com/v1"
+                models = ["gpt-5.5"]
+                supports_responses = true
+                "#,
+            ),
+            &[
+                "server.id=from-cli".to_string(),
+                "server.max_body_bytes=2048".to_string(),
+                "accounts=[{id=\"override\", kind=\"openai_api_key\", token_env=\"OPENAI_API_KEY\", base_url=\"https://api.openai.com/v1\", models=[\"gpt-5.4\"], supports_chat_completions=true}]".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(config.server.id, "from-cli");
+        assert_eq!(config.server.max_body_bytes, 2048);
+        assert_eq!(config.accounts[0].id, "override");
+        assert!(config.accounts[0].supports_chat_completions);
+    }
+
+    #[test]
+    fn should_parse_cli_override_values_like_codex() {
+        let config = parse_config_with_cli_overrides(
+            None,
+            &[
+                "downstream_auth.token_env=TOKENPROXY_CLIENT_KEY".to_string(),
+                "server.allow_openai_request_headers=true".to_string(),
+                "accounts=[{id=\"openai-primary\", kind=\"openai_api_key\", token_env=\"OPENAI_API_KEY\", base_url=\"https://api.openai.com/v1\", models=[\"gpt-5.5\"], supports_responses=true}]".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.downstream_auth.token_env.as_str(),
+            "TOKENPROXY_CLIENT_KEY"
+        );
+        assert!(config.server.allow_openai_request_headers);
+        assert_eq!(config.accounts[0].models, vec!["gpt-5.5"]);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use http::Version;
 use rustls_pki_types::ServerName;
@@ -14,7 +14,8 @@ use tokenproxy::benchmark::{
     summarize_records, summary_json,
 };
 use tokenproxy::config::{
-    EffectiveConfig, ProcessEnv, StdFileProvider, load_effective_config, parse_config,
+    EffectiveConfig, ProcessEnv, StdFileProvider, load_effective_config,
+    parse_config_with_cli_overrides,
 };
 use tokenproxy::logging::{
     LogFormat, StartupConfigSummary, StartupLogLine, shutdown_forced_log_line, startup_log_line,
@@ -44,8 +45,16 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(3_000);
     about = "Small Rust proxy for OpenAI-compatible agent traffic"
 )]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, value_name = "FILE", help = "Path to tokenproxy.toml")]
     config: Option<PathBuf>,
+    #[arg(
+        short = 'c',
+        long = "config-override",
+        value_name = "key=value",
+        action = ArgAction::Append,
+        help = "Override a config value using a dotted path; the value is parsed as TOML, matching Codex CLI -c behavior"
+    )]
+    config_overrides: Vec<String>,
     #[arg(long)]
     bind: Option<std::net::SocketAddr>,
     #[arg(long)]
@@ -439,10 +448,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = cli
         .config
         .or_else(|| std::env::var_os("TOKENPROXY_CONFIG").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("./tokenproxy.toml"));
+        .or_else(|| {
+            let default_path = PathBuf::from("./tokenproxy.toml");
+            if cli.config_overrides.is_empty() || default_path.is_file() {
+                Some(default_path)
+            } else {
+                None
+            }
+        });
 
-    let raw = std::fs::read_to_string(&config_path)?;
-    let mut config = parse_config(&raw)?;
+    let raw_config = config_path
+        .as_ref()
+        .map(std::fs::read_to_string)
+        .transpose()?;
+    let mut config = parse_config_with_cli_overrides(raw_config.as_deref(), &cli.config_overrides)?;
     if let Some(bind) = cli.bind {
         config.server.bind = bind;
     }
@@ -1529,6 +1548,26 @@ mod tests {
 
         assert!(cli.probe_network);
         assert!(cli.probe_auth);
+    }
+
+    #[test]
+    fn should_accept_codex_style_config_overrides() {
+        let cli = Cli::try_parse_from([
+            "tokenproxy",
+            "-c",
+            "server.id=from-cli",
+            "-c",
+            "server.max_body_bytes=2048",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.config_overrides,
+            vec![
+                "server.id=from-cli".to_string(),
+                "server.max_body_bytes=2048".to_string()
+            ]
+        );
     }
 
     #[test]
