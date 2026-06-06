@@ -28,7 +28,9 @@ use crate::config::RetryConfig;
 use crate::config::{AccountKind, EffectiveAccount};
 use crate::error::{ErrorCode, TokenproxyError};
 use crate::http::classify::{RequestShape, RouteKind, classify_request};
-use crate::http::forward::{build_upstream_headers, filter_downstream_response_headers};
+use crate::http::forward::{
+    UpstreamAuth, build_upstream_headers, filter_downstream_response_headers,
+};
 use crate::http::models::model_list;
 use crate::http::sse_repair::SseRepair;
 use crate::logging::{RequestLog, RouteSelectionLog};
@@ -202,6 +204,10 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/v1/chat/completions",
+            post(proxy_http).fallback(authenticated_openai_unsupported_route),
+        )
+        .route(
+            "/v1/messages",
             post(proxy_http).fallback(authenticated_openai_unsupported_route),
         )
         .route(
@@ -1708,8 +1714,8 @@ fn upstream_url_for_path(
     })?;
 
     match account.config.kind {
-        AccountKind::OpenAiApiKey => {
-            base_url
+        AccountKind::OpenAiApiKey => match public_path {
+            "/v1/chat/completions" | "/v1/responses" | "/v1/responses/compact" => base_url
                 .join(public_path.trim_start_matches('/'))
                 .map_err(|error| {
                     TokenproxyError::new(
@@ -1717,7 +1723,33 @@ fn upstream_url_for_path(
                         ErrorCode::InvalidConfig,
                         format!("failed to build upstream URL: {error}"),
                     )
-                })
+                }),
+            _ => Err(TokenproxyError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::InvalidConfig,
+                format!("OpenAI account cannot serve upstream path {public_path}"),
+            )),
+        },
+        AccountKind::AnthropicApiKey => {
+            if public_path != "/v1/messages" {
+                return Err(TokenproxyError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::InvalidConfig,
+                    format!("Anthropic account cannot serve upstream path {public_path}"),
+                ));
+            }
+
+            let mut url = base_url;
+            let base_path = url.path().trim_end_matches('/');
+            let upstream_path = if base_path.ends_with("/v1") {
+                format!("{base_path}/messages")
+            } else if base_path.ends_with("/v1/messages") {
+                base_path.to_string()
+            } else {
+                format!("{base_path}/v1/messages")
+            };
+            url.set_path(&upstream_path);
+            Ok(url)
         }
         AccountKind::ChatgptCodexAuthJson => chatgpt_codex_upstream_url(base_url, public_path),
     }
@@ -1781,6 +1813,10 @@ async fn forward_to_upstream(
         upstream_host,
         &account.bearer_token,
         forward.request_id,
+        match account.config.kind {
+            AccountKind::AnthropicApiKey => UpstreamAuth::AnthropicApiKey,
+            AccountKind::OpenAiApiKey | AccountKind::ChatgptCodexAuthJson => UpstreamAuth::Bearer,
+        },
         state.effective.config.server.allow_openai_request_headers,
     )?;
 
@@ -2032,7 +2068,8 @@ fn http_log_context(
     HttpLogContext {
         account_id_hash: account_id_hash(&account.config.id, account_hash_key),
         upstream_request_id: header_value(headers, "x-request-id")
-            .or_else(|| header_value(headers, "openai-request-id")),
+            .or_else(|| header_value(headers, "openai-request-id"))
+            .or_else(|| header_value(headers, "request-id")),
         cloudflare_ray: header_value(headers, "cf-ray"),
         actual_service_tier: None,
         cached_input_tokens: None,
@@ -3397,6 +3434,7 @@ fn endpoint_name(endpoint: Endpoint) -> &'static str {
         Endpoint::ChatCompletions => "/v1/chat/completions",
         Endpoint::Responses => "/v1/responses",
         Endpoint::ResponsesCompact => "/v1/responses/compact",
+        Endpoint::AnthropicMessages => "/v1/messages",
     }
 }
 
@@ -3471,18 +3509,27 @@ fn record_websocket_request_metrics(
 
 fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
     let expected = format!("Bearer {}", state.effective.downstream_token);
-    let authorized = headers
+    let bearer_authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
+    let api_key_authorized = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|actual| {
+            constant_time_eq(
+                actual.as_bytes(),
+                state.effective.downstream_token.as_bytes(),
+            )
+        });
 
-    if authorized {
+    if bearer_authorized || api_key_authorized {
         Ok(())
     } else {
         Err(TokenproxyError::new(
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthorized,
-            "missing or invalid downstream bearer token",
+            "missing or invalid downstream credential",
         ))
     }
 }
@@ -3543,6 +3590,7 @@ fn routing_account_state(
                 .config
                 .supports_incremental_previous_response_id,
             supports_compact: account.config.supports_compact,
+            supports_anthropic_messages: account.config.supports_anthropic_messages,
         },
         health,
         ewma_connect_ms_bucket,

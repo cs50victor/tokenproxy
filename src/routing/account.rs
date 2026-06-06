@@ -5,6 +5,7 @@ pub enum Endpoint {
     ChatCompletions,
     Responses,
     ResponsesCompact,
+    AnthropicMessages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub struct AccountConfig {
     pub supports_responses_ws: bool,
     pub supports_incremental_previous_response_id: bool,
     pub supports_compact: bool,
+    pub supports_anthropic_messages: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

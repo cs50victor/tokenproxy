@@ -177,6 +177,7 @@ fn supports_endpoint(account: &AccountState, endpoint: Endpoint) -> bool {
         Endpoint::ChatCompletions => account.config.supports_chat_completions,
         Endpoint::Responses => account.config.supports_responses,
         Endpoint::ResponsesCompact => account.config.supports_compact,
+        Endpoint::AnthropicMessages => account.config.supports_anthropic_messages,
     }
 }
 
@@ -266,6 +267,7 @@ mod tests {
                 supports_responses_ws: true,
                 supports_incremental_previous_response_id: true,
                 supports_compact: true,
+                supports_anthropic_messages: true,
             },
             health: AccountHealth::Open,
             ewma_connect_ms_bucket: 1,
