@@ -11,6 +11,7 @@ pub enum RouteKind {
     ChatCompletions { stream: bool },
     Responses { stream: bool },
     ResponsesCompact,
+    AnthropicMessages { stream: bool },
     ResponsesWebSocket,
     Models,
     Health,
@@ -120,6 +121,29 @@ pub fn classify_request(
                 body,
             })
         }
+        (&Method::POST, "/v1/messages") => {
+            let value = parse_json(&body)?;
+            let stream = bool_field(&value, "stream").unwrap_or(false);
+            let model = required_string(&value, "model")?;
+            Ok(ClassifiedRequest {
+                route: RouteKind::AnthropicMessages { stream },
+                route_request: Some(RouteRequest {
+                    endpoint: Endpoint::AnthropicMessages,
+                    transport: Transport::Http,
+                    model,
+                    service_tier: None,
+                    pinned_account_id: None,
+                    allow_failover_from_pinned: false,
+                    replay_can_remove_previous_response_id: false,
+                    requires_incremental_previous_response_id: false,
+                    caller_hash: "downstream".to_string(),
+                    model_family: model_family(&value),
+                    stream,
+                }),
+                request_shape: None,
+                body,
+            })
+        }
         (&Method::GET, "/v1/responses") if is_websocket_upgrade(headers) => Ok(ClassifiedRequest {
             route: RouteKind::ResponsesWebSocket,
             route_request: None,
@@ -140,11 +164,13 @@ pub fn classify_request(
         (&Method::GET, "/healthz") => Ok(no_body(RouteKind::Health, body)),
         (&Method::GET, "/metrics") => Ok(no_body(RouteKind::Metrics, body)),
         (&Method::GET, "/usage") => Ok(no_body(RouteKind::Usage, body)),
-        (_, "/v1/chat/completions" | "/v1/responses") => Err(TokenproxyError::new(
-            StatusCode::NOT_FOUND,
-            ErrorCode::UnsupportedRoute,
-            format!("unsupported route: {method} {path}"),
-        )),
+        (_, "/v1/chat/completions" | "/v1/responses" | "/v1/messages") => {
+            Err(TokenproxyError::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::UnsupportedRoute,
+                format!("unsupported route: {method} {path}"),
+            ))
+        }
         (_, "/v1/responses/compact") => Err(TokenproxyError::new(
             StatusCode::METHOD_NOT_ALLOWED,
             ErrorCode::UnsupportedMethod,
@@ -295,6 +321,32 @@ mod tests {
                 store: "unset".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn should_classify_anthropic_messages_as_json_pass_through() {
+        let classified = classify_request(
+            &Method::POST,
+            "/v1/messages",
+            &HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"claude-sonnet-4.5","stream":true,"max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}"#,
+            ),
+            1024,
+        )
+        .unwrap();
+
+        assert_eq!(
+            classified.route,
+            RouteKind::AnthropicMessages { stream: true }
+        );
+        assert_eq!(classified.request_shape, None);
+        let request = classified.route_request.unwrap();
+        assert_eq!(request.endpoint, Endpoint::AnthropicMessages);
+        assert_eq!(request.model, "claude-sonnet-4.5");
+        assert_eq!(request.service_tier, None);
+        assert_eq!(request.model_family, "claude-sonnet");
+        assert!(request.stream);
     }
 
     #[test]

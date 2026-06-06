@@ -38,7 +38,10 @@ pub fn model_list(accounts: &[EffectiveAccount]) -> ModelList {
 }
 
 fn supports_generation_model(config: &crate::config::AccountConfig) -> bool {
-    config.supports_chat_completions || config.supports_responses || config.supports_responses_ws
+    config.supports_chat_completions
+        || config.supports_responses
+        || config.supports_responses_ws
+        || config.supports_anthropic_messages
 }
 
 #[cfg(test)]

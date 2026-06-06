@@ -23,6 +23,8 @@ use crate::logging::LogFormat;
 #[derive(Debug, Clone, Default)]
 struct CapturedUpstreamRequest {
     authorization: Option<String>,
+    x_api_key: Option<String>,
+    anthropic_version: Option<String>,
     host: Option<String>,
     openai_organization: Option<String>,
     openai_project: Option<String>,
@@ -68,6 +70,14 @@ async fn fake_upstream(
                 .get("authorization")
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned),
+            x_api_key: headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            anthropic_version: headers
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
             host: headers
                 .get("host")
                 .and_then(|value| value.to_str().ok())
@@ -97,6 +107,7 @@ async fn fake_upstream(
 
     let app = Router::new()
         .route("/v1/chat/completions", post(handler))
+        .route("/v1/messages", post(handler))
         .route("/v1/responses", post(handler))
         .route("/v1/responses/compact", post(handler))
         .with_state((status, body, captured));
@@ -121,6 +132,14 @@ async fn fake_delayed_upstream(
         captured.lock().await.push(CapturedUpstreamRequest {
             authorization: headers
                 .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            x_api_key: headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            anthropic_version: headers
+                .get("anthropic-version")
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned),
             host: headers
@@ -165,6 +184,14 @@ async fn fake_sse_upstream(
         captured.lock().await.push(CapturedUpstreamRequest {
             authorization: headers
                 .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            x_api_key: headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+            anthropic_version: headers
+                .get("anthropic-version")
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned),
             host: headers
@@ -346,6 +373,26 @@ fn account(id: &str, base_url: String, bearer_token: &str, priority: i32) -> Eff
     }
 }
 
+fn anthropic_account(id: &str, base_url: String, api_key: &str, priority: i32) -> EffectiveAccount {
+    EffectiveAccount {
+        config: AccountConfig {
+            id: id.to_string(),
+            enabled: true,
+            kind: AccountKind::AnthropicApiKey,
+            base_url,
+            token_env: Some(format!("{id}_TOKEN")),
+            priority,
+            models: vec!["claude-sonnet-4.5".to_string()],
+            supports_anthropic_messages: true,
+            service_tiers: Vec::new(),
+            ..AccountConfig::default()
+        },
+        bearer_token: api_key.to_string(),
+        chatgpt_auth: None,
+        prompt_cache_key_seed: None,
+    }
+}
+
 #[test]
 fn should_keep_account_routing_table_in_arcswap_snapshot() {
     let state = AppState::new(effective_config(vec![account(
@@ -454,6 +501,17 @@ fn chat_proxy_request(body: &'static str) -> Request<Body> {
         .unwrap()
 }
 
+fn anthropic_messages_proxy_request(body: &'static str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("authorization", "Bearer client-key")
+        .header("host", "tokenproxy.local")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 #[tokio::test]
 #[ignore = "requires binding a local TCP listener for fake upstream"]
 async fn should_proxy_json_body_and_replace_upstream_auth_headers() {
@@ -528,6 +586,44 @@ async fn should_proxy_json_body_and_replace_upstream_auth_headers() {
     assert!(metrics.contains(&format!(
         r#"tokenproxy_upstream_connect_duration_ms_count{{origin="{upstream}",transport="http"}} 1"#
     )));
+}
+
+#[tokio::test]
+#[ignore = "requires binding a local TCP listener for fake upstream"]
+async fn should_proxy_anthropic_messages_body_and_replace_upstream_auth_headers() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let upstream = fake_upstream(StatusCode::OK, r#"{"id":"msg_ok"}"#, Arc::clone(&captured)).await;
+    let state = AppState::new(effective_config(vec![anthropic_account(
+        "primary",
+        format!("http://{upstream}"),
+        "upstream-token",
+        100,
+    )]))
+    .unwrap();
+
+    let response = app(state)
+        .oneshot(anthropic_messages_proxy_request(
+            r#"{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}"#,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let upstream_requests = captured.lock().await;
+    assert_eq!(upstream_requests.len(), 1);
+    assert_eq!(upstream_requests[0].authorization, None);
+    assert_eq!(
+        upstream_requests[0].x_api_key.as_deref(),
+        Some("upstream-token")
+    );
+    assert_eq!(
+        upstream_requests[0].anthropic_version.as_deref(),
+        Some("2023-06-01")
+    );
+    assert_eq!(
+        upstream_requests[0].body,
+        br#"{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}"#
+    );
 }
 
 #[tokio::test]
@@ -1331,6 +1427,21 @@ async fn should_require_auth_for_operator_routes_except_healthz() {
         authenticated_health_wrong_method.status(),
         StatusCode::METHOD_NOT_ALLOWED
     );
+
+    let x_api_key_authenticated_usage = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/usage")
+                .header("x-api-key", "client-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(x_api_key_authenticated_usage.status(), StatusCode::OK);
+
     let body = to_bytes(health_wrong_method.into_body(), 1024 * 1024)
         .await
         .unwrap();
@@ -2294,6 +2405,33 @@ fn should_keep_openai_api_key_upstream_paths_under_v1() {
         "https://api.openai.com/v1/responses/compact"
     );
     assert_eq!(websocket.as_str(), "wss://api.openai.com/v1/responses");
+    assert!(upstream_url_for_path(&openai, "/v1/messages").is_err());
+}
+
+#[test]
+fn should_keep_anthropic_api_key_upstream_messages_path_under_v1() {
+    let anthropic = anthropic_account(
+        "anthropic",
+        "https://api.anthropic.com".to_string(),
+        "upstream-token",
+        100,
+    );
+    let versioned_anthropic = anthropic_account(
+        "anthropic-versioned",
+        "https://api.anthropic.com/v1".to_string(),
+        "upstream-token",
+        100,
+    );
+
+    let messages = upstream_url_for_path(&anthropic, "/v1/messages").unwrap();
+    let versioned_messages = upstream_url_for_path(&versioned_anthropic, "/v1/messages").unwrap();
+
+    assert_eq!(messages.as_str(), "https://api.anthropic.com/v1/messages");
+    assert_eq!(
+        versioned_messages.as_str(),
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert!(upstream_url_for_path(&anthropic, "/v1/responses").is_err());
 }
 
 #[tokio::test]

@@ -156,6 +156,7 @@ pub struct AccountConfig {
     pub supports_responses_ws: bool,
     pub supports_incremental_previous_response_id: bool,
     pub supports_compact: bool,
+    pub supports_anthropic_messages: bool,
     pub service_tiers: Vec<String>,
     pub prompt_cache_key_seed_env: Option<String>,
 }
@@ -177,6 +178,7 @@ impl Default for AccountConfig {
             supports_responses_ws: false,
             supports_incremental_previous_response_id: true,
             supports_compact: false,
+            supports_anthropic_messages: false,
             service_tiers: vec!["auto".to_string(), "default".to_string()],
             prompt_cache_key_seed_env: None,
         }
@@ -188,6 +190,8 @@ pub enum AccountKind {
     #[serde(rename = "openai_api_key")]
     #[default]
     OpenAiApiKey,
+    #[serde(rename = "anthropic_api_key")]
+    AnthropicApiKey,
     #[serde(rename = "chatgpt_codex_auth_json")]
     ChatgptCodexAuthJson,
 }
@@ -363,7 +367,7 @@ pub fn load_effective_config(
 
     for account in config.accounts.iter().filter(|account| account.enabled) {
         let effective = match account.kind {
-            AccountKind::OpenAiApiKey => {
+            AccountKind::OpenAiApiKey | AccountKind::AnthropicApiKey => {
                 let token_env = account.token_env.as_deref().ok_or_else(|| {
                     TokenproxyError::invalid_config(format!(
                         "enabled account {} missing token_env",
@@ -540,10 +544,31 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
                 account.id
             )));
         }
+        if account.enabled
+            && account.supports_anthropic_messages
+            && !matches!(account.kind, AccountKind::AnthropicApiKey)
+        {
+            return Err(TokenproxyError::invalid_config(format!(
+                "account {} must use kind anthropic_api_key to support Anthropic messages",
+                account.id
+            )));
+        }
+        if account.enabled
+            && matches!(account.kind, AccountKind::AnthropicApiKey)
+            && (account.supports_chat_completions
+                || account.supports_responses
+                || account.supports_responses_ws
+                || account.supports_compact)
+        {
+            return Err(TokenproxyError::invalid_config(format!(
+                "anthropic_api_key account {} cannot support OpenAI routes",
+                account.id
+            )));
+        }
         if account.enabled && account_requires_model_allowlist(account) && account.models.is_empty()
         {
             return Err(TokenproxyError::invalid_config(format!(
-                "enabled account {} must set models for routed OpenAI-compatible endpoints",
+                "enabled account {} must set models for routed generation endpoints",
                 account.id
             )));
         }
@@ -558,10 +583,14 @@ fn account_supports_any_route(account: &AccountConfig) -> bool {
         || account.supports_responses
         || account.supports_responses_ws
         || account.supports_compact
+        || account.supports_anthropic_messages
 }
 
 fn account_requires_model_allowlist(account: &AccountConfig) -> bool {
-    account.supports_chat_completions || account.supports_responses || account.supports_responses_ws
+    account.supports_chat_completions
+        || account.supports_responses
+        || account.supports_responses_ws
+        || account.supports_anthropic_messages
 }
 
 fn validate_base_url(config: &Config, account: &AccountConfig) -> Result<(), TokenproxyError> {
@@ -653,6 +682,10 @@ mod tests {
         BTreeMap::from([
             ("TOKENPROXY_CLIENT_KEY".to_string(), "client".to_string()),
             ("OPENAI_API_KEY".to_string(), "upstream".to_string()),
+            (
+                "ANTHROPIC_API_KEY".to_string(),
+                "anthropic-upstream".to_string(),
+            ),
         ])
     }
 
@@ -666,6 +699,19 @@ mod tests {
             supports_responses: true,
             supports_responses_ws: true,
             supports_compact: true,
+            ..AccountConfig::default()
+        }
+    }
+
+    fn valid_anthropic_account() -> AccountConfig {
+        AccountConfig {
+            id: "anthropic-primary".to_string(),
+            kind: AccountKind::AnthropicApiKey,
+            token_env: Some("ANTHROPIC_API_KEY".to_string()),
+            base_url: "https://api.anthropic.com".to_string(),
+            models: vec!["claude-sonnet-4.5".to_string()],
+            supports_anthropic_messages: true,
+            service_tiers: Vec::new(),
             ..AccountConfig::default()
         }
     }
@@ -866,7 +912,7 @@ mod tests {
             config_with_account(account),
             &env(),
             &MemoryFiles(BTreeMap::new()),
-            "must set models for routed OpenAI-compatible endpoints",
+            "must set models for routed generation endpoints",
         );
     }
 
@@ -913,6 +959,78 @@ mod tests {
             &env(),
             &files,
             "chatgpt_codex_auth_json account chatgpt cannot support chat completions",
+        );
+    }
+
+    #[test]
+    fn should_reject_chatgpt_codex_account_with_anthropic_messages_capability() {
+        let auth_path = PathBuf::from("/tmp/tokenproxy-chatgpt-messages-auth.json");
+        let mut account = AccountConfig {
+            id: "chatgpt".to_string(),
+            kind: AccountKind::ChatgptCodexAuthJson,
+            auth_json_path: Some(auth_path.clone()),
+            base_url: "https://chatgpt.com".to_string(),
+            models: vec!["gpt-5.3-codex".to_string()],
+            supports_responses: true,
+            supports_responses_ws: true,
+            supports_anthropic_messages: true,
+            ..AccountConfig::default()
+        };
+        account.token_env = None;
+        let files = MemoryFiles(BTreeMap::from([(
+            auth_path,
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &files,
+            "account chatgpt must use kind anthropic_api_key to support Anthropic messages",
+        );
+    }
+
+    #[test]
+    fn should_load_anthropic_messages_account() {
+        let effective = load_effective_config(
+            config_with_account(valid_anthropic_account()),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+        )
+        .unwrap();
+
+        assert_eq!(effective.accounts.len(), 1);
+        assert_eq!(
+            effective.accounts[0].config.kind,
+            AccountKind::AnthropicApiKey
+        );
+        assert_eq!(effective.accounts[0].bearer_token, "anthropic-upstream");
+        assert!(effective.accounts[0].config.supports_anthropic_messages);
+    }
+
+    #[test]
+    fn should_reject_openai_account_with_anthropic_messages_capability() {
+        let mut account = valid_openai_account();
+        account.supports_anthropic_messages = true;
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "account openai-primary must use kind anthropic_api_key to support Anthropic messages",
+        );
+    }
+
+    #[test]
+    fn should_reject_anthropic_account_with_openai_route_capability() {
+        let mut account = valid_anthropic_account();
+        account.supports_responses = true;
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "anthropic_api_key account anthropic-primary cannot support OpenAI routes",
         );
     }
 
