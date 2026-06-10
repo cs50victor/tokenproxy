@@ -2,11 +2,7 @@
 
 <p align="center">Small, fast Rust proxy for OpenAI and Anthropic agent traffic.</p>
 
-Tokenproxy is a server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages with one endpoint and spreads the traffic across a pool of upstream accounts: OpenAI API keys, Anthropic API keys, and ChatGPT Codex `auth.json` credentials.
-
-## Why
-
-One agent endpoint backed by many accounts. When an account hits a usage limit, gets throttled, or fails auth, tokenproxy cools it down and routes around it, so Codex and other agent clients keep working. It ships as a single binary with WebSocket Responses support built in.
+Tokenproxy is a server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages with one endpoint and spreads the traffic across a pool of upstream accounts: OpenAI API keys, Anthropic API keys, and ChatGPT Codex `auth.json` credentials. When an account hits a usage limit, gets throttled, or fails auth, traffic shifts to the rest, so Codex and other agent clients keep working.
 
 ## Install and run
 
@@ -42,19 +38,6 @@ Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `ser
 ## Load balancing
 
 Each request first filters the account pool: disabled, auth-failed, usage-limited, cooling-down, and capability-mismatched accounts (endpoint, model, service tier, WebSocket) are excluded. The rest are ranked by continuation affinity (stay on the account that holds the `previous_response_id` state), health, configured priority, smoothed connect and first-event latency, and recent failure count. The best-ranked account gets the request, and failures feed back into health so traffic shifts automatically.
-
-## Releases
-
-| Version | Date | |
-|---|---|---|
-| [v0.1.1](https://github.com/cs50victor/tokenproxy/releases/tag/v0.1.1) | 2026-06-05 | Latest |
-| [v0.1.0](https://github.com/cs50victor/tokenproxy/releases/tag/v0.1.0) | 2026-06-05 | First release |
-
-Prebuilt for macOS (arm64, x86_64), Linux (gnu and musl, arm64 and x86_64), and Windows (x86_64, i686, arm64), each with a sha256 checksum.
-
-## Design
-
-The system design spec lives in [`very_detailed_tokenproxy_spec.html`](very_detailed_tokenproxy_spec.html). The repos checked out alongside the source (pingora, monoio, quiche, ripgrep, and others) are reference material studied during design.
 
 ## Credits
 
