@@ -2,7 +2,7 @@
 
 <p align="center">Small, fast Rust proxy for OpenAI and Anthropic agent traffic.</p>
 
-Tokenproxy serves OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages on one local port and spreads the traffic across a pool of upstream accounts: OpenAI API keys, Anthropic API keys, and ChatGPT Codex `auth.json` credentials.
+Tokenproxy is a server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages with one endpoint and spreads the traffic across a pool of upstream accounts: OpenAI API keys, Anthropic API keys, and ChatGPT Codex `auth.json` credentials.
 
 ## Why
 
@@ -37,7 +37,7 @@ Start it with inline config; no config file needed:
 }]'
 ```
 
-Listens on `127.0.0.1:8787`. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
+Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `server.bind` and `server.allow_non_loopback = true`. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
 
 ## Load balancing
 
