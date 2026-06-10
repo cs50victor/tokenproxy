@@ -842,344 +842,438 @@ async fn relay_single_websocket_create(
         &route_context.model_family,
         &request_shape,
     );
-    let route_request = websocket_route_request(replay_state, &route_context, &value);
+    let initial_route_request = websocket_route_request(replay_state, &route_context, &value);
+    let base_replay_state = replay_state.clone();
+    let max_attempts = usize::from(state.effective.config.retry.max_precommit_retries) + 1;
+    let mut attempted_ids = Vec::new();
+    let mut last_retryable_error = None;
 
-    let account = select_next_account(state, &route_request, &[]).await?;
-    let reused_upstream_previous_response = ensure_upstream_session(
-        state,
-        &account,
-        upstream_session,
-        &route_request.model_family,
-        request_id,
-    )
-    .await?;
-    let normalized = prepare_websocket_upstream_payload_with_hash_key(
-        replay_state,
-        &account,
-        &state.effective.account_hash_key,
-        value,
-        reused_upstream_previous_response,
-    )?;
-    if should_count_full_replay_items(replay_state, &normalized) {
-        state.metrics.add_replay_items_for_reason(
-            "websocket",
-            "full_replay",
-            replay_input_item_count(&normalized),
-        );
-    }
+    'attempts: loop {
+        let route_request = if attempted_ids.is_empty() {
+            initial_route_request.clone()
+        } else {
+            websocket_failover_route_request(&initial_route_request)
+        };
+        let account = match select_next_account(state, &route_request, &attempted_ids).await {
+            Ok(account) => account,
+            Err(error) => return Err(last_retryable_error.unwrap_or(error)),
+        };
+        attempted_ids.push(account.config.id.clone());
+        *replay_state = base_replay_state.clone();
 
-    replay_state.in_flight = true;
-
-    let mut upstream_closed = false;
-    let mut retried_previous_response_not_found = false;
-    let mut recorded_first_event = false;
-    let mut draining_shutdown = false;
-    let request_started = Instant::now();
-    let idle_timeout = Duration::from_millis(state.effective.config.timeouts.websocket_idle_ms);
-    let shutdown_grace = Duration::from_millis(state.effective.config.server.shutdown_grace_ms);
-    let mut shutdown_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(u64::MAX)));
-    // A reused upstream session can die while idle. Allow one redial with the
-    // same payload before surfacing the failure; if the fresh connection lacks
-    // previous-response state, the previous_response_not_found path recovers.
-    let mut reuse_retry_available = reused_upstream_previous_response;
-    let mut first_event_seen = false;
-    if let Err(error) = upstream_session
-        .as_mut()
-        .expect("ensure_upstream_session creates session")
-        .socket
-        .send(UpstreamMessage::Text(normalized.to_string().into()))
-        .await
-    {
-        if !reuse_retry_available {
-            return Err(upstream_send_error(error));
-        }
-        reuse_retry_available = false;
-        redial_and_resend(
+        let reused_upstream_previous_response = match ensure_upstream_session(
             state,
             &account,
             upstream_session,
-            &route_context.model_family,
+            &route_request.model_family,
             request_id,
-            &normalized,
         )
-        .await?;
-    }
+        .await
+        {
+            Ok(reused) => reused,
+            Err(error) if should_retry_precommit_error(&error) => {
+                if attempted_ids.len() < max_attempts {
+                    last_retryable_error = Some(error);
+                    close_idle_upstream_session(&state.metrics, upstream_session).await;
+                    continue 'attempts;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        let normalized = prepare_websocket_upstream_payload_with_hash_key(
+            replay_state,
+            &account,
+            &state.effective.account_hash_key,
+            value.clone(),
+            reused_upstream_previous_response,
+        )?;
+        if should_count_full_replay_items(replay_state, &normalized) {
+            state.metrics.add_replay_items_for_reason(
+                "websocket",
+                "full_replay",
+                replay_input_item_count(&normalized),
+            );
+        }
 
-    'relay: loop {
-        let upstream = &mut upstream_session
+        replay_state.in_flight = true;
+
+        let mut upstream_closed = false;
+        let mut retried_previous_response_not_found = false;
+        let mut recorded_first_event = false;
+        let mut draining_shutdown = false;
+        let request_started = Instant::now();
+        let idle_timeout = Duration::from_millis(state.effective.config.timeouts.websocket_idle_ms);
+        let shutdown_grace = Duration::from_millis(state.effective.config.server.shutdown_grace_ms);
+        let mut shutdown_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(u64::MAX)));
+        // A reused upstream session can die while idle. Allow one redial with the
+        // same payload before surfacing the failure; if the fresh connection lacks
+        // previous-response state, the previous_response_not_found path recovers.
+        let mut reuse_retry_available = reused_upstream_previous_response;
+        let mut first_event_seen = false;
+        if let Err(error) = upstream_session
             .as_mut()
             .expect("ensure_upstream_session creates session")
-            .socket;
-        loop {
-            tokio::select! {
-                message = upstream.next() => {
-                    let message = match message {
-                        Some(Ok(message)) => message,
-                        failure => {
-                            state
-                                .metrics
-                                .increment_websocket_event_outcome("upstream_close", false);
-                            if reuse_retry_available && !first_event_seen {
-                                break;
-                            }
-                            return Err(match failure {
-                                Some(Err(error)) => TokenproxyError::new(
-                                    StatusCode::BAD_GATEWAY,
-                                    ErrorCode::UpstreamFailure,
-                                    format!("upstream WebSocket read failed: {error}"),
-                                ),
-                                _ => upstream_closed_before_completed_error(),
-                            });
-                        }
-                    };
-                    if !matches!(message, UpstreamMessage::Close(_)) {
-                        first_event_seen = true;
-                    }
-                    match message {
-                        UpstreamMessage::Text(text) => {
-                            state
-                                .metrics
-                                .increment_websocket_event_outcome("upstream_text", true);
-                            // Parse each upstream frame once; the recorders below all
-                            // read from this shared Value.
-                            let event: Option<Value> = serde_json::from_str(&text).ok();
-                            if let Some(event) = event.as_ref() {
-                                record_upstream_websocket_response_event_metric(&state.metrics, event);
-                                record_websocket_actual_service_tier(replay_state, event);
-                                record_websocket_usage_metadata(
-                                    &state.metrics,
-                                    replay_state,
-                                    &route_context.model_family,
-                                    event,
-                                );
-                                record_account_websocket_event_health(state, &account, event);
-                                record_websocket_usage_limit_error_event(state, &account, event).await;
-                            }
-                            if !recorded_first_event {
-                                let first_event_duration_ms =
-                                    u64::try_from(request_started.elapsed().as_millis())
-                                        .unwrap_or(u64::MAX);
-                                state.metrics.record_first_event_duration_labeled(
-                                    "/v1/responses",
-                                    "websocket",
-                                    &route_context.model_family,
-                                    first_event_duration_ms,
-                                );
-                                record_account_first_event_duration(
-                                    state,
-                                    &account,
-                                    first_event_duration_ms,
-                                );
-                                recorded_first_event = true;
-                            }
-                            let previous_response_not_found = event
-                                .as_ref()
-                                .is_some_and(is_previous_response_not_found_event);
-                            if previous_response_not_found
-                                && let Some(retry_payload) = previous_response_not_found_retry_payload(
-                                    replay_state,
-                                    normalized.clone(),
-                                    retried_previous_response_not_found,
-                                )?
-                            {
-                                replay_state.invalidate_previous_response();
-                                retried_previous_response_not_found = true;
+            .socket
+            .send(UpstreamMessage::Text(normalized.to_string().into()))
+            .await
+        {
+            if !reuse_retry_available {
+                let error = upstream_send_error(error);
+                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                replay_state.in_flight = false;
+                if attempted_ids.len() < max_attempts {
+                    last_retryable_error = Some(error);
+                    close_idle_upstream_session(&state.metrics, upstream_session).await;
+                    continue 'attempts;
+                }
+                return Err(error);
+            }
+            reuse_retry_available = false;
+            if let Err(error) = redial_and_resend(
+                state,
+                &account,
+                upstream_session,
+                &route_context.model_family,
+                request_id,
+                &normalized,
+            )
+            .await
+            {
+                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                replay_state.in_flight = false;
+                if attempted_ids.len() < max_attempts {
+                    last_retryable_error = Some(error);
+                    close_idle_upstream_session(&state.metrics, upstream_session).await;
+                    continue 'attempts;
+                }
+                return Err(error);
+            }
+        }
+
+        'relay: loop {
+            let upstream = &mut upstream_session
+                .as_mut()
+                .expect("ensure_upstream_session creates session")
+                .socket;
+            loop {
+                tokio::select! {
+                    message = upstream.next() => {
+                        let message = match message {
+                            Some(Ok(message)) => message,
+                            failure => {
                                 state
                                     .metrics
-                                    .add_replay_items_for_reason(
-                                        "websocket",
-                                        "previous_response_not_found",
-                                        replay_input_item_count(&retry_payload),
+                                    .increment_websocket_event_outcome("upstream_close", false);
+                                if reuse_retry_available && !first_event_seen {
+                                    break;
+                                }
+                                let error = match failure {
+                                    Some(Err(error)) => TokenproxyError::new(
+                                        StatusCode::BAD_GATEWAY,
+                                        ErrorCode::UpstreamFailure,
+                                        format!("upstream WebSocket read failed: {error}"),
+                                    ),
+                                    _ => upstream_closed_before_completed_error(),
+                                };
+                                if !first_event_seen {
+                                    record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                                    replay_state.in_flight = false;
+                                    if attempted_ids.len() < max_attempts {
+                                        last_retryable_error = Some(error);
+                                        close_upstream_socket(&state.metrics, upstream).await;
+                                        continue 'attempts;
+                                    }
+                                }
+                                return Err(error);
+                            }
+                        };
+                        if !matches!(message, UpstreamMessage::Close(_)) {
+                            first_event_seen = true;
+                        }
+                        match message {
+                            UpstreamMessage::Text(text) => {
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome("upstream_text", true);
+                                // Parse each upstream frame once; the recorders below all
+                                // read from this shared Value.
+                                let event: Option<Value> = serde_json::from_str(&text).ok();
+                                if let Some(event) = event.as_ref() {
+                                    record_upstream_websocket_response_event_metric(&state.metrics, event);
+                                    record_websocket_actual_service_tier(replay_state, event);
+                                    record_websocket_usage_metadata(
+                                        &state.metrics,
+                                        replay_state,
+                                        &route_context.model_family,
+                                        event,
                                     );
+                                    record_account_websocket_event_health(state, &account, event);
+                                    record_websocket_usage_limit_error_event(state, &account, event).await;
+                                }
+                                if !recorded_first_event {
+                                    let first_event_duration_ms =
+                                        u64::try_from(request_started.elapsed().as_millis())
+                                            .unwrap_or(u64::MAX);
+                                    state.metrics.record_first_event_duration_labeled(
+                                        "/v1/responses",
+                                        "websocket",
+                                        &route_context.model_family,
+                                        first_event_duration_ms,
+                                    );
+                                    record_account_first_event_duration(
+                                        state,
+                                        &account,
+                                        first_event_duration_ms,
+                                    );
+                                    recorded_first_event = true;
+                                }
+                                let previous_response_not_found = event
+                                    .as_ref()
+                                    .is_some_and(is_previous_response_not_found_event);
+                                if previous_response_not_found
+                                    && let Some(retry_payload) = previous_response_not_found_retry_payload(
+                                        replay_state,
+                                        normalized.clone(),
+                                        retried_previous_response_not_found,
+                                    )?
+                                {
+                                    replay_state.invalidate_previous_response();
+                                    retried_previous_response_not_found = true;
+                                    state
+                                        .metrics
+                                        .add_replay_items_for_reason(
+                                            "websocket",
+                                            "previous_response_not_found",
+                                            replay_input_item_count(&retry_payload),
+                                        );
+                                    upstream
+                                        .send(UpstreamMessage::Text(retry_payload.to_string().into()))
+                                        .await
+                                        .map_err(|error| {
+                                            TokenproxyError::new(
+                                                StatusCode::BAD_GATEWAY,
+                                                ErrorCode::UpstreamFailure,
+                                                format!(
+                                                    "failed to send previous_response_not_found full replay: {error}"
+                                                ),
+                                            )
+                                    })?;
+                                    continue;
+                                }
+                                if previous_response_not_found {
+                                    replay_state.invalidate_previous_response();
+                                }
+                                if let Some(event) = event.as_ref() {
+                                    capture_completed_event(replay_state, event);
+                                }
+                                send_downstream_with_backpressure(
+                                    &state.metrics,
+                                    downstream.send(DownstreamMessage::Text(text.to_string().into())),
+                                    idle_timeout,
+                                )
+                                .await?;
+                                if !replay_state.in_flight {
+                                    break 'relay;
+                                }
+                            }
+                            UpstreamMessage::Binary(_) => {
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome("upstream_binary", false);
+                                return Err(TokenproxyError::new(
+                                    StatusCode::BAD_GATEWAY,
+                                    ErrorCode::WebSocketUnsupportedMessage,
+                                    "upstream sent unsupported binary WebSocket frame",
+                                ));
+                            }
+                            UpstreamMessage::Ping(bytes) => {
                                 upstream
-                                    .send(UpstreamMessage::Text(retry_payload.to_string().into()))
+                                    .send(UpstreamMessage::Pong(bytes))
                                     .await
                                     .map_err(|error| {
                                         TokenproxyError::new(
                                             StatusCode::BAD_GATEWAY,
                                             ErrorCode::UpstreamFailure,
-                                            format!(
-                                                "failed to send previous_response_not_found full replay: {error}"
-                                            ),
+                                            format!("failed to pong upstream WebSocket: {error}"),
                                         )
-                                })?;
-                                continue;
+                                    })?;
                             }
-                            if previous_response_not_found {
-                                replay_state.invalidate_previous_response();
+                            UpstreamMessage::Close(_) => {
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome("upstream_close", false);
+                                if reuse_retry_available && !first_event_seen {
+                                    break;
+                                }
+                                let error = upstream_closed_before_completed_error();
+                                if !first_event_seen {
+                                    record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                                    replay_state.in_flight = false;
+                                    if attempted_ids.len() < max_attempts {
+                                        last_retryable_error = Some(error);
+                                        close_upstream_socket(&state.metrics, upstream).await;
+                                        continue 'attempts;
+                                    }
+                                }
+                                return Err(error);
                             }
-                            if let Some(event) = event.as_ref() {
-                                capture_completed_event(replay_state, event);
-                            }
-                            send_downstream_with_backpressure(
-                                &state.metrics,
-                                downstream.send(DownstreamMessage::Text(text.to_string().into())),
-                                idle_timeout,
-                            )
-                            .await?;
-                            if !replay_state.in_flight {
-                                break 'relay;
-                            }
+                            _ => {}
                         }
-                        UpstreamMessage::Binary(_) => {
-                            state
-                                .metrics
-                                .increment_websocket_event_outcome("upstream_binary", false);
-                            return Err(TokenproxyError::new(
-                                StatusCode::BAD_GATEWAY,
-                                ErrorCode::WebSocketUnsupportedMessage,
-                                "upstream sent unsupported binary WebSocket frame",
-                            ));
-                        }
-                        UpstreamMessage::Ping(bytes) => {
-                            upstream
-                                .send(UpstreamMessage::Pong(bytes))
-                                .await
-                                .map_err(|error| {
-                                    TokenproxyError::new(
-                                        StatusCode::BAD_GATEWAY,
-                                        ErrorCode::UpstreamFailure,
-                                        format!("failed to pong upstream WebSocket: {error}"),
-                                    )
-                                })?;
-                        }
-                        UpstreamMessage::Close(_) => {
-                            state
-                                .metrics
-                                .increment_websocket_event_outcome("upstream_close", false);
-                            if reuse_retry_available && !first_event_seen {
-                                break;
-                            }
-                            return Err(upstream_closed_before_completed_error());
-                        }
-                        _ => {}
                     }
-                }
-                downstream_event = downstream_events.recv() => {
-                    let Some(downstream_event) = downstream_event else {
-                        state
-                            .metrics
-                            .increment_websocket_event_outcome("downstream_close", true);
-                        close_upstream_socket(&state.metrics, upstream).await;
-                        upstream_closed = true;
-                        break 'relay;
-                    };
-                    let Some(action) = classify_downstream_session_event(downstream_event, replay_state) else {
-                        state
-                            .metrics
-                            .increment_websocket_event_outcome("downstream_close", true);
-                        close_upstream_socket(&state.metrics, upstream).await;
-                        upstream_closed = true;
-                        break 'relay;
-                    };
-                    match action {
-                        Ok(WebSocketAction::Ping) => {
+                    downstream_event = downstream_events.recv() => {
+                        let Some(downstream_event) = downstream_event else {
                             state
                                 .metrics
-                                .increment_websocket_event_outcome("downstream_ping", true);
-                        }
-                        Ok(WebSocketAction::Ignore) => {}
-                        Ok(WebSocketAction::Close {
-                            code,
-                            reason,
-                            event_type,
-                            success,
-                        }) => {
-                            state
-                                .metrics
-                                .increment_websocket_event_outcome(event_type, success);
-                            let _ = send_downstream_with_backpressure(
-                                &state.metrics,
-                                downstream.send(DownstreamMessage::Close(Some(DownstreamCloseFrame {
-                                    code,
-                                    reason: reason.into(),
-                                }))),
-                                idle_timeout,
-                            )
-                            .await;
+                                .increment_websocket_event_outcome("downstream_close", true);
                             close_upstream_socket(&state.metrics, upstream).await;
                             upstream_closed = true;
                             break 'relay;
-                        }
-                        // While a response is in flight classify_downstream_message
-                        // rejects text frames with Err(WebSocketInFlight), so a Create
-                        // here is unreachable; both paths report the same error.
-                        other => {
-                            let error = match other {
-                                Err(error) => error,
-                                _ => TokenproxyError::new(
-                                    StatusCode::CONFLICT,
-                                    ErrorCode::WebSocketInFlight,
-                                    "one response is already in flight on this WebSocket",
-                                ),
-                            };
-                            let event_type = websocket_error_event_type(error.code);
+                        };
+                        let Some(action) = classify_downstream_session_event(downstream_event, replay_state) else {
                             state
                                 .metrics
-                                .increment_websocket_event_outcome(event_type, false);
-                            let _ = send_ws_error(
-                                &state.metrics,
-                                downstream,
-                                request_id,
-                                error.code.as_str(),
-                                &error.message,
-                                idle_timeout,
-                            )
-                            .await;
+                                .increment_websocket_event_outcome("downstream_close", true);
+                            close_upstream_socket(&state.metrics, upstream).await;
+                            upstream_closed = true;
+                            break 'relay;
+                        };
+                        match action {
+                            Ok(WebSocketAction::Ping) => {
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome("downstream_ping", true);
+                            }
+                            Ok(WebSocketAction::Ignore) => {}
+                            Ok(WebSocketAction::Close {
+                                code,
+                                reason,
+                                event_type,
+                                success,
+                            }) => {
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome(event_type, success);
+                                let _ = send_downstream_with_backpressure(
+                                    &state.metrics,
+                                    downstream.send(DownstreamMessage::Close(Some(DownstreamCloseFrame {
+                                        code,
+                                        reason: reason.into(),
+                                    }))),
+                                    idle_timeout,
+                                )
+                                .await;
+                                close_upstream_socket(&state.metrics, upstream).await;
+                                upstream_closed = true;
+                                break 'relay;
+                            }
+                            // While a response is in flight classify_downstream_message
+                            // rejects text frames with Err(WebSocketInFlight), so a Create
+                            // here is unreachable; both paths report the same error.
+                            other => {
+                                let error = match other {
+                                    Err(error) => error,
+                                    _ => TokenproxyError::new(
+                                        StatusCode::CONFLICT,
+                                        ErrorCode::WebSocketInFlight,
+                                        "one response is already in flight on this WebSocket",
+                                    ),
+                                };
+                                let event_type = websocket_error_event_type(error.code);
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome(event_type, false);
+                                let _ = send_ws_error(
+                                    &state.metrics,
+                                    downstream,
+                                    request_id,
+                                    error.code.as_str(),
+                                    &error.message,
+                                    idle_timeout,
+                                )
+                                .await;
+                            }
                         }
                     }
+                    _ = tokio::time::sleep(idle_timeout) => {
+                        let error = TokenproxyError::new(
+                            StatusCode::GATEWAY_TIMEOUT,
+                            ErrorCode::UpstreamFailure,
+                            "upstream WebSocket idle timeout",
+                        );
+                        if !first_event_seen {
+                            record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                            replay_state.in_flight = false;
+                            if attempted_ids.len() < max_attempts {
+                                last_retryable_error = Some(error);
+                                close_upstream_socket(&state.metrics, upstream).await;
+                                continue 'attempts;
+                            }
+                        }
+                        return Err(error);
+                    }
+                    _ = wait_for_session_shutdown(shutdown_rx), if !*shutdown_rx.borrow() && !draining_shutdown => {
+                        draining_shutdown = true;
+                        shutdown_deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + shutdown_grace);
+                        state
+                            .metrics
+                            .increment_websocket_event_outcome("shutdown_drain", true);
+                    }
+                    _ = wait_for_session_event_overflow(overflow_rx), if !*overflow_rx.borrow() => {
+                        close_upstream_socket(&state.metrics, upstream).await;
+                        replay_state.in_flight = false;
+                        return Err(websocket_session_event_overflow_error());
+                    }
+                    _ = &mut shutdown_deadline, if draining_shutdown => {
+                        let _ = close_downstream_for_shutdown(&state.metrics, downstream, idle_timeout).await;
+                        replay_state.in_flight = false;
+                        return Err(TokenproxyError::new(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            ErrorCode::UpstreamFailure,
+                            "server shutdown grace elapsed",
+                        ));
+                    }
                 }
-                _ = tokio::time::sleep(idle_timeout) => {
-                    return Err(TokenproxyError::new(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        ErrorCode::UpstreamFailure,
-                        "upstream WebSocket idle timeout",
-                    ));
+            }
+
+            // Only a recoverable reused-session failure breaks the inner loop.
+            reuse_retry_available = false;
+            if let Err(error) = redial_and_resend(
+                state,
+                &account,
+                upstream_session,
+                &route_context.model_family,
+                request_id,
+                &normalized,
+            )
+            .await
+            {
+                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                replay_state.in_flight = false;
+                if attempted_ids.len() < max_attempts {
+                    last_retryable_error = Some(error);
+                    close_idle_upstream_session(&state.metrics, upstream_session).await;
+                    continue 'attempts;
                 }
-                _ = wait_for_session_shutdown(shutdown_rx), if !*shutdown_rx.borrow() && !draining_shutdown => {
-                    draining_shutdown = true;
-                    shutdown_deadline
-                        .as_mut()
-                        .reset(tokio::time::Instant::now() + shutdown_grace);
-                    state
-                        .metrics
-                        .increment_websocket_event_outcome("shutdown_drain", true);
-                }
-                _ = wait_for_session_event_overflow(overflow_rx), if !*overflow_rx.borrow() => {
-                    close_upstream_socket(&state.metrics, upstream).await;
-                    replay_state.in_flight = false;
-                    return Err(websocket_session_event_overflow_error());
-                }
-                _ = &mut shutdown_deadline, if draining_shutdown => {
-                    let _ = close_downstream_for_shutdown(&state.metrics, downstream, idle_timeout).await;
-                    replay_state.in_flight = false;
-                    return Err(TokenproxyError::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        ErrorCode::UpstreamFailure,
-                        "server shutdown grace elapsed",
-                    ));
-                }
+                return Err(error);
             }
         }
 
-        // Only a recoverable reused-session failure breaks the inner loop.
-        reuse_retry_available = false;
-        redial_and_resend(
-            state,
-            &account,
-            upstream_session,
-            &route_context.model_family,
-            request_id,
-            &normalized,
-        )
-        .await?;
+        replay_state.in_flight = false;
+        if upstream_closed {
+            *upstream_session = None;
+        }
+        return Ok(());
     }
+}
 
-    replay_state.in_flight = false;
-    if upstream_closed {
-        *upstream_session = None;
-    }
-    Ok(())
+fn websocket_failover_route_request(route_request: &RouteRequest) -> RouteRequest {
+    let mut retry = route_request.clone();
+    retry.pinned_account_id = None;
+    retry.requires_incremental_previous_response_id = false;
+    retry
 }
 
 fn upstream_send_error(error: impl Display) -> TokenproxyError {

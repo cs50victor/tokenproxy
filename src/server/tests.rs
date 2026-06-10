@@ -2658,6 +2658,120 @@ async fn should_record_upstream_websocket_drop_during_in_flight_response() {
 }
 
 #[tokio::test]
+async fn should_fail_over_websocket_create_to_next_account_before_first_event() {
+    let first_messages = Arc::new(Mutex::new(Vec::new()));
+    let second_messages = Arc::new(Mutex::new(Vec::new()));
+    let first = fake_closing_websocket_upstream(Arc::clone(&first_messages)).await;
+    let second = fake_delayed_websocket_upstream(Arc::clone(&second_messages)).await;
+    let state = AppState::new(effective_config(vec![
+        account("first", format!("http://{first}/v1"), "first-token", 100),
+        account("second", format!("http://{second}/v1"), "second-token", 90),
+    ]))
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = listener.local_addr().unwrap();
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            axum::serve(listener, app(state)).await.unwrap();
+        }
+    });
+    let mut request = format!("ws://{proxy}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer client-key".parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let payload = serde_json::json!({
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": "first"
+    })
+    .to_string();
+
+    socket
+        .send(UpstreamMessage::Text(payload.into()))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_millis(500), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let UpstreamMessage::Text(text) = message else {
+        panic!("expected websocket response text frame");
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(value["type"], "response.completed");
+    assert_eq!(first_messages.lock().await.len(), 1);
+    assert_eq!(second_messages.lock().await.len(), 1);
+    assert!(matches!(
+        state.account_health_cell("first").unwrap().load(),
+        AccountHealth::Throttled { .. }
+    ));
+}
+
+#[tokio::test]
+async fn should_fail_over_websocket_connect_failure_to_next_account() {
+    let second_messages = Arc::new(Mutex::new(Vec::new()));
+    let second = fake_delayed_websocket_upstream(Arc::clone(&second_messages)).await;
+    let state = AppState::new(effective_config(vec![
+        account(
+            "first",
+            "http://127.0.0.1:1/v1".to_string(),
+            "first-token",
+            100,
+        ),
+        account("second", format!("http://{second}/v1"), "second-token", 90),
+    ]))
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = listener.local_addr().unwrap();
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            axum::serve(listener, app(state)).await.unwrap();
+        }
+    });
+    let mut request = format!("ws://{proxy}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", "Bearer client-key".parse().unwrap());
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let payload = serde_json::json!({
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": "first"
+    })
+    .to_string();
+
+    socket
+        .send(UpstreamMessage::Text(payload.into()))
+        .await
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_millis(500), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let UpstreamMessage::Text(text) = message else {
+        panic!("expected websocket response text frame");
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(value["type"], "response.completed");
+    assert_eq!(second_messages.lock().await.len(), 1);
+    assert!(matches!(
+        state.account_health_cell("first").unwrap().load(),
+        AccountHealth::Throttled { .. }
+    ));
+}
+
+#[tokio::test]
 async fn should_drain_in_flight_websocket_response_after_shutdown_signal() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_delayed_websocket_upstream(Arc::clone(&captured_messages)).await;
