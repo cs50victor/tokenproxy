@@ -10,13 +10,31 @@ One agent endpoint backed by many accounts. When an account hits a usage limit, 
 
 ## Install and run
 
-Grab a binary from [releases](https://github.com/cs50victor/tokenproxy/releases) and start it with inline config; no config file needed:
+Download a binary from [releases](https://github.com/cs50victor/tokenproxy/releases) (macOS arm64 shown; pick your platform):
 
 ```sh
 curl -sL https://github.com/cs50victor/tokenproxy/releases/download/v0.1.1/tokenproxy-v0.1.1-aarch64-apple-darwin.tar.gz | tar xz
-TOKENPROXY_CLIENT_KEY=secret OPENAI_API_KEY=sk-... \
-  ./tokenproxy-v0.1.1-aarch64-apple-darwin/tokenproxy \
-  -c 'accounts=[{id="a",kind="openai_api_key",token_env="OPENAI_API_KEY",models=["gpt-5.5"],supports_responses=true,supports_responses_ws=true}]'
+cd tokenproxy-v0.1.1-aarch64-apple-darwin
+```
+
+Set the token your clients will use, plus your upstream key:
+
+```sh
+export TOKENPROXY_CLIENT_KEY=secret
+export OPENAI_API_KEY=sk-...
+```
+
+Start it with inline config; no config file needed:
+
+```sh
+./tokenproxy -c 'accounts=[{
+  id = "a",
+  kind = "openai_api_key",
+  token_env = "OPENAI_API_KEY",
+  models = ["gpt-5.5"],
+  supports_responses = true,
+  supports_responses_ws = true
+}]'
 ```
 
 Listens on `127.0.0.1:8787`. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
