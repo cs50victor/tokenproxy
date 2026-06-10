@@ -5,58 +5,61 @@ use axum::http::StatusCode;
 
 use crate::error::{ErrorCode, TokenproxyError};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SseRepairEvent {
-    Passthrough(String),
-    RepairedCompleted(String),
-}
+// Bounds a stream that never produces a frame delimiter so one connection
+// cannot buffer unbounded memory; generous next to the 10 MiB default
+// server.max_body_bytes.
+const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub struct SseRepair {
     output_items: Vec<Value>,
-    pending: String,
+    pending: Vec<u8>,
 }
 
 impl SseRepair {
     pub fn observe_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Bytes>, TokenproxyError> {
-        let text = std::str::from_utf8(chunk).map_err(|error| {
-            TokenproxyError::new(
+        if self.pending.len() + chunk.len() > MAX_PENDING_BYTES {
+            return Err(TokenproxyError::new(
                 StatusCode::BAD_GATEWAY,
-                ErrorCode::InvalidJson,
-                format!("SSE chunk is not UTF-8: {error}"),
-            )
-        })?;
-        self.pending.push_str(text);
+                ErrorCode::UpstreamFailure,
+                "SSE stream exceeded frame buffer limit without a frame boundary",
+            ));
+        }
+        self.pending.extend_from_slice(chunk);
 
         let mut repaired = Vec::new();
-        while let Some(index) = self.pending.find("\n\n") {
-            let frame = self.pending[..index + 2].to_string();
-            self.pending.drain(..index + 2);
-            match self.observe_frame(&frame)? {
-                SseRepairEvent::Passthrough(frame) | SseRepairEvent::RepairedCompleted(frame) => {
-                    repaired.push(Bytes::from(frame));
-                }
-            }
+        while let Some(index) = find_frame_boundary(&self.pending) {
+            let frame_bytes: Vec<u8> = self.pending.drain(..index + 2).collect();
+            // Validate UTF-8 per complete frame: a multi-byte character split
+            // across transport chunks must not abort a healthy stream.
+            let frame = String::from_utf8(frame_bytes).map_err(|error| {
+                TokenproxyError::new(
+                    StatusCode::BAD_GATEWAY,
+                    ErrorCode::InvalidJson,
+                    format!("SSE frame is not UTF-8: {error}"),
+                )
+            })?;
+            repaired.push(Bytes::from(self.observe_frame(frame)?));
         }
 
         Ok(repaired)
     }
 
-    pub fn observe_frame(&mut self, frame: &str) -> Result<SseRepairEvent, TokenproxyError> {
-        let event_type = sse_event_type(frame);
+    fn observe_frame(&mut self, frame: String) -> Result<String, TokenproxyError> {
+        let event_type = sse_event_type(&frame);
         let Some(data) = frame
             .lines()
             .find_map(|line| line.strip_prefix("data:").map(str::trim))
         else {
-            return Ok(SseRepairEvent::Passthrough(frame.to_string()));
+            return Ok(frame);
         };
         if data == "[DONE]" {
-            return Ok(SseRepairEvent::Passthrough(frame.to_string()));
+            return Ok(frame);
         }
         if event_type.is_some_and(|event_type| {
             event_type != "response.output_item.done" && event_type != "response.completed"
         }) {
-            return Ok(SseRepairEvent::Passthrough(frame.to_string()));
+            return Ok(frame);
         }
 
         let mut value: Value = serde_json::from_str(data).map_err(|error| {
@@ -71,7 +74,7 @@ impl SseRepair {
             if let Some(item) = value.get("item").cloned() {
                 self.output_items.push(item);
             }
-            return Ok(SseRepairEvent::Passthrough(frame.to_string()));
+            return Ok(frame);
         }
 
         if value.get("type").and_then(Value::as_str) == Some("response.completed") {
@@ -95,13 +98,16 @@ impl SseRepair {
                         format!("failed to serialize repaired SSE JSON frame: {error}"),
                     )
                 })?;
-                let repaired = repair_data_line(frame, &repaired_json);
-                return Ok(SseRepairEvent::RepairedCompleted(repaired));
+                return Ok(repair_data_line(&frame, &repaired_json));
             }
         }
 
-        Ok(SseRepairEvent::Passthrough(frame.to_string()))
+        Ok(frame)
     }
+}
+
+fn find_frame_boundary(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(2).position(|window| window == b"\n\n")
 }
 
 fn sse_event_type(frame: &str) -> Option<&str> {
@@ -141,18 +147,17 @@ mod tests {
         repair
             .observe_frame(
                 r#"event: response.output_item.done
-data: {"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"ok"}}"#,
+data: {"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"ok"}}"#.to_string(),
             )
             .unwrap();
 
         let repaired = repair
-            .observe_frame(r#"data: {"type":"response.completed","response":{"id":"resp_1"}}"#)
+            .observe_frame(
+                r#"data: {"type":"response.completed","response":{"id":"resp_1"}}"#.to_string(),
+            )
             .unwrap();
 
-        let SseRepairEvent::RepairedCompleted(frame) = repaired else {
-            panic!("expected repaired frame");
-        };
-        assert!(frame.contains(r#""phase":"final""#));
+        assert!(repaired.contains(r#""phase":"final""#));
     }
 
     #[test]
@@ -162,7 +167,7 @@ data: {"type":"response.output_item.done","item":{"type":"message","phase":"fina
             .observe_frame(
                 r#"event: response.output_item.done
 id: item-1
-data: {"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"ok"}}"#,
+data: {"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"ok"}}"#.to_string(),
             )
             .unwrap();
 
@@ -171,16 +176,16 @@ data: {"type":"response.output_item.done","item":{"type":"message","phase":"fina
                 r#"event: response.completed
 id: completed-1
 retry: 1000
-data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
+data: {"type":"response.completed","response":{"id":"resp_1"}}"#
+                    .to_string(),
             )
             .unwrap();
 
-        let SseRepairEvent::RepairedCompleted(frame) = repaired else {
-            panic!("expected repaired frame");
-        };
-        assert!(frame.starts_with("event: response.completed\nid: completed-1\nretry: 1000\n"));
-        assert!(frame.contains(r#""output":[{"content":"ok","phase":"final","type":"message"}]"#));
-        assert!(frame.ends_with("\n\n"));
+        assert!(repaired.starts_with("event: response.completed\nid: completed-1\nretry: 1000\n"));
+        assert!(
+            repaired.contains(r#""output":[{"content":"ok","phase":"final","type":"message"}]"#)
+        );
+        assert!(repaired.ends_with("\n\n"));
     }
 
     #[test]
@@ -197,6 +202,38 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
                 .unwrap()
                 .contains("response.output_item.done")
         );
+    }
+
+    #[test]
+    fn should_accept_multibyte_utf8_split_across_chunk_boundary() {
+        let mut repair = SseRepair::default();
+        let frame = "data: {\"type\":\"response.custom\",\"text\":\"h\u{e9}llo\"}\n\n".as_bytes();
+        let split_at = frame.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+        let (first, second) = frame.split_at(split_at);
+
+        assert!(repair.observe_chunk(first).unwrap().is_empty());
+        let frames = repair.observe_chunk(second).unwrap();
+
+        assert_eq!(frames.len(), 1);
+        assert!(
+            std::str::from_utf8(&frames[0])
+                .unwrap()
+                .contains("h\u{e9}llo")
+        );
+    }
+
+    #[test]
+    fn should_fail_when_pending_buffer_exceeds_cap_without_frame_boundary() {
+        let mut repair = SseRepair::default();
+        let chunk = vec![b'a'; 1024 * 1024];
+        for _ in 0..16 {
+            repair.observe_chunk(&chunk).unwrap();
+        }
+
+        let error = repair.observe_chunk(&chunk).unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.code, ErrorCode::UpstreamFailure);
     }
 
     #[test]
@@ -227,7 +264,9 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
     fn should_reject_malformed_sse_json_frame_before_commit() {
         let mut repair = SseRepair::default();
 
-        let error = repair.observe_frame("data: {not-json}\n\n").unwrap_err();
+        let error = repair
+            .observe_frame("data: {not-json}\n\n".to_string())
+            .unwrap_err();
 
         assert_eq!(error.status, StatusCode::BAD_GATEWAY);
         assert_eq!(error.code, ErrorCode::InvalidJson);
@@ -239,9 +278,9 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
         let mut repair = SseRepair::default();
         let frame = "event: response.custom\nid: custom-1\ndata: {\"type\":\"response.custom\",\"x\":true}\n\n";
 
-        let event = repair.observe_frame(frame).unwrap();
+        let event = repair.observe_frame(frame.to_string()).unwrap();
 
-        assert_eq!(event, SseRepairEvent::Passthrough(frame.to_string()));
+        assert_eq!(event, frame);
     }
 
     #[test]
@@ -249,8 +288,8 @@ data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
         let mut repair = SseRepair::default();
         let frame = "event: response.custom\nid: custom-1\ndata: opaque-extension-payload\n\n";
 
-        let event = repair.observe_frame(frame).unwrap();
+        let event = repair.observe_frame(frame.to_string()).unwrap();
 
-        assert_eq!(event, SseRepairEvent::Passthrough(frame.to_string()));
+        assert_eq!(event, frame);
     }
 }

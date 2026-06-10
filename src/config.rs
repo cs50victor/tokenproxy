@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -6,7 +8,7 @@ use serde::Deserialize;
 use serde::de::Error as SerdeError;
 use toml::Value as TomlValue;
 
-use crate::auth::{ChatGptAuth, parse_chatgpt_auth_json};
+use crate::auth::parse_chatgpt_auth_json;
 use crate::error::TokenproxyError;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -208,7 +210,7 @@ pub struct EffectiveConfig {
 pub struct EffectiveAccount {
     pub config: AccountConfig,
     pub bearer_token: String,
-    pub chatgpt_auth: Option<ChatGptAuth>,
+    pub chatgpt_account_id: Option<String>,
     pub prompt_cache_key_seed: Option<String>,
 }
 
@@ -241,6 +243,7 @@ impl FileProvider for StdFileProvider {
     }
 }
 
+#[cfg(test)]
 pub fn parse_config(input: &str) -> Result<Config, TokenproxyError> {
     parse_config_value(input)?
         .try_into()
@@ -377,7 +380,7 @@ pub fn load_effective_config(
                 EffectiveAccount {
                     config: account.clone(),
                     bearer_token: env_value(env, token_env)?,
-                    chatgpt_auth: None,
+                    chatgpt_account_id: None,
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
                 }
             }
@@ -415,15 +418,11 @@ pub fn load_effective_config(
                     ))
                 })?;
                 let chatgpt_auth = parse_chatgpt_auth_json(&raw)?;
-                let bearer_token = chatgpt_auth
-                    .bearer_token()
-                    .expect("parse_chatgpt_auth_json ensures token")
-                    .to_string();
 
                 EffectiveAccount {
                     config: account.clone(),
-                    bearer_token,
-                    chatgpt_auth: Some(chatgpt_auth),
+                    bearer_token: chatgpt_auth.bearer_token,
+                    chatgpt_account_id: chatgpt_auth.account_id,
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
                 }
             }
@@ -637,6 +636,7 @@ fn env_value(env: &impl EnvProvider, key: &str) -> Result<String, TokenproxyErro
         })
 }
 
+#[cfg(test)]
 impl EnvProvider for BTreeMap<String, String> {
     fn get_env(&self, key: &str) -> Option<String> {
         self.get(key).cloned()

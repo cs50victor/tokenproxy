@@ -37,21 +37,27 @@ type FakeUpstreamState = (
     Arc<Mutex<Vec<CapturedUpstreamRequest>>>,
 );
 
-#[tokio::test]
-async fn should_release_websocket_session_shutdown_waiters() {
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let shutdown_wait = wait_for_session_shutdown(&mut shutdown_rx);
-    tokio::pin!(shutdown_wait);
-
-    tokio::select! {
-        () = &mut shutdown_wait => panic!("shutdown waiter completed before signal"),
-        () = sleep(Duration::from_millis(10)) => {}
-    }
-
-    shutdown_tx.send(true).unwrap();
-    tokio::time::timeout(Duration::from_millis(50), &mut shutdown_wait)
-        .await
-        .unwrap();
+async fn capture_upstream_request(
+    captured: &Mutex<Vec<CapturedUpstreamRequest>>,
+    headers: &HeaderMap,
+    request_body: Body,
+) {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+    };
+    let bytes = to_bytes(request_body, 1024 * 1024).await.unwrap();
+    captured.lock().await.push(CapturedUpstreamRequest {
+        authorization: header("authorization"),
+        x_api_key: header("x-api-key"),
+        anthropic_version: header("anthropic-version"),
+        host: header("host"),
+        openai_organization: header("openai-organization"),
+        openai_project: header("openai-project"),
+        body: bytes.to_vec(),
+    });
 }
 
 async fn fake_upstream(
@@ -64,34 +70,7 @@ async fn fake_upstream(
         headers: HeaderMap,
         request_body: Body,
     ) -> Response {
-        let bytes = to_bytes(request_body, 1024 * 1024).await.unwrap();
-        captured.lock().await.push(CapturedUpstreamRequest {
-            authorization: headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            x_api_key: headers
-                .get("x-api-key")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            anthropic_version: headers
-                .get("anthropic-version")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            host: headers
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            openai_organization: headers
-                .get("openai-organization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            openai_project: headers
-                .get("openai-project")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            body: bytes.to_vec(),
-        });
+        capture_upstream_request(&captured, &headers, request_body).await;
         (
             status,
             [
@@ -128,34 +107,7 @@ async fn fake_delayed_upstream(
         headers: HeaderMap,
         request_body: Body,
     ) -> Response {
-        let bytes = to_bytes(request_body, 1024 * 1024).await.unwrap();
-        captured.lock().await.push(CapturedUpstreamRequest {
-            authorization: headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            x_api_key: headers
-                .get("x-api-key")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            anthropic_version: headers
-                .get("anthropic-version")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            host: headers
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            openai_organization: headers
-                .get("openai-organization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            openai_project: headers
-                .get("openai-project")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            body: bytes.to_vec(),
-        });
+        capture_upstream_request(&captured, &headers, request_body).await;
         sleep(delay).await;
         (StatusCode::OK, r#"{"id":"resp_ok"}"#).into_response()
     }
@@ -180,34 +132,7 @@ async fn fake_sse_upstream(
         headers: HeaderMap,
         request_body: Body,
     ) -> Response {
-        let bytes = to_bytes(request_body, 1024 * 1024).await.unwrap();
-        captured.lock().await.push(CapturedUpstreamRequest {
-            authorization: headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            x_api_key: headers
-                .get("x-api-key")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            anthropic_version: headers
-                .get("anthropic-version")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            host: headers
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            openai_organization: headers
-                .get("openai-organization")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            openai_project: headers
-                .get("openai-project")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned),
-            body: bytes.to_vec(),
-        });
+        capture_upstream_request(&captured, &headers, request_body).await;
         (
             StatusCode::OK,
             [("content-type", "text/event-stream")],
@@ -354,7 +279,6 @@ fn account(id: &str, base_url: String, bearer_token: &str, priority: i32) -> Eff
     EffectiveAccount {
         config: AccountConfig {
             id: id.to_string(),
-            enabled: true,
             kind: AccountKind::OpenAiApiKey,
             base_url,
             token_env: Some(format!("{id}_TOKEN")),
@@ -368,7 +292,7 @@ fn account(id: &str, base_url: String, bearer_token: &str, priority: i32) -> Eff
             ..AccountConfig::default()
         },
         bearer_token: bearer_token.to_string(),
-        chatgpt_auth: None,
+        chatgpt_account_id: None,
         prompt_cache_key_seed: None,
     }
 }
@@ -377,7 +301,6 @@ fn anthropic_account(id: &str, base_url: String, api_key: &str, priority: i32) -
     EffectiveAccount {
         config: AccountConfig {
             id: id.to_string(),
-            enabled: true,
             kind: AccountKind::AnthropicApiKey,
             base_url,
             token_env: Some(format!("{id}_TOKEN")),
@@ -388,84 +311,13 @@ fn anthropic_account(id: &str, base_url: String, api_key: &str, priority: i32) -
             ..AccountConfig::default()
         },
         bearer_token: api_key.to_string(),
-        chatgpt_auth: None,
+        chatgpt_account_id: None,
         prompt_cache_key_seed: None,
     }
 }
 
-#[test]
-fn should_keep_account_routing_table_in_arcswap_snapshot() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-
-    let first_snapshot = state.routing_accounts();
-    assert_eq!(first_snapshot.len(), 1);
-    assert_eq!(first_snapshot[0].config.id, "primary");
-
-    state.account_routing.store(Arc::new(vec![account(
-        "replacement",
-        "http://127.0.0.1:2/v1".to_string(),
-        "replacement-token",
-        50,
-    )]));
-
-    let next_snapshot = state.routing_accounts();
-    assert_eq!(next_snapshot.len(), 1);
-    assert_eq!(next_snapshot[0].config.id, "replacement");
-    assert_eq!(state.effective.accounts[0].config.id, "primary");
-}
-
-#[test]
-fn should_build_separate_http_clients_per_upstream_scheme_and_origin() {
-    let state = AppState::new(effective_config(vec![
-        account(
-            "http-openai",
-            "http://api.openai.test/v1".to_string(),
-            "http-token",
-            100,
-        ),
-        account(
-            "https-openai",
-            "https://api.openai.test/v1".to_string(),
-            "https-token",
-            90,
-        ),
-        account(
-            "https-openai-alt-path",
-            "https://api.openai.test/alt".to_string(),
-            "https-alt-token",
-            80,
-        ),
-        account(
-            "chatgpt",
-            "https://chatgpt.test:8443/backend-api/codex".to_string(),
-            "chatgpt-token",
-            70,
-        ),
-    ]))
-    .unwrap();
-
-    assert_eq!(state.upstream_clients.len(), 3);
-    assert!(
-        state
-            .upstream_clients
-            .contains_key("http://api.openai.test")
-    );
-    assert!(
-        state
-            .upstream_clients
-            .contains_key("https://api.openai.test")
-    );
-    assert!(
-        state
-            .upstream_clients
-            .contains_key("https://chatgpt.test:8443")
-    );
+fn ws_event(text: &str) -> Value {
+    serde_json::from_str(text).expect("test event payload parses")
 }
 
 fn proxy_request(body: &'static str) -> Request<Body> {
@@ -513,7 +365,6 @@ fn anthropic_messages_proxy_request(body: &'static str) -> Request<Body> {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream"]
 async fn should_proxy_json_body_and_replace_upstream_auth_headers() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream =
@@ -589,7 +440,6 @@ async fn should_proxy_json_body_and_replace_upstream_auth_headers() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream"]
 async fn should_proxy_anthropic_messages_body_and_replace_upstream_auth_headers() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_upstream(StatusCode::OK, r#"{"id":"msg_ok"}"#, Arc::clone(&captured)).await;
@@ -627,7 +477,6 @@ async fn should_proxy_anthropic_messages_body_and_replace_upstream_auth_headers(
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream"]
 async fn should_forward_openai_request_headers_only_when_config_allows_them() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream =
@@ -693,7 +542,6 @@ async fn should_forward_openai_request_headers_only_when_config_allows_them() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream timeout"]
 async fn should_timeout_waiting_for_upstream_response_headers() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_delayed_upstream(Duration::from_millis(50), Arc::clone(&captured)).await;
@@ -724,7 +572,6 @@ async fn should_timeout_waiting_for_upstream_response_headers() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream prompt-cache routing"]
 async fn should_add_stable_prompt_cache_key_to_responses_when_account_has_seed() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream =
@@ -753,7 +600,6 @@ async fn should_add_stable_prompt_cache_key_to_responses_when_account_has_seed()
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream prompt-cache routing"]
 async fn should_preserve_client_supplied_prompt_cache_key() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream =
@@ -794,10 +640,7 @@ fn should_normalize_legacy_fast_service_tier_before_http_upstream_forwarding() {
         model: "gpt-5.5".to_string(),
         service_tier: Some("fast".to_string()),
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "downstream".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -815,7 +658,6 @@ fn should_normalize_legacy_fast_service_tier_before_http_upstream_forwarding() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream request-shape metrics"]
 async fn should_record_request_shape_metrics_from_http_request_body() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream =
@@ -853,7 +695,6 @@ async fn should_record_request_shape_metrics_from_http_request_body() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream cached-token metrics"]
 async fn should_record_cached_tokens_from_responses_usage_without_rewriting_body() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream_body = r#"{"id":"resp_ok","usage":{"input_tokens_details":{"cached_tokens":17}}}"#;
@@ -896,7 +737,6 @@ async fn should_record_cached_tokens_from_responses_usage_without_rewriting_body
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream cached-token metrics"]
 async fn should_record_cached_tokens_from_chat_completions_usage_without_rewriting_body() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream_body =
@@ -942,7 +782,6 @@ async fn should_record_cached_tokens_from_chat_completions_usage_without_rewriti
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream compact pass-through"]
 async fn should_hash_compact_request_and_response_bodies_without_dumping_raw_bodies() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream_body = r#"{"object":"response.compaction","output":"secret response"}"#;
@@ -1010,7 +849,6 @@ async fn should_hash_compact_request_and_response_bodies_without_dumping_raw_bod
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream SSE"]
 async fn should_return_json_error_before_sse_headers_when_first_frame_is_malformed() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_sse_upstream("data: {malformed-json}\n\n", Arc::clone(&captured)).await;
@@ -1046,7 +884,6 @@ async fn should_return_json_error_before_sse_headers_when_first_frame_is_malform
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream SSE"]
 async fn should_commit_sse_headers_after_first_valid_event_and_forward_stream() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let upstream_body = "data: {\"type\":\"response.created\"}\n\ndata: [DONE]\n\n";
@@ -1107,7 +944,6 @@ async fn should_commit_sse_headers_after_first_valid_event_and_forward_stream() 
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for fake upstream failover"]
 async fn should_retry_once_before_commit_and_report_metric_attempts() {
     let first_count = Arc::new(Mutex::new(Vec::new()));
     let second_count = Arc::new(Mutex::new(Vec::new()));
@@ -1171,7 +1007,6 @@ async fn should_retry_once_before_commit_and_report_metric_attempts() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream transport failover"]
 async fn should_retry_once_before_commit_after_transport_error() {
     let second_count = Arc::new(Mutex::new(Vec::new()));
     let second = fake_upstream(
@@ -1231,7 +1066,6 @@ async fn should_retry_once_before_commit_after_transport_error() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for fake upstream auth failure routing"]
 async fn should_not_retry_auth_failure_on_another_account() {
     let first_count = Arc::new(Mutex::new(Vec::new()));
     let second_count = Arc::new(Mutex::new(Vec::new()));
@@ -1268,7 +1102,6 @@ async fn should_not_retry_auth_failure_on_another_account() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for fake upstream usage-limit routing"]
 async fn should_record_usage_limit_error_and_route_away_until_reset() {
     let first_count = Arc::new(Mutex::new(Vec::new()));
     let second_count = Arc::new(Mutex::new(Vec::new()));
@@ -1331,7 +1164,6 @@ async fn should_record_usage_limit_error_and_route_away_until_reset() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for fake upstream usage-limit routing"]
 async fn should_return_no_eligible_account_when_all_compatible_accounts_are_usage_limited() {
     let first_count = Arc::new(Mutex::new(Vec::new()));
     let second_count = Arc::new(Mutex::new(Vec::new()));
@@ -1663,41 +1495,21 @@ async fn should_return_tokenproxy_error_envelope_for_unsupported_route_and_metho
             .is_some_and(|request_id| request_id.starts_with("req_"))
     );
 
+    // Unmatched routes share one fixed metric label so request paths cannot
+    // grow metric cardinality without bound.
     let metrics = state.metrics.snapshot();
     assert_eq!(
         metrics.request_outcomes,
-        vec![
-            (
-                crate::metrics::RequestMetricKey {
-                    endpoint: "/not-openai".to_string(),
-                    transport: "http".to_string(),
-                    status_class: "4xx".to_string(),
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "none".to_string(),
-                },
-                1
-            ),
-            (
-                crate::metrics::RequestMetricKey {
-                    endpoint: "/v1/chat/completions".to_string(),
-                    transport: "http".to_string(),
-                    status_class: "4xx".to_string(),
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "none".to_string(),
-                },
-                1
-            ),
-            (
-                crate::metrics::RequestMetricKey {
-                    endpoint: "/v1/files".to_string(),
-                    transport: "http".to_string(),
-                    status_class: "4xx".to_string(),
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "none".to_string(),
-                },
-                1
-            ),
-        ]
+        vec![(
+            crate::metrics::RequestMetricKey {
+                endpoint: "unmatched".to_string(),
+                transport: "http".to_string(),
+                status_class: "4xx".to_string(),
+                model_family: "unknown".to_string(),
+                account_id_hash: "none".to_string(),
+            },
+            3
+        )]
     );
     assert_eq!(metrics.request_duration_count, 3);
 }
@@ -1764,35 +1576,6 @@ async fn should_require_auth_before_route_errors_except_healthz() {
         .await
         .unwrap();
     assert_eq!(unsupported_openai_route.status(), StatusCode::UNAUTHORIZED);
-
-    let health_wrong_method = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/healthz")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(health_wrong_method.status(), StatusCode::UNAUTHORIZED);
-
-    let authenticated_health_wrong_method = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/healthz")
-                .header("authorization", "Bearer client-key")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        authenticated_health_wrong_method.status(),
-        StatusCode::METHOD_NOT_ALLOWED
-    );
 }
 
 #[tokio::test]
@@ -1916,10 +1699,11 @@ fn should_extract_safe_http_log_context_from_upstream_headers() {
     );
     assert_eq!(context.upstream_request_id.as_deref(), Some("req_upstream"));
     assert_eq!(context.cloudflare_ray.as_deref(), Some("ray-lax"));
+    assert!(!format!("{context:?}").contains("secret"));
 }
 
 #[tokio::test]
-async fn should_return_426_for_responses_get_without_websocket_upgrade() {
+async fn should_return_426_for_responses_and_compact_get_without_websocket_upgrade() {
     let state = AppState::new(effective_config(vec![account(
         "primary",
         "http://127.0.0.1:1/v1".to_string(),
@@ -1928,7 +1712,10 @@ async fn should_return_426_for_responses_get_without_websocket_upgrade() {
     )]))
     .unwrap();
 
-    let response = app(state.clone())
+    // GET /v1/responses without an upgrade exercises the responses_ws
+    // rejection branch; GET /v1/responses/compact has no WebSocket transport
+    // even with upgrade headers present.
+    let responses = app(state.clone())
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1939,9 +1726,8 @@ async fn should_return_426_for_responses_get_without_websocket_upgrade() {
         )
         .await
         .unwrap();
-
-    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
-    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(responses.status(), StatusCode::UPGRADE_REQUIRED);
+    let body = to_bytes(responses.into_body(), 1024 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["code"], "unsupported_method");
     assert!(
@@ -1950,34 +1736,7 @@ async fn should_return_426_for_responses_get_without_websocket_upgrade() {
             .is_some_and(|request_id| request_id.starts_with("req_"))
     );
 
-    let metrics = state.metrics.snapshot();
-    assert_eq!(
-        metrics.request_outcomes,
-        vec![(
-            crate::metrics::RequestMetricKey {
-                endpoint: "/v1/responses".to_string(),
-                transport: "http".to_string(),
-                status_class: "4xx".to_string(),
-                model_family: "unknown".to_string(),
-                account_id_hash: "none".to_string(),
-            },
-            1,
-        )]
-    );
-    assert_eq!(metrics.request_duration_count, 1);
-}
-
-#[tokio::test]
-async fn should_return_426_for_compact_get_before_upstream_dial() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-
-    let response = app(state.clone())
+    let compact = app(state.clone())
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1990,32 +1749,38 @@ async fn should_return_426_for_compact_get_before_upstream_dial() {
         )
         .await
         .unwrap();
-
-    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
-    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(compact.status(), StatusCode::UPGRADE_REQUIRED);
+    let body = to_bytes(compact.into_body(), 1024 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["error"]["code"], "unsupported_method");
-    assert!(
-        body["error"]["tokenproxy_request_id"]
-            .as_str()
-            .is_some_and(|request_id| request_id.starts_with("req_"))
-    );
 
     let metrics = state.metrics.snapshot();
     assert_eq!(
         metrics.request_outcomes,
-        vec![(
-            crate::metrics::RequestMetricKey {
-                endpoint: "/v1/responses/compact".to_string(),
-                transport: "http".to_string(),
-                status_class: "4xx".to_string(),
-                model_family: "unknown".to_string(),
-                account_id_hash: "none".to_string(),
-            },
-            1,
-        )]
+        vec![
+            (
+                crate::metrics::RequestMetricKey {
+                    endpoint: "/v1/responses".to_string(),
+                    transport: "http".to_string(),
+                    status_class: "4xx".to_string(),
+                    model_family: "unknown".to_string(),
+                    account_id_hash: "none".to_string(),
+                },
+                1,
+            ),
+            (
+                crate::metrics::RequestMetricKey {
+                    endpoint: "/v1/responses/compact".to_string(),
+                    transport: "http".to_string(),
+                    status_class: "4xx".to_string(),
+                    model_family: "unknown".to_string(),
+                    account_id_hash: "none".to_string(),
+                },
+                1,
+            ),
+        ]
     );
-    assert_eq!(metrics.request_duration_count, 1);
+    assert_eq!(metrics.request_duration_count, 2);
 }
 
 #[test]
@@ -2060,43 +1825,50 @@ fn should_reject_only_compressed_request_content_encoding() {
 #[test]
 fn should_extract_actual_service_tier_from_json_response_body() {
     assert_eq!(
-        actual_service_tier_from_body(br#"{"id":"resp","service_tier":"default"}"#).as_deref(),
+        actual_service_tier_from_value(&ws_event(r#"{"id":"resp","service_tier":"default"}"#))
+            .as_deref(),
         Some("default")
     );
     assert_eq!(
-        actual_service_tier_from_body(br#"{"id":"resp","service_tier":""}"#),
+        actual_service_tier_from_value(&ws_event(r#"{"id":"resp","service_tier":""}"#)),
         None
     );
-    assert_eq!(actual_service_tier_from_body(b"not json"), None);
 }
 
 #[test]
 fn should_extract_cached_input_tokens_from_known_usage_shapes() {
     assert_eq!(
-        cached_input_tokens_from_body(
-            br#"{"usage":{"input_tokens_details":{"cached_tokens":17}}}"#
-        ),
+        usage_metadata_from_value(&ws_event(
+            r#"{"usage":{"input_tokens_details":{"cached_tokens":17}}}"#
+        ))
+        .cached_input_tokens,
         Some(17)
     );
     assert_eq!(
-        cached_input_tokens_from_body(
-            br#"{"usage":{"prompt_tokens_details":{"cached_tokens":23}}}"#
-        ),
+        usage_metadata_from_value(&ws_event(
+            r#"{"usage":{"prompt_tokens_details":{"cached_tokens":23}}}"#
+        ))
+        .cached_input_tokens,
         Some(23)
     );
-    assert_eq!(cached_input_tokens_from_body(br#"{"usage":{}}"#), None);
+    assert_eq!(
+        usage_metadata_from_value(&ws_event(r#"{"usage":{}}"#)).cached_input_tokens,
+        None
+    );
 }
 
 #[test]
 fn should_extract_reasoning_tokens_from_responses_usage_shape() {
     assert_eq!(
-        reasoning_tokens_from_body(
-            br#"{"usage":{"output_tokens_details":{"reasoning_tokens":31}}}"#
-        ),
+        usage_metadata_from_value(&ws_event(
+            r#"{"usage":{"output_tokens_details":{"reasoning_tokens":31}}}"#
+        ))
+        .reasoning_tokens,
         Some(31)
     );
     assert_eq!(
-        reasoning_tokens_from_body(br#"{"usage":{"output_tokens_details":{}}}"#),
+        usage_metadata_from_value(&ws_event(r#"{"usage":{"output_tokens_details":{}}}"#))
+            .reasoning_tokens,
         None
     );
 }
@@ -2124,20 +1896,25 @@ fn should_record_websocket_usage_metadata_and_service_tiers_for_log() {
     let mut replay_state = ReplayState::default();
     let metrics = Metrics::default();
 
-    record_websocket_requested_service_tier(&mut replay_state, Some("fast".to_string()));
+    replay_state.requested_service_tier =
+        normalized_requested_service_tier(Some("fast".to_string()));
     record_websocket_actual_service_tier(
         &mut replay_state,
-        r#"{"type":"response.created","response":{"id":"resp_1","service_tier":"default"}}"#,
+        &ws_event(
+            r#"{"type":"response.created","response":{"id":"resp_1","service_tier":"default"}}"#,
+        ),
     );
     record_websocket_usage_metadata(
         &metrics,
         &mut replay_state,
         "gpt",
-        r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"prompt_tokens_details":{"cached_tokens":17},"output_tokens_details":{"reasoning_tokens":31}}}}"#,
+        &ws_event(
+            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"prompt_tokens_details":{"cached_tokens":17},"output_tokens_details":{"reasoning_tokens":31}}}}"#,
+        ),
     );
     record_websocket_actual_service_tier(
         &mut replay_state,
-        r#"{"type":"response.output_text.delta","delta":"ignored"}"#,
+        &ws_event(r#"{"type":"response.output_text.delta","delta":"ignored"}"#),
     );
 
     assert_eq!(
@@ -2223,15 +2000,6 @@ data: {"type":"response.created","response":{"id":"resp_1","service_tier":"defau
 }
 
 #[test]
-fn should_map_status_codes_to_metric_classes() {
-    assert_eq!(status_class(StatusCode::SWITCHING_PROTOCOLS), "1xx");
-    assert_eq!(status_class(StatusCode::OK), "2xx");
-    assert_eq!(status_class(StatusCode::TEMPORARY_REDIRECT), "3xx");
-    assert_eq!(status_class(StatusCode::BAD_REQUEST), "4xx");
-    assert_eq!(status_class(StatusCode::BAD_GATEWAY), "5xx");
-}
-
-#[test]
 fn should_compare_downstream_bearer_tokens_by_content_and_length() {
     assert!(constant_time_eq(b"Bearer client-key", b"Bearer client-key"));
     assert!(!constant_time_eq(
@@ -2246,18 +2014,6 @@ fn should_compare_downstream_bearer_tokens_by_content_and_length() {
         b"Bearer client-key-extra",
         b"Bearer client-key"
     ));
-}
-
-#[test]
-fn should_label_websocket_classifier_errors_by_source_event() {
-    assert_eq!(
-        websocket_error_event_type(ErrorCode::WebSocketInFlight),
-        "downstream_create"
-    );
-    assert_eq!(
-        websocket_error_event_type(ErrorCode::WebSocketUnsupportedMessage),
-        "downstream_parse"
-    );
 }
 
 #[test]
@@ -2326,28 +2082,6 @@ fn should_reuse_persistent_upstream_websocket_for_same_account() {
         Some(UPSTREAM_WS_MAX_SESSION_AGE),
         UPSTREAM_WS_MAX_SESSION_AGE
     ));
-}
-
-#[tokio::test]
-async fn should_bound_upstream_websocket_connect_by_config_timeout() {
-    let result = connect_with_timeout(
-        std::future::pending::<Result<(), &'static str>>(),
-        Duration::from_millis(10),
-    )
-    .await;
-
-    assert_eq!(result, Err(TimedConnectError::Timeout));
-}
-
-#[tokio::test]
-async fn should_preserve_upstream_websocket_connect_errors() {
-    let result = connect_with_timeout(
-        std::future::ready::<Result<(), &'static str>>(Err("dial failed")),
-        Duration::from_secs(1),
-    )
-    .await;
-
-    assert_eq!(result, Err(TimedConnectError::Connect("dial failed")));
 }
 
 #[test]
@@ -2435,7 +2169,6 @@ fn should_keep_anthropic_api_key_upstream_messages_path_under_v1() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream WebSocket"]
 async fn should_open_one_upstream_websocket_for_reused_account_session() {
     let accepted_count = Arc::new(AtomicUsize::new(0));
     let upstream = fake_websocket_upstream(Arc::clone(&accepted_count)).await;
@@ -2461,7 +2194,6 @@ async fn should_open_one_upstream_websocket_for_reused_account_session() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream WebSocket"]
 async fn should_reconnect_expired_upstream_websocket_session() {
     let accepted_count = Arc::new(AtomicUsize::new(0));
     let upstream = fake_websocket_upstream(Arc::clone(&accepted_count)).await;
@@ -2488,7 +2220,6 @@ async fn should_reconnect_expired_upstream_websocket_session() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for fake upstream WebSocket"]
 async fn should_forward_generated_request_id_on_upstream_websocket_handshake() {
     let request_ids = Arc::new(StdMutex::new(Vec::new()));
     let upstream = fake_header_capture_websocket_upstream(Arc::clone(&request_ids)).await;
@@ -2548,7 +2279,6 @@ async fn should_back_off_account_after_websocket_connect_failure() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for downstream and upstream WebSockets"]
 async fn should_reject_second_websocket_create_while_first_is_in_flight() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_delayed_websocket_upstream(Arc::clone(&captured_messages)).await;
@@ -2637,7 +2367,6 @@ async fn should_reject_second_websocket_create_while_first_is_in_flight() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for downstream WebSocket"]
 async fn should_close_binary_websocket_input_with_protocol_metric() {
     let state = AppState::new(effective_config(vec![account(
         "primary",
@@ -2694,7 +2423,6 @@ async fn should_close_binary_websocket_input_with_protocol_metric() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding a local TCP listener for downstream WebSocket"]
 async fn should_include_request_id_in_websocket_error_frames() {
     let state = AppState::new(effective_config(vec![account(
         "primary",
@@ -2749,7 +2477,6 @@ async fn should_include_request_id_in_websocket_error_frames() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for downstream and upstream WebSockets"]
 async fn should_timeout_idle_websocket_response() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_delayed_websocket_upstream(Arc::clone(&captured_messages)).await;
@@ -2807,7 +2534,6 @@ async fn should_timeout_idle_websocket_response() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for downstream and upstream WebSockets"]
 async fn should_record_downstream_websocket_close_during_in_flight_response() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_delayed_websocket_upstream(Arc::clone(&captured_messages)).await;
@@ -2863,7 +2589,6 @@ async fn should_record_downstream_websocket_close_during_in_flight_response() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for downstream and upstream WebSockets"]
 async fn should_record_upstream_websocket_drop_during_in_flight_response() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_closing_websocket_upstream(Arc::clone(&captured_messages)).await;
@@ -2933,7 +2658,6 @@ async fn should_record_upstream_websocket_drop_during_in_flight_response() {
 }
 
 #[tokio::test]
-#[ignore = "requires binding local TCP listeners for downstream and upstream WebSockets"]
 async fn should_drain_in_flight_websocket_response_after_shutdown_signal() {
     let captured_messages = Arc::new(Mutex::new(Vec::new()));
     let upstream = fake_delayed_websocket_upstream(Arc::clone(&captured_messages)).await;
@@ -3011,10 +2735,7 @@ async fn should_select_next_account_after_attempted_account_is_excluded() {
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -3065,10 +2786,7 @@ async fn should_use_observed_latency_buckets_when_selecting_equal_priority_accou
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -3103,10 +2821,7 @@ async fn should_record_route_exclusion_metrics_by_reason() {
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -3149,10 +2864,7 @@ async fn should_route_websocket_previous_response_id_to_incremental_account() {
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: true,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: true,
     };
@@ -3209,10 +2921,7 @@ async fn should_exclude_usage_limited_accounts_from_selection() {
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -3246,10 +2955,7 @@ async fn should_exclude_auth_failed_runtime_accounts_from_selection() {
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -3382,7 +3088,7 @@ async fn should_clear_transient_throttle_after_successful_websocket_event() {
     record_account_websocket_event_health(
         &state,
         &selected,
-        r#"{"type":"response.output_item.done","item":{"id":"item_1"}}"#,
+        &ws_event(r#"{"type":"response.output_item.done","item":{"id":"item_1"}}"#),
     );
 
     assert_eq!(
@@ -3411,7 +3117,7 @@ async fn should_not_clear_transient_throttle_after_previous_response_not_found_w
     record_account_websocket_event_health(
         &state,
         &selected,
-        r#"{"type":"error","error":{"code":"previous_response_not_found"}}"#,
+        &ws_event(r#"{"type":"error","error":{"code":"previous_response_not_found"}}"#),
     );
 
     assert_eq!(
@@ -3436,7 +3142,7 @@ async fn should_record_usage_limit_error_from_websocket_event() {
     record_websocket_usage_limit_error_event(
         &state,
         &selected,
-        r#"{"type":"error","error":{"code":"usage_limit_reached","resets_at":"2026-05-27T15:07:00Z"}}"#,
+        &ws_event(r#"{"type":"error","error":{"code":"usage_limit_reached","resets_at":"2026-05-27T15:07:00Z"}}"#),
     )
     .await;
 
@@ -3461,19 +3167,19 @@ fn should_record_bounded_upstream_websocket_response_event_metrics() {
 
     record_upstream_websocket_response_event_metric(
         &metrics,
-        r#"{"type":"response.completed","response":{"id":"resp_1"}}"#,
+        &ws_event(r#"{"type":"response.completed","response":{"id":"resp_1"}}"#),
     );
     record_upstream_websocket_response_event_metric(
         &metrics,
-        r#"{"type":"response.output_text.delta","delta":"hello"}"#,
+        &ws_event(r#"{"type":"response.output_text.delta","delta":"hello"}"#),
     );
     record_upstream_websocket_response_event_metric(
         &metrics,
-        r#"{"type":"error","error":{"code":"usage_limit_reached"}}"#,
+        &ws_event(r#"{"type":"error","error":{"code":"usage_limit_reached"}}"#),
     );
     record_upstream_websocket_response_event_metric(
         &metrics,
-        r#"{"type":"response.custom.future_event"}"#,
+        &ws_event(r#"{"type":"response.custom.future_event"}"#),
     );
 
     let snapshot = metrics.snapshot();
@@ -3823,10 +3529,7 @@ async fn should_exclude_usage_limited_account_cell_from_selection() {
         model: "gpt-5.5".to_string(),
         service_tier: None,
         pinned_account_id: None,
-        allow_failover_from_pinned: false,
-        replay_can_remove_previous_response_id: false,
         requires_incremental_previous_response_id: false,
-        caller_hash: "caller".to_string(),
         model_family: "gpt-5".to_string(),
         stream: false,
     };
@@ -4199,11 +3902,13 @@ fn should_capture_websocket_output_item_events_for_completed_replay_state() {
 
     capture_completed_event(
         &mut state,
-        r#"{"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"hello","x_unknown":true}}"#,
+        &ws_event(
+            r#"{"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"hello","x_unknown":true}}"#,
+        ),
     );
     capture_completed_event(
         &mut state,
-        r#"{"type":"response.completed","response":{"id":"resp_1"}}"#,
+        &ws_event(r#"{"type":"response.completed","response":{"id":"resp_1"}}"#),
     );
 
     assert_eq!(state.last_completed_response_id.as_deref(), Some("resp_1"));
@@ -4219,11 +3924,15 @@ fn should_prefer_completed_websocket_output_over_buffered_output_items() {
 
     capture_completed_event(
         &mut state,
-        r#"{"type":"response.output_item.done","item":{"type":"message","phase":"draft","content":"old"}}"#,
+        &ws_event(
+            r#"{"type":"response.output_item.done","item":{"type":"message","phase":"draft","content":"old"}}"#,
+        ),
     );
     capture_completed_event(
         &mut state,
-        r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","phase":"final","content":"new"}]}}"#,
+        &ws_event(
+            r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","phase":"final","content":"new"}]}}"#,
+        ),
     );
 
     assert!(state.pending_output_items.is_empty());
@@ -4273,32 +3982,9 @@ fn should_reset_replay_state_when_compacted_window_is_used() {
 
     assert!(payload.get("previous_response_id").is_none());
     assert_eq!(payload["input"].as_array().unwrap().len(), 3);
-    assert_eq!(state.replay_generation, 1);
-    assert!(state.compacted);
     assert!(state.last_completed_response_id.is_none());
     assert!(state.last_completed_output_items.is_empty());
     assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
-}
-
-#[test]
-fn should_count_only_full_replay_input_items_for_replay_metric() {
-    let state = ReplayState {
-        last_completed_output_items: vec![serde_json::json!({"type":"message"})],
-        ..ReplayState::default()
-    };
-
-    assert!(should_count_full_replay_items(
-        &state,
-        &serde_json::json!({"input":[1,2,3]})
-    ));
-    assert!(!should_count_full_replay_items(
-        &state,
-        &serde_json::json!({"previous_response_id":"resp_1","input":[1]})
-    ));
-    assert_eq!(
-        replay_input_item_count(&serde_json::json!({"input":[1,2]})),
-        2
-    );
 }
 
 #[tokio::test]

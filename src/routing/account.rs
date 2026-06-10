@@ -17,7 +17,6 @@ pub enum Transport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountConfig {
     pub id: String,
-    pub enabled: bool,
     pub priority: i32,
     pub models: Vec<String>,
     pub service_tiers: Vec<String>,
@@ -45,10 +44,7 @@ pub struct RouteRequest {
     pub model: String,
     pub service_tier: Option<String>,
     pub pinned_account_id: Option<String>,
-    pub allow_failover_from_pinned: bool,
-    pub replay_can_remove_previous_response_id: bool,
     pub requires_incremental_previous_response_id: bool,
-    pub caller_hash: String,
     pub model_family: String,
     pub stream: bool,
 }

@@ -5,7 +5,6 @@ use super::health::AccountHealth;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExclusionReason {
-    Disabled,
     AuthFailed,
     UsageLimited,
     ThrottledCooldown,
@@ -20,7 +19,6 @@ pub enum ExclusionReason {
 impl ExclusionReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            ExclusionReason::Disabled => "disabled",
             ExclusionReason::AuthFailed => "auth_failed",
             ExclusionReason::UsageLimited => "usage_limited",
             ExclusionReason::ThrottledCooldown => "throttled_cooldown",
@@ -37,13 +35,8 @@ impl ExclusionReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedAccount {
-    pub account_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
-    pub selected: Option<SelectedAccount>,
+    pub selected: Option<String>,
     pub excluded: Vec<(String, ExclusionReason)>,
 }
 
@@ -63,9 +56,9 @@ pub fn select_account(accounts: &[AccountState], request: &RouteRequest, now_ms:
     eligible.sort_by_key(|(score, _)| *score);
 
     Selection {
-        selected: eligible.first().map(|(_, account)| SelectedAccount {
-            account_id: account.config.id.clone(),
-        }),
+        selected: eligible
+            .first()
+            .map(|(_, account)| account.config.id.clone()),
         excluded,
     }
 }
@@ -76,7 +69,6 @@ pub fn account_static_compatible(account: &AccountState, request: &RouteRequest)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct AccountScore {
-    continuation_penalty: u8,
     health_penalty: u8,
     priority: Reverse<i32>,
     ewma_connect_ms_bucket: u16,
@@ -90,10 +82,6 @@ fn exclusion_reason(
     request: &RouteRequest,
     now_ms: u64,
 ) -> Option<ExclusionReason> {
-    if !account.config.enabled {
-        return Some(ExclusionReason::Disabled);
-    }
-
     match account.health {
         AccountHealth::Open | AccountHealth::Unknown => {}
         AccountHealth::Throttled { next_retry_at_ms } if now_ms >= next_retry_at_ms => {}
@@ -103,21 +91,10 @@ fn exclusion_reason(
         AccountHealth::AuthFailed => return Some(ExclusionReason::AuthFailed),
     }
 
-    static_exclusion_after_enabled(account, request)
+    static_exclusion_reason(account, request)
 }
 
 fn static_exclusion_reason(
-    account: &AccountState,
-    request: &RouteRequest,
-) -> Option<ExclusionReason> {
-    if !account.config.enabled {
-        return Some(ExclusionReason::Disabled);
-    }
-
-    static_exclusion_after_enabled(account, request)
-}
-
-fn static_exclusion_after_enabled(
     account: &AccountState,
     request: &RouteRequest,
 ) -> Option<ExclusionReason> {
@@ -144,13 +121,10 @@ fn static_exclusion_after_enabled(
         return Some(ExclusionReason::WebSocketContinuationUnsupported);
     }
 
-    if let Some(pinned_account_id) = &request.pinned_account_id {
-        let failover_allowed =
-            request.allow_failover_from_pinned && request.replay_can_remove_previous_response_id;
-
-        if account.config.id != *pinned_account_id && !failover_allowed {
-            return Some(ExclusionReason::PinnedContinuationMismatch);
-        }
+    if let Some(pinned_account_id) = &request.pinned_account_id
+        && account.config.id != *pinned_account_id
+    {
+        return Some(ExclusionReason::PinnedContinuationMismatch);
     }
 
     None
@@ -158,17 +132,12 @@ fn static_exclusion_after_enabled(
 
 fn score(account: &AccountState, request: &RouteRequest) -> AccountScore {
     AccountScore {
-        continuation_penalty: continuation_penalty(account, request),
         health_penalty: health_penalty(&account.health),
         priority: Reverse(account.config.priority),
         ewma_connect_ms_bucket: account.ewma_connect_ms_bucket,
         ewma_first_event_ms_bucket: account.ewma_first_event_ms_bucket,
         recent_failure_count: account.recent_failure_count,
-        stable_hash: stable_hash(&[
-            &account.config.id,
-            &request.caller_hash,
-            &request.model_family,
-        ]),
+        stable_hash: stable_hash(&[&account.config.id, &request.model_family]),
     }
 }
 
@@ -182,36 +151,29 @@ fn supports_endpoint(account: &AccountState, endpoint: Endpoint) -> bool {
 }
 
 fn supports_model(account: &AccountState, model: &str) -> bool {
-    model.trim().is_empty()
+    let model = model.trim();
+    model.is_empty()
         || account
             .config
             .models
             .iter()
-            .any(|candidate| normalize_model(candidate) == normalize_model(model))
+            .any(|candidate| candidate.trim().eq_ignore_ascii_case(model))
 }
 
 fn supports_service_tier(account: &AccountState, service_tier: Option<&str>) -> bool {
     let Some(service_tier) = service_tier else {
         return true;
     };
-    let normalized = normalize_service_tier(service_tier);
+    let requested = normalize_service_tier(service_tier);
 
-    normalized.is_empty()
-        || normalized == "auto"
-        || normalized == "default"
+    requested.is_empty()
+        || requested.eq_ignore_ascii_case("auto")
+        || requested.eq_ignore_ascii_case("default")
         || account
             .config
             .service_tiers
             .iter()
-            .any(|candidate| normalize_service_tier(candidate) == normalized)
-}
-
-fn continuation_penalty(account: &AccountState, request: &RouteRequest) -> u8 {
-    match &request.pinned_account_id {
-        Some(pinned_account_id) if *pinned_account_id == account.config.id => 0,
-        Some(_) => 10,
-        None => 0,
-    }
+            .any(|candidate| normalize_service_tier(candidate).eq_ignore_ascii_case(requested))
 }
 
 fn health_penalty(health: &AccountHealth) -> u8 {
@@ -223,14 +185,13 @@ fn health_penalty(health: &AccountHealth) -> u8 {
     }
 }
 
-fn normalize_model(model: &str) -> String {
-    model.trim().to_ascii_lowercase()
-}
-
-fn normalize_service_tier(service_tier: &str) -> String {
-    match service_tier.trim().to_ascii_lowercase().as_str() {
-        "fast" => "priority".to_string(),
-        normalized => normalized.to_string(),
+// Legacy "fast" requests map to the "priority" service tier.
+pub(crate) fn normalize_service_tier(service_tier: &str) -> &str {
+    let trimmed = service_tier.trim();
+    if trimmed.eq_ignore_ascii_case("fast") {
+        "priority"
+    } else {
+        trimmed
     }
 }
 
@@ -258,7 +219,6 @@ mod tests {
         AccountState {
             config: AccountConfig {
                 id: id.to_string(),
-                enabled: true,
                 priority: 10,
                 models: vec!["gpt-5.5".to_string()],
                 service_tiers: vec!["priority".to_string()],
@@ -283,10 +243,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             service_tier: None,
             pinned_account_id: None,
-            allow_failover_from_pinned: false,
-            replay_can_remove_previous_response_id: false,
             requires_incremental_previous_response_id: false,
-            caller_hash: "caller".to_string(),
             model_family: "gpt-5".to_string(),
             stream: false,
         }
@@ -300,7 +257,7 @@ mod tests {
 
         let selection = select_account(&[low, high], &request(), 1_000);
 
-        assert_eq!(selection.selected.unwrap().account_id, "high");
+        assert_eq!(selection.selected.unwrap(), "high");
     }
 
     #[test]
@@ -370,8 +327,7 @@ mod tests {
         assert_eq!(
             select_account(&[priority_only.clone()], &default_tier, 1_000)
                 .selected
-                .unwrap()
-                .account_id,
+                .unwrap(),
             "priority-only"
         );
 
@@ -381,8 +337,7 @@ mod tests {
         assert_eq!(
             select_account(&[priority_only.clone()], &auto_tier, 1_000)
                 .selected
-                .unwrap()
-                .account_id,
+                .unwrap(),
             "priority-only"
         );
 
@@ -392,8 +347,7 @@ mod tests {
         assert_eq!(
             select_account(&[priority_only], &omitted_tier, 1_000)
                 .selected
-                .unwrap()
-                .account_id,
+                .unwrap(),
             "priority-only"
         );
     }
@@ -432,7 +386,7 @@ mod tests {
 
         let selection = select_account(&[non_incremental, incremental], &req, 1_000);
 
-        assert_eq!(selection.selected.unwrap().account_id, "incremental");
+        assert_eq!(selection.selected.unwrap(), "incremental");
         assert_eq!(
             selection.excluded,
             vec![(
@@ -453,7 +407,7 @@ mod tests {
 
         let selection = select_account(&[other, pinned], &req, 1_000);
 
-        assert_eq!(selection.selected.unwrap().account_id, "pinned");
+        assert_eq!(selection.selected.unwrap(), "pinned");
         assert_eq!(
             selection.excluded,
             vec![(
@@ -472,7 +426,7 @@ mod tests {
 
         let selection = select_account(&[account("compact")], &compact, 1_000);
 
-        assert_eq!(selection.selected.unwrap().account_id, "compact");
+        assert_eq!(selection.selected.unwrap(), "compact");
         assert!(selection.excluded.is_empty());
     }
 

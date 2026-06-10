@@ -8,7 +8,10 @@ use crate::responses::state::ReplayState;
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebSocketAction {
     Create(Value),
-    Pong(Vec<u8>),
+    // Pings are auto-ponged by axum; surfaced only so the relay can count them.
+    Ping,
+    // Unsolicited Pongs are a legal heartbeat (RFC 6455 section 5.5.3); drop them.
+    Ignore,
     Close {
         code: u16,
         reason: String,
@@ -53,7 +56,8 @@ pub fn classify_downstream_message(
             }
             Ok(WebSocketAction::Create(value))
         }
-        Message::Ping(bytes) => Ok(WebSocketAction::Pong(bytes.to_vec())),
+        Message::Ping(_) => Ok(WebSocketAction::Ping),
+        Message::Pong(_) => Ok(WebSocketAction::Ignore),
         Message::Binary(_) => Ok(protocol_close(
             "downstream_binary",
             "binary frames are unsupported",
@@ -66,10 +70,6 @@ pub fn classify_downstream_message(
             event_type: "downstream_close",
             success: true,
         }),
-        _ => Ok(protocol_close(
-            "downstream_unsupported_frame",
-            "unsupported WebSocket frame",
-        )),
     }
 }
 
@@ -87,14 +87,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_classify_ping_as_pong() {
-        let action = classify_downstream_message(
+    fn should_not_treat_ping_or_pong_heartbeats_as_protocol_errors() {
+        let ping = classify_downstream_message(
             Message::Ping(vec![1, 2, 3].into()),
             &ReplayState::default(),
         )
         .unwrap();
+        let pong = classify_downstream_message(
+            Message::Pong(vec![1, 2, 3].into()),
+            &ReplayState::default(),
+        )
+        .unwrap();
 
-        assert_eq!(action, WebSocketAction::Pong(vec![1, 2, 3]));
+        assert_eq!(ping, WebSocketAction::Ping);
+        assert_eq!(pong, WebSocketAction::Ignore);
     }
 
     #[test]
