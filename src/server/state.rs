@@ -3,9 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use axum::http::StatusCode;
-use reqwest::Url;
 use tokio::sync::{Mutex, watch};
 
 use crate::config::{EffectiveAccount, EffectiveConfig};
@@ -17,13 +15,12 @@ use crate::metrics::Metrics;
 use crate::routing::AccountHealth;
 use crate::usage::UsageWindow;
 
-use super::url_origin;
-
 #[derive(Clone)]
 pub struct AppState {
     pub(super) effective: Arc<EffectiveConfig>,
-    pub(super) account_routing: Arc<ArcSwap<Vec<EffectiveAccount>>>,
-    pub(super) upstream_clients: Arc<BTreeMap<String, reqwest::Client>>,
+    // reqwest pools connections per origin internally, so one shared client
+    // covers every upstream.
+    pub(super) upstream_client: reqwest::Client,
     request_counter: Arc<AtomicU64>,
     pub(super) metrics: Metrics,
     pub(super) usage_windows: Arc<Mutex<BTreeMap<String, Vec<UsageWindow>>>>,
@@ -205,16 +202,10 @@ fn latency_bucket(duration_ms: u64) -> u16 {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn new(effective: EffectiveConfig) -> Result<Self, TokenproxyError> {
-        Self::new_with_log_format(effective, LogFormat::Text)
-    }
-
-    pub fn new_with_log_format(
-        effective: EffectiveConfig,
-        log_format: LogFormat,
-    ) -> Result<Self, TokenproxyError> {
         let (shutdown_tx, _) = watch::channel(false);
-        Self::new_with_log_format_and_shutdown(effective, log_format, shutdown_tx)
+        Self::new_with_log_format_and_shutdown(effective, LogFormat::Text, shutdown_tx)
     }
 
     pub fn new_with_log_format_and_shutdown(
@@ -222,15 +213,13 @@ impl AppState {
         log_format: LogFormat,
         shutdown_tx: watch::Sender<bool>,
     ) -> Result<Self, TokenproxyError> {
-        let upstream_clients = Arc::new(upstream_clients_by_origin(&effective)?);
-        let account_routing = Arc::new(ArcSwap::from_pointee(effective.accounts.clone()));
+        let upstream_client = build_upstream_http_client(&effective)?;
         let account_health = Arc::new(account_health_cells(&effective));
         let metrics_enabled = effective.config.observability.metrics;
 
         Ok(Self {
             effective: Arc::new(effective),
-            account_routing,
-            upstream_clients,
+            upstream_client,
             request_counter: Arc::new(AtomicU64::new(1)),
             metrics: Metrics::with_enabled(metrics_enabled),
             usage_windows: Arc::new(Mutex::new(BTreeMap::new())),
@@ -257,22 +246,8 @@ impl AppState {
         self.shutdown_tx.subscribe()
     }
 
-    pub(super) fn routing_accounts(&self) -> Arc<Vec<EffectiveAccount>> {
-        self.account_routing.load_full()
-    }
-
-    pub(super) fn upstream_client_for_url(
-        &self,
-        upstream_url: &Url,
-    ) -> Result<&reqwest::Client, TokenproxyError> {
-        let key = upstream_client_key(upstream_url);
-        self.upstream_clients.get(&key).ok_or_else(|| {
-            TokenproxyError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::InvalidConfig,
-                format!("missing upstream HTTP client for {key}"),
-            )
-        })
+    pub(super) fn routing_accounts(&self) -> &[EffectiveAccount] {
+        &self.effective.accounts
     }
 
     pub(super) fn account_health_cell(&self, account_id: &str) -> Option<Arc<AccountHealthCell>> {
@@ -314,39 +289,12 @@ impl AppState {
 }
 
 fn account_health_cells(effective: &EffectiveConfig) -> BTreeMap<String, Arc<AccountHealthCell>> {
-    let mut cells = BTreeMap::new();
-    for account in &effective.config.accounts {
-        cells.insert(account.id.clone(), Arc::new(AccountHealthCell::new()));
-    }
-    for account in &effective.accounts {
-        cells
-            .entry(account.config.id.clone())
-            .or_insert_with(|| Arc::new(AccountHealthCell::new()));
-    }
-    cells
-}
-
-fn upstream_clients_by_origin(
-    effective: &EffectiveConfig,
-) -> Result<BTreeMap<String, reqwest::Client>, TokenproxyError> {
-    let mut clients = BTreeMap::new();
-    for account in &effective.accounts {
-        let url = Url::parse(&account.config.base_url).map_err(|error| {
-            TokenproxyError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::InvalidConfig,
-                format!(
-                    "base_url for {} is invalid after config validation: {error}",
-                    account.config.id
-                ),
-            )
-        })?;
-        let key = upstream_client_key(&url);
-        if let std::collections::btree_map::Entry::Vacant(entry) = clients.entry(key) {
-            entry.insert(build_upstream_http_client(effective)?);
-        }
-    }
-    Ok(clients)
+    effective
+        .config
+        .accounts
+        .iter()
+        .map(|account| (account.id.clone(), Arc::new(AccountHealthCell::new())))
+        .collect()
 }
 
 fn build_upstream_http_client(
@@ -365,8 +313,4 @@ fn build_upstream_http_client(
                 format!("failed to build upstream HTTP client: {error}"),
             )
         })
-}
-
-fn upstream_client_key(url: &Url) -> String {
-    format!("{}://{}", url.scheme(), url_origin(url))
 }

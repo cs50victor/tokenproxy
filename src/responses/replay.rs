@@ -23,19 +23,16 @@ pub enum ReplayPlan {
     FullReplay(Value),
 }
 
-pub fn is_previous_response_not_found_event(text: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(text) else {
-        return false;
-    };
-    value.get("type").and_then(Value::as_str) == Some("error")
-        && value
+pub fn is_previous_response_not_found_event(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("error")
+        && event
             .pointer("/error/code")
             .and_then(Value::as_str)
             .is_some_and(|code| code == "previous_response_not_found")
 }
 
 pub fn previous_response_not_found_retry_payload(
-    state: &ReplayState,
+    state: &mut ReplayState,
     original_request: Value,
     already_retried: bool,
 ) -> Result<Option<Value>, TokenproxyError> {
@@ -46,7 +43,12 @@ pub fn previous_response_not_found_retry_payload(
         return Ok(None);
     }
     let normalized = normalize_websocket_create(original_request)?;
-    Ok(Some(build_full_replay(state, normalized)?))
+    let replay = build_full_replay(state, normalized)?;
+    // The rebuilt payload becomes the new template so later replays keep the
+    // whole conversation instead of only the turn that triggered the retry.
+    state.record_request_template(replay.clone());
+    state.last_completed_output_items.clear();
+    Ok(Some(replay))
 }
 
 pub fn normalize_websocket_create(mut value: Value) -> Result<Value, TokenproxyError> {
@@ -57,7 +59,9 @@ pub fn normalize_websocket_create(mut value: Value) -> Result<Value, TokenproxyE
             "WebSocket text frames must use type=response.create",
         ));
     }
-    remove_transport_only_fields(&mut value);
+    if let Some(object) = value.as_object_mut() {
+        remove_transport_only_fields_from_map(object);
+    }
     normalize_legacy_service_tier(&mut value);
     Ok(value)
 }
@@ -78,7 +82,7 @@ pub fn is_compacted_request_window(value: &Value) -> bool {
 }
 
 pub fn plan_next_request(
-    state: &ReplayState,
+    state: &mut ReplayState,
     new_request: Value,
     selected_account_id_hash: &str,
     connection_previous_response_available: bool,
@@ -89,9 +93,16 @@ pub fn plan_next_request(
     if state.supports_incremental_previous_response_id
         && same_account
         && connection_previous_response_available
-        && let Some(previous_response_id) = &state.last_completed_response_id
+        && let Some(previous_response_id) = state.last_completed_response_id.clone()
     {
-        normalized["previous_response_id"] = Value::String(previous_response_id.clone());
+        // Fold this turn into the stored template so a later full replay
+        // reconstructs the entire conversation, not only the latest turn.
+        if state.last_request_template.is_some() {
+            let folded = build_full_replay(state, normalized.clone())?;
+            state.record_request_template(folded);
+            state.last_completed_output_items.clear();
+        }
+        normalized["previous_response_id"] = Value::String(previous_response_id);
         return Ok(ReplayPlan::Incremental(normalized));
     }
 
@@ -100,10 +111,7 @@ pub fn plan_next_request(
     )?))
 }
 
-pub fn build_full_replay(
-    state: &ReplayState,
-    new_request: Value,
-) -> Result<Value, TokenproxyError> {
+fn build_full_replay(state: &ReplayState, new_request: Value) -> Result<Value, TokenproxyError> {
     let template = state.last_request_template.as_ref().ok_or_else(|| {
         TokenproxyError::new(
             axum::http::StatusCode::BAD_REQUEST,
@@ -160,12 +168,6 @@ fn normalize_legacy_service_tier(value: &mut Value) {
     }
 }
 
-fn remove_transport_only_fields(value: &mut Value) {
-    if let Some(object) = value.as_object_mut() {
-        remove_transport_only_fields_from_map(object);
-    }
-}
-
 fn remove_transport_only_fields_from_map(object: &mut Map<String, Value>) {
     for field in TRANSPORT_ONLY_FIELDS {
         object.remove(*field);
@@ -210,7 +212,7 @@ mod tests {
 
     #[test]
     fn should_build_incremental_fast_path_with_previous_response_id() {
-        let state = ReplayState {
+        let mut state = ReplayState {
             account_id_hash: Some("acct".to_string()),
             supports_incremental_previous_response_id: true,
             last_completed_response_id: Some("resp_1".to_string()),
@@ -218,7 +220,7 @@ mod tests {
         };
 
         let plan = plan_next_request(
-            &state,
+            &mut state,
             json!({"type":"response.create","stream":true,"input":[{"type":"message"}]}),
             "acct",
             true,
@@ -233,8 +235,69 @@ mod tests {
     }
 
     #[test]
+    fn should_preserve_full_history_after_consecutive_incremental_turns() {
+        let mut state = ReplayState {
+            account_id_hash: Some("acct".to_string()),
+            supports_incremental_previous_response_id: true,
+            last_request_template: Some(json!({
+                "type":"response.create",
+                "model":"gpt-5.5",
+                "input":[{"type":"message","role":"user","content":"turn-1"}]
+            })),
+            last_completed_response_id: Some("resp_1".to_string()),
+            last_completed_output_items: vec![json!({
+                "type":"message","phase":"final","content":"answer-1"
+            })],
+            ..ReplayState::default()
+        };
+
+        // Turn 2 rides previous_response_id; turn 1 must fold into the template.
+        let plan = plan_next_request(
+            &mut state,
+            json!({
+                "type":"response.create",
+                "input":[{"type":"message","role":"user","content":"turn-2"}]
+            }),
+            "acct",
+            true,
+        )
+        .unwrap();
+        assert!(matches!(plan, ReplayPlan::Incremental(_)));
+        state.record_completed(
+            "resp_2".to_string(),
+            vec![json!({"type":"message","phase":"final","content":"answer-2"})],
+        );
+
+        // Connection loss forces a full replay; every prior turn must reappear.
+        let plan = plan_next_request(
+            &mut state,
+            json!({
+                "type":"response.create",
+                "input":[{"type":"message","role":"user","content":"turn-3"}]
+            }),
+            "acct",
+            false,
+        )
+        .unwrap();
+
+        let ReplayPlan::FullReplay(value) = plan else {
+            panic!("expected full replay");
+        };
+        let contents: Vec<&str> = value["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["content"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            contents,
+            ["turn-1", "answer-1", "turn-2", "answer-2", "turn-3"]
+        );
+    }
+
+    #[test]
     fn should_full_replay_when_connection_previous_response_is_unavailable() {
-        let state = ReplayState {
+        let mut state = ReplayState {
             account_id_hash: Some("acct".to_string()),
             supports_incremental_previous_response_id: true,
             last_request_template: Some(json!({
@@ -252,7 +315,7 @@ mod tests {
         };
 
         let plan = plan_next_request(
-            &state,
+            &mut state,
             json!({
                 "type":"response.create",
                 "previous_response_id":"resp_1",
@@ -421,18 +484,19 @@ mod tests {
 
     #[test]
     fn should_detect_previous_response_not_found_error_event() {
-        assert!(is_previous_response_not_found_event(
-            r#"{"type":"error","error":{"code":"previous_response_not_found"}}"#
-        ));
-        assert!(!is_previous_response_not_found_event(
-            r#"{"type":"error","error":{"code":"rate_limit_exceeded"}}"#
-        ));
-        assert!(!is_previous_response_not_found_event("not-json"));
+        assert!(is_previous_response_not_found_event(&json!({
+            "type": "error",
+            "error": {"code": "previous_response_not_found"}
+        })));
+        assert!(!is_previous_response_not_found_event(&json!({
+            "type": "error",
+            "error": {"code": "rate_limit_exceeded"}
+        })));
     }
 
     #[test]
     fn should_build_single_full_replay_retry_for_previous_response_not_found() {
-        let state = ReplayState {
+        let mut state = ReplayState {
             last_request_template: Some(json!({
                 "type":"response.create",
                 "model":"gpt-5.5",
@@ -448,7 +512,7 @@ mod tests {
         };
 
         let retry = previous_response_not_found_retry_payload(
-            &state,
+            &mut state,
             json!({
                 "type":"response.create",
                 "previous_response_id":"stale",
@@ -464,7 +528,7 @@ mod tests {
         assert_eq!(retry["input"].as_array().unwrap().len(), 3);
         assert!(
             previous_response_not_found_retry_payload(
-                &state,
+                &mut state,
                 json!({"type":"response.create","input":[]}),
                 true
             )
@@ -475,7 +539,7 @@ mod tests {
 
     #[test]
     fn should_not_retry_previous_response_not_found_without_completed_response_id() {
-        let state = ReplayState {
+        let mut state = ReplayState {
             last_request_template: Some(json!({
                 "type":"response.create",
                 "model":"gpt-5.5",
@@ -491,7 +555,7 @@ mod tests {
 
         assert!(
             previous_response_not_found_retry_payload(
-                &state,
+                &mut state,
                 json!({
                     "type":"response.create",
                     "input":[{"type":"message","role":"user","content":"again"}]
@@ -505,7 +569,7 @@ mod tests {
 
     #[test]
     fn should_not_retry_previous_response_not_found_without_request_template() {
-        let state = ReplayState {
+        let mut state = ReplayState {
             last_completed_response_id: Some("resp_stale".to_string()),
             last_completed_output_items: vec![json!({
                 "type":"message",
@@ -517,7 +581,7 @@ mod tests {
 
         assert!(
             previous_response_not_found_retry_payload(
-                &state,
+                &mut state,
                 json!({
                     "type":"response.create",
                     "previous_response_id":"resp_stale",

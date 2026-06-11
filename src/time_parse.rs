@@ -88,23 +88,6 @@ pub fn now_unix_ms() -> u64 {
     timestamp_ms(Utc::now())
 }
 
-pub fn timestamp_pair_at(utc: DateTime<Utc>, local_offset: FixedOffset) -> (String, String) {
-    let local = format_rfc3339(utc.with_timezone(&local_offset))
-        .expect("local timestamp formats as RFC3339");
-    let utc = utc.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-    (local, utc)
-}
-
-pub fn rfc3339_utc_slug(value: &str) -> Option<String> {
-    let timestamp = parse_rfc3339(value)?;
-    Some(
-        timestamp
-            .to_utc()
-            .format("%Y-%m-%dT%H-%M-%S-%fZ")
-            .to_string(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,14 +186,5 @@ mod tests {
     fn should_reject_signed_retry_after_delta_seconds() {
         assert!(retry_after_deadline_ms("+12", 5_000).is_none());
         assert!(retry_after_deadline_ms("-12", 5_000).is_none());
-    }
-
-    #[test]
-    fn should_format_rfc3339_timestamp_slug_with_chrono() {
-        assert_eq!(
-            rfc3339_utc_slug("2026-05-27T05:00:00.123456789-07:00").as_deref(),
-            Some("2026-05-27T12-00-00-123456789Z")
-        );
-        assert!(rfc3339_utc_slug("not-a-timestamp").is_none());
     }
 }

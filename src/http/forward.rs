@@ -26,6 +26,7 @@ pub fn build_upstream_headers(
     inbound: &HeaderMap,
     upstream_host: &str,
     upstream_token: &str,
+    chatgpt_account_id: Option<&str>,
     tokenproxy_request_id: &str,
     auth: UpstreamAuth,
     allow_openai_headers: bool,
@@ -46,6 +47,14 @@ pub fn build_upstream_headers(
                 AUTHORIZATION,
                 sensitive_bearer_header_value(upstream_token, "authorization")?,
             );
+            // ChatGPT Codex auth pairs the OAuth access-token bearer with the
+            // workspace id header; see codex-rs model-provider BearerAuthProvider.
+            if let Some(account_id) = chatgpt_account_id {
+                output.insert(
+                    HeaderName::from_static("chatgpt-account-id"),
+                    header_value(account_id, "chatgpt account id")?,
+                );
+            }
         }
         UpstreamAuth::AnthropicApiKey => {
             let mut api_key = header_value(upstream_token, "x-api-key")?;
@@ -73,8 +82,9 @@ pub fn build_upstream_headers(
 pub fn filter_downstream_response_headers(upstream: &HeaderMap) -> HeaderMap {
     let mut output = HeaderMap::new();
     for (name, value) in upstream {
-        let lower = name.as_str().to_ascii_lowercase();
-        if lower == "set-cookie" || HOP_BY_HOP.contains(&lower.as_str()) {
+        // http::HeaderName is lowercase by construction.
+        let lower = name.as_str();
+        if lower == "set-cookie" || HOP_BY_HOP.contains(&lower) {
             continue;
         }
         if lower == "content-type"
@@ -94,15 +104,18 @@ pub fn filter_downstream_response_headers(upstream: &HeaderMap) -> HeaderMap {
 }
 
 fn should_strip_header(name: &HeaderName, allow_openai_headers: bool) -> bool {
-    let lower = name.as_str().to_ascii_lowercase();
+    let lower = name.as_str();
     lower == AUTHORIZATION.as_str()
         || lower == HOST.as_str()
         || lower == CONTENT_LENGTH.as_str()
-        || HOP_BY_HOP.contains(&lower.as_str())
+        || HOP_BY_HOP.contains(&lower)
         || lower == "x-api-key"
         || lower == "api-key"
+        // reqwest is built without decompression features and tokenproxy strips
+        // Content-Encoding from responses, so force identity upstream encoding.
+        || lower == "accept-encoding"
         || (lower.starts_with("openai-")
-            && !should_forward_openai_header(&lower, allow_openai_headers))
+            && !should_forward_openai_header(lower, allow_openai_headers))
 }
 
 fn should_forward_openai_header(lower: &str, allow_openai_headers: bool) -> bool {
@@ -146,6 +159,7 @@ mod tests {
             &inbound,
             "api.openai.com",
             "upstream",
+            Some("acct_123"),
             "req_1",
             UpstreamAuth::Bearer,
             false,
@@ -154,6 +168,7 @@ mod tests {
 
         assert_eq!(headers["authorization"], "Bearer upstream");
         assert!(headers["authorization"].is_sensitive());
+        assert_eq!(headers["chatgpt-account-id"], "acct_123");
         assert_eq!(headers["host"], "api.openai.com");
         assert_eq!(headers["x-tokenproxy-request-id"], "req_1");
         assert!(!headers.contains_key("connection"));
@@ -172,6 +187,7 @@ mod tests {
             &inbound,
             "api.openai.com",
             "upstream",
+            None,
             "req_1",
             UpstreamAuth::Bearer,
             true,
@@ -195,6 +211,7 @@ mod tests {
             &inbound,
             "api.anthropic.com",
             "upstream-anthropic",
+            None,
             "req_1",
             UpstreamAuth::AnthropicApiKey,
             false,
@@ -218,6 +235,7 @@ mod tests {
             &inbound,
             "api.anthropic.com",
             "upstream-anthropic",
+            None,
             "req_1",
             UpstreamAuth::AnthropicApiKey,
             false,

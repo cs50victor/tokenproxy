@@ -2,18 +2,15 @@ use std::collections::BTreeMap;
 
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
-use serde::Deserialize;
 use serde::Serialize;
 
-use crate::config::{AccountConfig, EffectiveAccount};
+use crate::config::AccountConfig;
 use crate::observability::sha256_hex;
 use crate::routing::AccountHealth;
-pub use crate::time_parse::now_unix_ms;
 use crate::time_parse::{
     normalize_rfc3339, rfc3339_after_duration, rfc3339_after_seconds, rfc3339_from_unix_ms,
     unix_ms_from_rfc3339,
 };
-pub use crate::timestamps::now_rfc3339;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct UsageSnapshot {
@@ -45,61 +42,7 @@ pub struct UsageWindow {
     pub limited: bool,
 }
 
-pub fn snapshot_from_accounts(
-    server_id: &str,
-    observed_at: &str,
-    accounts: &[EffectiveAccount],
-    usage_by_account: &BTreeMap<String, Vec<UsageWindow>>,
-) -> UsageSnapshot {
-    snapshot_from_accounts_with_health_and_key(
-        server_id,
-        observed_at,
-        accounts,
-        usage_by_account,
-        &BTreeMap::new(),
-        "",
-    )
-}
-
-pub fn snapshot_from_accounts_with_health(
-    server_id: &str,
-    observed_at: &str,
-    accounts: &[EffectiveAccount],
-    usage_by_account: &BTreeMap<String, Vec<UsageWindow>>,
-    health_by_account: &BTreeMap<String, AccountHealth>,
-) -> UsageSnapshot {
-    snapshot_from_accounts_with_health_and_key(
-        server_id,
-        observed_at,
-        accounts,
-        usage_by_account,
-        health_by_account,
-        "",
-    )
-}
-
-pub fn snapshot_from_accounts_with_health_and_key(
-    server_id: &str,
-    observed_at: &str,
-    accounts: &[EffectiveAccount],
-    usage_by_account: &BTreeMap<String, Vec<UsageWindow>>,
-    health_by_account: &BTreeMap<String, AccountHealth>,
-    account_hash_key: &str,
-) -> UsageSnapshot {
-    snapshot_from_account_configs_with_health_and_key(
-        server_id,
-        observed_at,
-        &accounts
-            .iter()
-            .map(|account| account.config.clone())
-            .collect::<Vec<_>>(),
-        usage_by_account,
-        health_by_account,
-        account_hash_key,
-    )
-}
-
-pub fn snapshot_from_account_configs_with_health_and_key(
+pub fn usage_snapshot(
     server_id: &str,
     observed_at: &str,
     accounts: &[AccountConfig],
@@ -155,20 +98,29 @@ pub fn usage_windows_from_usage_limit_error_body(
     body: &[u8],
     observed_at: &str,
 ) -> Vec<UsageWindow> {
-    let Ok(error) = serde_json::from_slice::<UsageLimitErrorEnvelope>(body) else {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return Vec::new();
     };
-    if error.error.code.as_deref() != Some("usage_limit_reached") {
+    usage_windows_from_usage_limit_error_value(&value, observed_at)
+}
+
+pub fn usage_windows_from_usage_limit_error_value(
+    value: &serde_json::Value,
+    observed_at: &str,
+) -> Vec<UsageWindow> {
+    use serde_json::Value;
+
+    if value.pointer("/error/code").and_then(Value::as_str) != Some("usage_limit_reached") {
         return Vec::new();
     }
-    let reset_seconds = error
-        .error
-        .resets_in_seconds
+    let reset_seconds = value
+        .pointer("/error/resets_in_seconds")
+        .and_then(Value::as_f64)
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
-    let reset_at = error
-        .error
-        .resets_at
-        .and_then(|value| normalize_rfc3339(&value))
+    let reset_at = value
+        .pointer("/error/resets_at")
+        .and_then(Value::as_str)
+        .and_then(normalize_rfc3339)
         .or_else(|| rfc3339_after_seconds(observed_at, reset_seconds?));
 
     vec![UsageWindow {
@@ -185,21 +137,40 @@ pub fn usage_windows_from_usage_limit_error_body(
     }]
 }
 
+// A usage_limit error without a parseable reset time would otherwise exclude the
+// account from routing until process restart; re-probe after a bounded cooldown.
+const USAGE_LIMIT_DEFAULT_COOLDOWN_MS: u64 = 300_000;
+
 pub fn usage_health_from_windows(windows: Option<&[UsageWindow]>) -> AccountHealth {
     let Some(windows) = windows else {
         return AccountHealth::Open;
     };
-    let reset_at_ms = windows
+    if !windows.iter().any(|window| window.limited) {
+        return AccountHealth::Open;
+    }
+    let reset_at_ms = earliest_limited_reset(windows)
+        .map(|(reset_ms, _)| reset_ms)
+        .or_else(|| {
+            windows
+                .iter()
+                .filter(|window| window.limited)
+                .filter_map(|window| unix_ms_from_rfc3339(&window.observed_at))
+                .min()
+                .map(|observed_ms| observed_ms.saturating_add(USAGE_LIMIT_DEFAULT_COOLDOWN_MS))
+        })
+        .unwrap_or(u64::MAX);
+    AccountHealth::UsageLimited { reset_at_ms }
+}
+
+fn earliest_limited_reset(windows: &[UsageWindow]) -> Option<(u64, &str)> {
+    windows
         .iter()
         .filter(|window| window.limited)
-        .filter_map(|window| window.reset_at.as_deref().and_then(unix_ms_from_rfc3339))
-        .min()
-        .unwrap_or(u64::MAX);
-    if windows.iter().any(|window| window.limited) {
-        AccountHealth::UsageLimited { reset_at_ms }
-    } else {
-        AccountHealth::Open
-    }
+        .filter_map(|window| {
+            let reset_at = window.reset_at.as_deref()?;
+            Some((unix_ms_from_rfc3339(reset_at)?, reset_at))
+        })
+        .min_by_key(|(reset_ms, _)| *reset_ms)
 }
 
 fn push_rate_window(
@@ -262,18 +233,9 @@ fn cooldown_until(
     windows: Option<&Vec<UsageWindow>>,
     runtime_health: Option<&AccountHealth>,
 ) -> Option<String> {
-    let usage_reset = windows.and_then(|windows| {
-        windows
-            .iter()
-            .filter(|window| window.limited)
-            .filter_map(|window| {
-                let reset_at = window.reset_at.as_ref()?;
-                let reset_ms = unix_ms_from_rfc3339(reset_at)?;
-                Some((reset_ms, reset_at))
-            })
-            .min_by_key(|(reset_ms, _)| *reset_ms)
-            .map(|(_, reset_at)| reset_at.clone())
-    });
+    let usage_reset = windows
+        .and_then(|windows| earliest_limited_reset(windows))
+        .map(|(_, reset_at)| reset_at.to_string());
     usage_reset.or_else(|| match runtime_health {
         Some(AccountHealth::Throttled { next_retry_at_ms }) => {
             rfc3339_from_unix_ms(*next_retry_at_ms)
@@ -298,19 +260,7 @@ fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-#[derive(Debug, Deserialize)]
-struct UsageLimitErrorEnvelope {
-    error: UsageLimitError,
-}
-
-#[derive(Debug, Deserialize)]
-struct UsageLimitError {
-    code: Option<String>,
-    resets_at: Option<String>,
-    resets_in_seconds: Option<f64>,
-}
-
-pub fn remaining_percent(limit: Option<u64>, remaining: Option<u64>) -> Option<f64> {
+fn remaining_percent(limit: Option<u64>, remaining: Option<u64>) -> Option<f64> {
     let (Some(limit), Some(remaining)) = (limit, remaining) else {
         return None;
     };
@@ -320,11 +270,7 @@ pub fn remaining_percent(limit: Option<u64>, remaining: Option<u64>) -> Option<f
     Some((remaining as f64 / limit as f64) * 100.0)
 }
 
-pub fn rate_limit_pressure(
-    limit: Option<u64>,
-    remaining: Option<u64>,
-    limited: bool,
-) -> &'static str {
+fn rate_limit_pressure(limit: Option<u64>, remaining: Option<u64>, limited: bool) -> &'static str {
     if limited || remaining == Some(0) {
         return "limited";
     }
@@ -342,10 +288,6 @@ pub fn rate_limit_pressure(
     }
 }
 
-pub fn stable_account_hash(account_id: &str) -> String {
-    account_id_hash(account_id, "")
-}
-
 pub fn account_id_hash(account_id: &str, hash_key: &str) -> String {
     let digest =
         sha256_hex(format!("tokenproxy-account-id-hash-v1\0{hash_key}\0{account_id}").as_bytes());
@@ -355,7 +297,8 @@ pub fn account_id_hash(account_id: &str, hash_key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AccountConfig, EffectiveAccount};
+    use crate::config::AccountConfig;
+    use crate::timestamps::now_rfc3339;
     use chrono::DateTime;
 
     #[test]
@@ -500,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn should_ignore_pre_epoch_limited_window_reset_time() {
+    fn should_apply_bounded_cooldown_when_limited_reset_time_is_unparseable() {
         let windows = vec![UsageWindow {
             window: "codex_usage_limit".to_string(),
             limit: None,
@@ -514,10 +457,11 @@ mod tests {
             limited: true,
         }];
 
+        let observed_ms = unix_ms_from_rfc3339("2026-05-27T11:24:18Z").unwrap();
         assert_eq!(
             usage_health_from_windows(Some(&windows)),
             AccountHealth::UsageLimited {
-                reset_at_ms: u64::MAX
+                reset_at_ms: observed_ms + USAGE_LIMIT_DEFAULT_COOLDOWN_MS
             }
         );
         assert_eq!(cooldown_until(Some(&windows), None), None);
@@ -525,14 +469,9 @@ mod tests {
 
     #[test]
     fn should_mark_usage_limited_accounts_in_snapshot() {
-        let account = EffectiveAccount {
-            config: AccountConfig {
-                id: "primary".to_string(),
-                ..AccountConfig::default()
-            },
-            bearer_token: "token".to_string(),
-            chatgpt_auth: None,
-            prompt_cache_key_seed: None,
+        let account = AccountConfig {
+            id: "primary".to_string(),
+            ..AccountConfig::default()
         };
         let reset_at = "2026-05-27T11:25:00Z".to_string();
         let usage_by_account = BTreeMap::from([(
@@ -551,11 +490,13 @@ mod tests {
             }],
         )]);
 
-        let snapshot = snapshot_from_accounts(
+        let snapshot = usage_snapshot(
             "tokenproxy-local",
             "2026-05-27T11:24:18Z",
             &[account],
             &usage_by_account,
+            &BTreeMap::new(),
+            "",
         );
 
         assert_eq!(snapshot.accounts[0].health, "usage_limited");
@@ -567,14 +508,9 @@ mod tests {
 
     #[test]
     fn should_use_earliest_limited_reset_for_usage_cooldown() {
-        let account = EffectiveAccount {
-            config: AccountConfig {
-                id: "primary".to_string(),
-                ..AccountConfig::default()
-            },
-            bearer_token: "token".to_string(),
-            chatgpt_auth: None,
-            prompt_cache_key_seed: None,
+        let account = AccountConfig {
+            id: "primary".to_string(),
+            ..AccountConfig::default()
         };
         let usage_by_account = BTreeMap::from([(
             "primary".to_string(),
@@ -606,11 +542,13 @@ mod tests {
             ],
         )]);
 
-        let snapshot = snapshot_from_accounts(
+        let snapshot = usage_snapshot(
             "tokenproxy-local",
             "2026-05-27T11:24:18Z",
             &[account],
             &usage_by_account,
+            &BTreeMap::new(),
+            "",
         );
 
         assert_eq!(snapshot.accounts[0].health, "usage_limited");
@@ -622,24 +560,20 @@ mod tests {
 
     #[test]
     fn should_include_runtime_account_health_when_usage_is_not_limited() {
-        let account = EffectiveAccount {
-            config: AccountConfig {
-                id: "primary".to_string(),
-                ..AccountConfig::default()
-            },
-            bearer_token: "token".to_string(),
-            chatgpt_auth: None,
-            prompt_cache_key_seed: None,
+        let account = AccountConfig {
+            id: "primary".to_string(),
+            ..AccountConfig::default()
         };
         let health_by_account =
             BTreeMap::from([("primary".to_string(), AccountHealth::AuthFailed)]);
 
-        let snapshot = snapshot_from_accounts_with_health(
+        let snapshot = usage_snapshot(
             "tokenproxy-local",
             "2026-05-27T11:24:18Z",
             &[account],
             &BTreeMap::new(),
             &health_by_account,
+            "",
         );
 
         assert_eq!(snapshot.accounts[0].health, "auth_failed");
@@ -647,14 +581,9 @@ mod tests {
 
     #[test]
     fn should_include_runtime_throttle_deadline_as_cooldown() {
-        let account = EffectiveAccount {
-            config: AccountConfig {
-                id: "primary".to_string(),
-                ..AccountConfig::default()
-            },
-            bearer_token: "token".to_string(),
-            chatgpt_auth: None,
-            prompt_cache_key_seed: None,
+        let account = AccountConfig {
+            id: "primary".to_string(),
+            ..AccountConfig::default()
         };
         let retry_at = DateTime::parse_from_rfc3339("2026-05-27T11:25:18Z")
             .unwrap()
@@ -666,12 +595,13 @@ mod tests {
             },
         )]);
 
-        let snapshot = snapshot_from_accounts_with_health(
+        let snapshot = usage_snapshot(
             "tokenproxy-local",
             "2026-05-27T11:24:18Z",
             &[account],
             &BTreeMap::new(),
             &health_by_account,
+            "",
         );
 
         assert_eq!(snapshot.accounts[0].health, "throttled");
@@ -690,7 +620,7 @@ mod tests {
         };
         disabled.enabled = false;
 
-        let snapshot = snapshot_from_account_configs_with_health_and_key(
+        let snapshot = usage_snapshot(
             "tokenproxy-local",
             "2026-05-27T11:24:18Z",
             &[

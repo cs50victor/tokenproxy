@@ -9,8 +9,6 @@ pub struct ReplayState {
     pub last_completed_response_id: Option<String>,
     pub last_completed_output_items: Vec<Value>,
     pub pending_output_items: Vec<Value>,
-    pub replay_generation: u64,
-    pub compacted: bool,
     pub in_flight: bool,
     pub requested_service_tier: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -42,8 +40,6 @@ impl ReplayState {
     }
 
     pub fn reset_after_compaction(&mut self, compacted_request: Value) {
-        self.replay_generation += 1;
-        self.compacted = true;
         self.last_completed_response_id = None;
         self.last_completed_output_items.clear();
         self.pending_output_items.clear();
@@ -91,8 +87,6 @@ mod tests {
             "input": [{"type": "compaction", "encrypted_content": "gAAAAABpM0Yj"}]
         }));
 
-        assert!(state.compacted);
-        assert_eq!(state.replay_generation, 1);
         assert!(state.last_completed_response_id.is_none());
         assert!(state.last_completed_output_items.is_empty());
         assert!(state.pending_output_items.is_empty());

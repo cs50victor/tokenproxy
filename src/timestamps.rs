@@ -2,9 +2,10 @@ use chrono::DateTime;
 use chrono::FixedOffset;
 use chrono::Local;
 use chrono::Offset;
+use chrono::SecondsFormat;
 use chrono::Utc;
 
-use crate::time_parse;
+use crate::time_parse::format_rfc3339;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimestampPair {
@@ -23,7 +24,9 @@ pub fn now_rfc3339() -> String {
 }
 
 pub fn timestamp_pair_at(utc: DateTime<Utc>, local_offset: FixedOffset) -> TimestampPair {
-    let (local, utc) = time_parse::timestamp_pair_at(utc, local_offset);
+    let local = format_rfc3339(utc.with_timezone(&local_offset))
+        .expect("local timestamp formats as RFC3339");
+    let utc = utc.to_rfc3339_opts(SecondsFormat::AutoSi, true);
     TimestampPair { local, utc }
 }
 

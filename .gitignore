@@ -12,3 +12,4 @@
 /s2n-quic/
 /quiche/
 /ripgrep/
+rustc-*.txt

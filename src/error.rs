@@ -79,19 +79,6 @@ struct ErrorBody<'a> {
     param: Option<&'a str>,
 }
 
-impl TokenproxyError {
-    pub fn envelope(&self) -> serde_json::Value {
-        serde_json::json!({
-            "error": {
-                "message": self.message,
-                "type": "tokenproxy_error",
-                "code": self.code.as_str(),
-                "param": null
-            }
-        })
-    }
-}
-
 impl IntoResponse for TokenproxyError {
     fn into_response(self) -> Response {
         let body = ErrorEnvelope {

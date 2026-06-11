@@ -25,18 +25,6 @@ pub struct Metrics {
     replay_items_total: Arc<AtomicU64>,
     replay_item_outcomes: Arc<Mutex<BTreeMap<ReplayItemMetricKey, u64>>>,
     cached_input_tokens: Arc<Mutex<BTreeMap<CachedInputTokensMetricKey, u64>>>,
-    request_duration_buckets: Arc<Vec<AtomicU64>>,
-    request_duration_count: Arc<AtomicU64>,
-    request_duration_sum_ms: Arc<AtomicU64>,
-    upstream_connect_duration_buckets: Arc<Vec<AtomicU64>>,
-    upstream_connect_duration_count: Arc<AtomicU64>,
-    upstream_connect_duration_sum_ms: Arc<AtomicU64>,
-    ws_connect_duration_buckets: Arc<Vec<AtomicU64>>,
-    ws_connect_duration_count: Arc<AtomicU64>,
-    ws_connect_duration_sum_ms: Arc<AtomicU64>,
-    first_event_duration_buckets: Arc<Vec<AtomicU64>>,
-    first_event_duration_count: Arc<AtomicU64>,
-    first_event_duration_sum_ms: Arc<AtomicU64>,
     request_duration_labels: Arc<Mutex<BTreeMap<RequestDurationMetricKey, HistogramCounts>>>,
     upstream_connect_duration_labels:
         Arc<Mutex<BTreeMap<UpstreamConnectDurationMetricKey, HistogramCounts>>>,
@@ -45,10 +33,6 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new() -> Self {
-        Self::with_enabled(true)
-    }
-
     pub fn with_enabled(enabled: bool) -> Self {
         Self {
             enabled: Arc::new(AtomicBool::new(enabled)),
@@ -66,38 +50,6 @@ impl Metrics {
             replay_items_total: Arc::new(AtomicU64::new(0)),
             replay_item_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
             cached_input_tokens: Arc::new(Mutex::new(BTreeMap::new())),
-            request_duration_buckets: Arc::new(
-                REQUEST_DURATION_BUCKETS_MS
-                    .iter()
-                    .map(|_| AtomicU64::new(0))
-                    .collect(),
-            ),
-            request_duration_count: Arc::new(AtomicU64::new(0)),
-            request_duration_sum_ms: Arc::new(AtomicU64::new(0)),
-            upstream_connect_duration_buckets: Arc::new(
-                REQUEST_DURATION_BUCKETS_MS
-                    .iter()
-                    .map(|_| AtomicU64::new(0))
-                    .collect(),
-            ),
-            upstream_connect_duration_count: Arc::new(AtomicU64::new(0)),
-            upstream_connect_duration_sum_ms: Arc::new(AtomicU64::new(0)),
-            ws_connect_duration_buckets: Arc::new(
-                REQUEST_DURATION_BUCKETS_MS
-                    .iter()
-                    .map(|_| AtomicU64::new(0))
-                    .collect(),
-            ),
-            ws_connect_duration_count: Arc::new(AtomicU64::new(0)),
-            ws_connect_duration_sum_ms: Arc::new(AtomicU64::new(0)),
-            first_event_duration_buckets: Arc::new(
-                REQUEST_DURATION_BUCKETS_MS
-                    .iter()
-                    .map(|_| AtomicU64::new(0))
-                    .collect(),
-            ),
-            first_event_duration_count: Arc::new(AtomicU64::new(0)),
-            first_event_duration_sum_ms: Arc::new(AtomicU64::new(0)),
             request_duration_labels: Arc::new(Mutex::new(BTreeMap::new())),
             upstream_connect_duration_labels: Arc::new(Mutex::new(BTreeMap::new())),
             ws_connect_duration_labels: Arc::new(Mutex::new(BTreeMap::new())),
@@ -221,13 +173,6 @@ impl Metrics {
         );
     }
 
-    pub fn increment_websocket_events(&self) {
-        if !self.is_enabled() {
-            return;
-        }
-        self.websocket_events_total.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn increment_websocket_event_outcome(&self, event_type: &str, success: bool) {
         if !self.is_enabled() {
             return;
@@ -241,10 +186,6 @@ impl Metrics {
             success,
         };
         *websocket_event_outcomes.entry(key).or_insert(0) += 1;
-    }
-
-    pub fn increment_sse_event_outcome(&self, event_type: &str, success: bool) {
-        self.increment_sse_event_outcome_labeled(event_type, success, "unknown", "unknown");
     }
 
     pub fn increment_sse_event_outcome_labeled(
@@ -268,13 +209,6 @@ impl Metrics {
             account_id_hash: account_id_hash.to_string(),
         };
         *sse_event_outcomes.entry(key).or_insert(0) += 1;
-    }
-
-    pub fn add_replay_items(&self, count: u64) {
-        if !self.is_enabled() {
-            return;
-        }
-        self.replay_items_total.fetch_add(count, Ordering::Relaxed);
     }
 
     pub fn add_replay_items_for_reason(&self, transport: &str, reason: &str, count: u64) {
@@ -306,18 +240,6 @@ impl Metrics {
         *cached_input_tokens.entry(key).or_insert(0) += count;
     }
 
-    pub fn record_request_duration_ms(&self, duration_ms: u64) {
-        if !self.is_enabled() {
-            return;
-        }
-        record_histogram(
-            &self.request_duration_buckets,
-            &self.request_duration_count,
-            &self.request_duration_sum_ms,
-            duration_ms,
-        );
-    }
-
     pub fn record_request_duration_labeled(
         &self,
         endpoint: &str,
@@ -329,7 +251,6 @@ impl Metrics {
         if !self.is_enabled() {
             return;
         }
-        self.record_request_duration_ms(duration_ms);
         let Ok(mut labels) = self.request_duration_labels.try_lock() else {
             return;
         };
@@ -354,12 +275,6 @@ impl Metrics {
         if !self.is_enabled() {
             return;
         }
-        record_histogram(
-            &self.upstream_connect_duration_buckets,
-            &self.upstream_connect_duration_count,
-            &self.upstream_connect_duration_sum_ms,
-            duration_ms,
-        );
         let Ok(mut labels) = self.upstream_connect_duration_labels.try_lock() else {
             return;
         };
@@ -373,18 +288,6 @@ impl Metrics {
             .record(duration_ms);
     }
 
-    pub fn record_ws_connect_duration_ms(&self, duration_ms: u64) {
-        if !self.is_enabled() {
-            return;
-        }
-        record_histogram(
-            &self.ws_connect_duration_buckets,
-            &self.ws_connect_duration_count,
-            &self.ws_connect_duration_sum_ms,
-            duration_ms,
-        );
-    }
-
     pub fn record_ws_connect_duration_labeled(
         &self,
         origin: &str,
@@ -395,7 +298,6 @@ impl Metrics {
         if !self.is_enabled() {
             return;
         }
-        self.record_ws_connect_duration_ms(duration_ms);
         let Ok(mut labels) = self.ws_connect_duration_labels.try_lock() else {
             return;
         };
@@ -410,18 +312,6 @@ impl Metrics {
             .record(duration_ms);
     }
 
-    pub fn record_first_event_duration_ms(&self, duration_ms: u64) {
-        if !self.is_enabled() {
-            return;
-        }
-        record_histogram(
-            &self.first_event_duration_buckets,
-            &self.first_event_duration_count,
-            &self.first_event_duration_sum_ms,
-            duration_ms,
-        );
-    }
-
     pub fn record_first_event_duration_labeled(
         &self,
         endpoint: &str,
@@ -432,7 +322,6 @@ impl Metrics {
         if !self.is_enabled() {
             return;
         }
-        self.record_first_event_duration_ms(duration_ms);
         let Ok(mut labels) = self.first_event_duration_labels.try_lock() else {
             return;
         };
@@ -451,6 +340,23 @@ impl Metrics {
         if !self.is_enabled() {
             return MetricsSnapshot::default();
         }
+        let (request_duration_labels, request_duration_total) = labeled_histogram_snapshots(
+            &self.request_duration_labels,
+            "request duration metrics lock is not poisoned",
+        );
+        let (upstream_connect_duration_labels, upstream_connect_duration_total) =
+            labeled_histogram_snapshots(
+                &self.upstream_connect_duration_labels,
+                "upstream connect duration metrics lock is not poisoned",
+            );
+        let (ws_connect_duration_labels, ws_connect_duration_total) = labeled_histogram_snapshots(
+            &self.ws_connect_duration_labels,
+            "websocket connect duration metrics lock is not poisoned",
+        );
+        let (first_event_duration_labels, first_event_duration_total) = labeled_histogram_snapshots(
+            &self.first_event_duration_labels,
+            "first event duration metrics lock is not poisoned",
+        );
         MetricsSnapshot {
             requests_total: self.requests_total.load(Ordering::Relaxed),
             request_outcomes: self
@@ -514,82 +420,22 @@ impl Metrics {
                 .iter()
                 .map(|(key, count)| (key.clone(), *count))
                 .collect(),
-            request_duration_buckets: REQUEST_DURATION_BUCKETS_MS
-                .iter()
-                .copied()
-                .zip(
-                    self.request_duration_buckets
-                        .iter()
-                        .map(|bucket| bucket.load(Ordering::Relaxed)),
-                )
-                .collect(),
-            request_duration_count: self.request_duration_count.load(Ordering::Relaxed),
-            request_duration_sum_ms: self.request_duration_sum_ms.load(Ordering::Relaxed),
-            upstream_connect_duration_buckets: REQUEST_DURATION_BUCKETS_MS
-                .iter()
-                .copied()
-                .zip(
-                    self.upstream_connect_duration_buckets
-                        .iter()
-                        .map(|bucket| bucket.load(Ordering::Relaxed)),
-                )
-                .collect(),
-            upstream_connect_duration_count: self
-                .upstream_connect_duration_count
-                .load(Ordering::Relaxed),
-            upstream_connect_duration_sum_ms: self
-                .upstream_connect_duration_sum_ms
-                .load(Ordering::Relaxed),
-            ws_connect_duration_buckets: REQUEST_DURATION_BUCKETS_MS
-                .iter()
-                .copied()
-                .zip(
-                    self.ws_connect_duration_buckets
-                        .iter()
-                        .map(|bucket| bucket.load(Ordering::Relaxed)),
-                )
-                .collect(),
-            ws_connect_duration_count: self.ws_connect_duration_count.load(Ordering::Relaxed),
-            ws_connect_duration_sum_ms: self.ws_connect_duration_sum_ms.load(Ordering::Relaxed),
-            first_event_duration_buckets: REQUEST_DURATION_BUCKETS_MS
-                .iter()
-                .copied()
-                .zip(
-                    self.first_event_duration_buckets
-                        .iter()
-                        .map(|bucket| bucket.load(Ordering::Relaxed)),
-                )
-                .collect(),
-            first_event_duration_count: self.first_event_duration_count.load(Ordering::Relaxed),
-            first_event_duration_sum_ms: self.first_event_duration_sum_ms.load(Ordering::Relaxed),
-            request_duration_labels: self
-                .request_duration_labels
-                .lock()
-                .expect("request duration metrics lock is not poisoned")
-                .iter()
-                .map(|(key, counts)| (key.clone(), counts.snapshot()))
-                .collect(),
-            upstream_connect_duration_labels: self
-                .upstream_connect_duration_labels
-                .lock()
-                .expect("upstream connect duration metrics lock is not poisoned")
-                .iter()
-                .map(|(key, counts)| (key.clone(), counts.snapshot()))
-                .collect(),
-            ws_connect_duration_labels: self
-                .ws_connect_duration_labels
-                .lock()
-                .expect("websocket connect duration metrics lock is not poisoned")
-                .iter()
-                .map(|(key, counts)| (key.clone(), counts.snapshot()))
-                .collect(),
-            first_event_duration_labels: self
-                .first_event_duration_labels
-                .lock()
-                .expect("first event duration metrics lock is not poisoned")
-                .iter()
-                .map(|(key, counts)| (key.clone(), counts.snapshot()))
-                .collect(),
+            request_duration_buckets: request_duration_total.buckets,
+            request_duration_count: request_duration_total.count,
+            request_duration_sum_ms: request_duration_total.sum_ms,
+            upstream_connect_duration_buckets: upstream_connect_duration_total.buckets,
+            upstream_connect_duration_count: upstream_connect_duration_total.count,
+            upstream_connect_duration_sum_ms: upstream_connect_duration_total.sum_ms,
+            ws_connect_duration_buckets: ws_connect_duration_total.buckets,
+            ws_connect_duration_count: ws_connect_duration_total.count,
+            ws_connect_duration_sum_ms: ws_connect_duration_total.sum_ms,
+            first_event_duration_buckets: first_event_duration_total.buckets,
+            first_event_duration_count: first_event_duration_total.count,
+            first_event_duration_sum_ms: first_event_duration_total.sum_ms,
+            request_duration_labels,
+            upstream_connect_duration_labels,
+            ws_connect_duration_labels,
+            first_event_duration_labels,
         }
     }
 
@@ -600,8 +446,26 @@ impl Metrics {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new()
+        Self::with_enabled(true)
     }
+}
+
+// The unlabeled aggregate series are derived from the labeled maps at snapshot
+// time instead of being double-recorded into a second set of atomics.
+fn labeled_histogram_snapshots<K: Clone>(
+    labels: &Mutex<BTreeMap<K, HistogramCounts>>,
+    poison_message: &str,
+) -> (Vec<(K, HistogramSnapshot)>, HistogramSnapshot) {
+    let labels = labels.lock().expect(poison_message);
+    let mut total = HistogramCounts::new();
+    let snapshots = labels
+        .iter()
+        .map(|(key, counts)| {
+            total.merge(counts);
+            (key.clone(), counts.snapshot())
+        })
+        .collect();
+    (snapshots, total.snapshot())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -725,6 +589,14 @@ impl HistogramCounts {
         }
     }
 
+    fn merge(&mut self, other: &HistogramCounts) {
+        self.count += other.count;
+        self.sum_ms += other.sum_ms;
+        for (bucket, other_bucket) in self.buckets.iter_mut().zip(&other.buckets) {
+            *bucket += other_bucket;
+        }
+    }
+
     fn snapshot(&self) -> HistogramSnapshot {
         HistogramSnapshot {
             buckets: REQUEST_DURATION_BUCKETS_MS
@@ -771,10 +643,6 @@ pub struct MetricsSnapshot {
         Vec<(UpstreamConnectDurationMetricKey, HistogramSnapshot)>,
     pub ws_connect_duration_labels: Vec<(WsConnectDurationMetricKey, HistogramSnapshot)>,
     pub first_event_duration_labels: Vec<(FirstEventDurationMetricKey, HistogramSnapshot)>,
-}
-
-pub fn prometheus_text(snapshot: &MetricsSnapshot) -> String {
-    prometheus_text_with_usage(snapshot, None)
 }
 
 pub fn prometheus_text_with_usage(
@@ -837,10 +705,6 @@ pub fn prometheus_text_with_usage(
         "# TYPE tokenproxy_ws_events_total counter\ntokenproxy_ws_events_total {}\n",
         snapshot.websocket_events_total
     ));
-    output.push_str(&format!(
-        "# TYPE tokenproxy_active_websocket_sessions gauge\ntokenproxy_active_websocket_sessions {}\n",
-        snapshot.active_websocket_sessions
-    ));
     for (key, count) in &snapshot.websocket_event_outcomes {
         output.push_str(&format!(
             "tokenproxy_ws_events_total{{event_type=\"{}\",success=\"{}\"}} {}\n",
@@ -849,6 +713,10 @@ pub fn prometheus_text_with_usage(
             count
         ));
     }
+    output.push_str(&format!(
+        "# TYPE tokenproxy_active_websocket_sessions gauge\ntokenproxy_active_websocket_sessions {}\n",
+        snapshot.active_websocket_sessions
+    ));
     output.push_str(&format!(
         "# TYPE tokenproxy_sse_events_total counter\ntokenproxy_sse_events_total {}\n",
         snapshot.sse_events_total
@@ -1014,16 +882,8 @@ fn append_histogram(
     ));
 }
 
-fn record_histogram(buckets: &[AtomicU64], count: &AtomicU64, sum: &AtomicU64, duration_ms: u64) {
-    count.fetch_add(1, Ordering::Relaxed);
-    sum.fetch_add(duration_ms, Ordering::Relaxed);
-    for (bucket, upper_bound) in buckets.iter().zip(REQUEST_DURATION_BUCKETS_MS) {
-        if duration_ms <= *upper_bound {
-            bucket.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
-
+// Each family is emitted as one contiguous block: the Prometheus text format
+// rejects interleaved families when parsed strictly.
 fn append_usage_metrics(output: &mut String, usage: &UsageSnapshot) {
     output.push_str("# TYPE tokenproxy_account_health gauge\n");
     for account in &usage.accounts {
@@ -1043,6 +903,8 @@ fn append_usage_metrics(output: &mut String, usage: &UsageSnapshot) {
                 value
             ));
         }
+    }
+    for account in &usage.accounts {
         for window in &account.usage {
             if let Some(percent) = window.remaining_percent {
                 output.push_str(&format!(
@@ -1054,10 +916,14 @@ fn append_usage_metrics(output: &mut String, usage: &UsageSnapshot) {
                     percent
                 ));
             }
+        }
+    }
+    for account in &usage.accounts {
+        for window in &account.usage {
             if let Some(reset_at) = window
                 .reset_at
                 .as_deref()
-                .and_then(rfc3339_timestamp_seconds)
+                .and_then(unix_seconds_from_rfc3339)
             {
                 output.push_str(&format!(
                     "tokenproxy_account_usage_reset_timestamp_seconds{{server_id=\"{}\",account_id_hash=\"{}\",window=\"{}\",source=\"{}\"}} {}\n",
@@ -1078,10 +944,6 @@ fn metric_labels(labels: &[(&str, &str)]) -> String {
         .map(|(key, value)| format!("{key}=\"{}\"", escape_label(value)))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn rfc3339_timestamp_seconds(value: &str) -> Option<i64> {
-    unix_seconds_from_rfc3339(value)
 }
 
 fn escape_label(value: &str) -> String {
@@ -1230,7 +1092,7 @@ mod counter_tests {
             ..MetricsSnapshot::default()
         };
 
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
 
         assert!(text.contains("tokenproxy_requests_total 1"));
         assert!(text.contains(
@@ -1356,7 +1218,7 @@ mod counter_tests {
                 ),
             ]
         );
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
         assert!(text.contains("# TYPE tokenproxy_route_exclusions_total counter"));
         assert!(
             text.contains(r#"tokenproxy_route_exclusions_total{reason="model_unsupported"} 2"#)
@@ -1437,7 +1299,7 @@ mod counter_tests {
                 1,
             )]
         );
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
         assert!(text.contains("# TYPE tokenproxy_request_shape_total counter"));
         assert!(text.contains(
             r#"tokenproxy_request_shape_total{endpoint="/v1/responses",model_family="gpt",service_tier="priority",reasoning_effort="high",verbosity="low",store="true"} 1"#
@@ -1556,7 +1418,7 @@ mod counter_tests {
                 ),
             ]
         );
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
         assert!(text.contains("# TYPE tokenproxy_sse_events_total counter"));
         assert!(text.contains(
             r#"tokenproxy_sse_events_total{event_type="response.failed",success="false",model_family="gpt-5",account_id_hash="acct_primary"} 1"#
@@ -1577,18 +1439,21 @@ mod counter_tests {
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.active_websocket_sessions, 1);
         assert!(
-            prometheus_text(&snapshot)
+            prometheus_text_with_usage(&snapshot, None)
                 .contains("# TYPE tokenproxy_active_websocket_sessions gauge")
         );
-        assert!(prometheus_text(&snapshot).contains("tokenproxy_active_websocket_sessions 1"));
+        assert!(
+            prometheus_text_with_usage(&snapshot, None)
+                .contains("tokenproxy_active_websocket_sessions 1")
+        );
     }
 
     #[test]
     fn should_record_and_render_request_duration_histogram() {
         let metrics = Metrics::default();
 
-        metrics.record_request_duration_ms(7);
-        metrics.record_request_duration_ms(260);
+        metrics.record_request_duration_labeled("/v1/responses", "http", "gpt", "true", 7);
+        metrics.record_request_duration_labeled("/v1/responses", "http", "gpt", "false", 260);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.request_duration_count, 2);
@@ -1597,7 +1462,7 @@ mod counter_tests {
         assert_eq!(snapshot.request_duration_buckets[1], (10, 1));
         assert_eq!(snapshot.request_duration_buckets[6], (500, 2));
 
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
         assert!(text.contains("# TYPE tokenproxy_request_duration_ms histogram"));
         assert!(text.contains(r#"tokenproxy_request_duration_ms_bucket{le="10"} 1"#));
         assert!(text.contains(r#"tokenproxy_request_duration_ms_bucket{le="+Inf"} 2"#));
@@ -1609,7 +1474,7 @@ mod counter_tests {
     fn should_record_and_render_websocket_connect_duration_histogram() {
         let metrics = Metrics::default();
 
-        metrics.record_ws_connect_duration_ms(42);
+        metrics.record_ws_connect_duration_labeled("api.openai.com", "gpt", false, 42);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.ws_connect_duration_count, 1);
@@ -1617,7 +1482,7 @@ mod counter_tests {
         assert_eq!(snapshot.ws_connect_duration_buckets[2], (25, 0));
         assert_eq!(snapshot.ws_connect_duration_buckets[3], (50, 1));
 
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
         assert!(text.contains("# TYPE tokenproxy_ws_connect_duration_ms histogram"));
         assert!(text.contains(r#"tokenproxy_ws_connect_duration_ms_bucket{le="50"} 1"#));
         assert!(text.contains("tokenproxy_ws_connect_duration_ms_sum 42"));
@@ -1628,7 +1493,7 @@ mod counter_tests {
     fn should_record_and_render_first_event_duration_histogram() {
         let metrics = Metrics::default();
 
-        metrics.record_first_event_duration_ms(125);
+        metrics.record_first_event_duration_labeled("/v1/responses", "http", "gpt", 125);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.first_event_duration_count, 1);
@@ -1636,7 +1501,7 @@ mod counter_tests {
         assert_eq!(snapshot.first_event_duration_buckets[4], (100, 0));
         assert_eq!(snapshot.first_event_duration_buckets[5], (250, 1));
 
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
         assert!(text.contains("# TYPE tokenproxy_first_event_duration_ms histogram"));
         assert!(text.contains(r#"tokenproxy_first_event_duration_ms_bucket{le="250"} 1"#));
         assert!(text.contains("tokenproxy_first_event_duration_ms_sum 125"));
@@ -1653,7 +1518,7 @@ mod counter_tests {
         metrics.record_ws_connect_duration_labeled("api.openai.com", "gpt", false, 42);
 
         let snapshot = metrics.snapshot();
-        let text = prometheus_text(&snapshot);
+        let text = prometheus_text_with_usage(&snapshot, None);
 
         assert!(text.contains(
             r#"tokenproxy_request_duration_ms_bucket{endpoint="/v1/responses",transport="http",model_family="gpt",stream="true",le="10"} 1"#

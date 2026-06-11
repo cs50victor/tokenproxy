@@ -58,7 +58,7 @@ mod tests {
                 ..AccountConfig::default()
             },
             bearer_token: "token".to_string(),
-            chatgpt_auth: None,
+            chatgpt_account_id: None,
             prompt_cache_key_seed: None,
         }
     }
