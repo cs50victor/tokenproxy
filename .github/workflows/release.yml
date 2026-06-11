@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
@@ -44,7 +44,7 @@ jobs:
           cargo --version
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/git
@@ -104,7 +104,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
@@ -124,7 +124,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Cache Cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/git
@@ -174,7 +174,7 @@ jobs:
           "$hash  dist/$assetDir.zip" | Out-File -FilePath "dist/$assetDir.zip.sha256" -Encoding ascii
 
       - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tokenproxy-${{ matrix.target }}
           path: |
@@ -191,12 +191,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Download workflow artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: tokenproxy-*
