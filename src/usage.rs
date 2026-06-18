@@ -207,15 +207,16 @@ fn push_rate_window(
     }
 
     let limited = remaining == Some(0);
+    let remaining_percent = remaining_percent(limit, remaining);
 
     windows.push(UsageWindow {
         window: format!("openai_{suffix}"),
         limit,
         remaining,
-        remaining_percent: remaining_percent(limit, remaining),
+        remaining_percent,
         rate_limit_pressure: if limited || remaining == Some(0) {
             "limited"
-        } else if let Some(percent) = remaining_percent(limit, remaining) {
+        } else if let Some(percent) = remaining_percent {
             if percent < 5.0 {
                 "high"
             } else if percent < 20.0 {

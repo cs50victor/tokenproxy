@@ -42,7 +42,7 @@ pub struct Selection {
 
 pub fn select_account(accounts: &[AccountState], request: &RouteRequest, now_ms: u64) -> Selection {
     let mut excluded = Vec::new();
-    let mut eligible = Vec::new();
+    let mut selected: Option<(AccountScore, &AccountState)> = None;
 
     for account in accounts {
         let reason = match account.health {
@@ -60,30 +60,26 @@ pub fn select_account(accounts: &[AccountState], request: &RouteRequest, now_ms:
             continue;
         }
 
-        eligible.push((
-            AccountScore {
-                health_penalty: match account.health {
-                    AccountHealth::Open => 0,
-                    AccountHealth::Unknown => 20,
-                    AccountHealth::Throttled { .. } | AccountHealth::UsageLimited { .. } => 40,
-                    AccountHealth::AuthFailed => 100,
-                },
-                priority: Reverse(account.config.priority),
-                ewma_connect_ms_bucket: account.ewma_connect_ms_bucket,
-                ewma_first_event_ms_bucket: account.ewma_first_event_ms_bucket,
-                recent_failure_count: account.recent_failure_count,
-                stable_hash: stable_hash(&[&account.config.id, &request.model_family]),
+        let score = AccountScore {
+            health_penalty: match account.health {
+                AccountHealth::Open => 0,
+                AccountHealth::Unknown => 20,
+                AccountHealth::Throttled { .. } | AccountHealth::UsageLimited { .. } => 40,
+                AccountHealth::AuthFailed => 100,
             },
-            account,
-        ));
+            priority: Reverse(account.config.priority),
+            ewma_connect_ms_bucket: account.ewma_connect_ms_bucket,
+            ewma_first_event_ms_bucket: account.ewma_first_event_ms_bucket,
+            recent_failure_count: account.recent_failure_count,
+            stable_hash: stable_hash(&[&account.config.id, &request.model_family]),
+        };
+        if selected.is_none_or(|(best, _)| score < best) {
+            selected = Some((score, account));
+        }
     }
 
-    eligible.sort_by_key(|(score, _)| *score);
-
     Selection {
-        selected: eligible
-            .first()
-            .map(|(_, account)| account.config.id.clone()),
+        selected: selected.map(|(_, account)| account.config.id.clone()),
         excluded,
     }
 }
