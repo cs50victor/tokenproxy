@@ -11,7 +11,7 @@ use tokenproxy::logging::{
     LogFormat, StartupConfigSummary, StartupLogLine, shutdown_forced_log_line, startup_log_line,
 };
 use tokenproxy::server::{AppState, app};
-use tokenproxy::timestamps::now_timestamp_pair;
+use tokenproxy::time_parse::now_timestamp_pair;
 use tokio::sync::watch;
 
 #[derive(Debug, Parser)]

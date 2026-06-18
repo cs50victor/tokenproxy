@@ -19,10 +19,15 @@ pub struct ModelEntry {
 pub fn model_list(accounts: &[EffectiveAccount]) -> ModelList {
     let mut ids = BTreeSet::new();
     for account in accounts {
-        if !account.config.enabled || !supports_generation_model(&account.config) {
+        let config = &account.config;
+        let supports_generation_model = config.supports_chat_completions
+            || config.supports_responses
+            || config.supports_responses_ws
+            || config.supports_anthropic_messages;
+        if !config.enabled || !supports_generation_model {
             continue;
         }
-        ids.extend(account.config.models.iter().cloned());
+        ids.extend(config.models.iter().cloned());
     }
 
     ModelList {
@@ -35,13 +40,6 @@ pub fn model_list(accounts: &[EffectiveAccount]) -> ModelList {
             })
             .collect(),
     }
-}
-
-fn supports_generation_model(config: &crate::config::AccountConfig) -> bool {
-    config.supports_chat_completions
-        || config.supports_responses
-        || config.supports_responses_ws
-        || config.supports_anthropic_messages
 }
 
 #[cfg(test)]

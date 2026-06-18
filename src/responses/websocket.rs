@@ -58,10 +58,12 @@ pub fn classify_downstream_message(
         }
         Message::Ping(_) => Ok(WebSocketAction::Ping),
         Message::Pong(_) => Ok(WebSocketAction::Ignore),
-        Message::Binary(_) => Ok(protocol_close(
-            "downstream_binary",
-            "binary frames are unsupported",
-        )),
+        Message::Binary(_) => Ok(WebSocketAction::Close {
+            code: 1003,
+            reason: "binary frames are unsupported".to_string(),
+            event_type: "downstream_binary",
+            success: false,
+        }),
         Message::Close(frame) => Ok(WebSocketAction::Close {
             code: frame.as_ref().map_or(1000, |frame| frame.code),
             reason: frame
@@ -70,15 +72,6 @@ pub fn classify_downstream_message(
             event_type: "downstream_close",
             success: true,
         }),
-    }
-}
-
-fn protocol_close(event_type: &'static str, reason: &str) -> WebSocketAction {
-    WebSocketAction::Close {
-        code: 1003,
-        reason: reason.to_string(),
-        event_type,
-        success: false,
     }
 }
 

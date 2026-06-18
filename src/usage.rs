@@ -298,7 +298,7 @@ pub fn account_id_hash(account_id: &str, hash_key: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::AccountConfig;
-    use crate::timestamps::now_rfc3339;
+    use crate::time_parse::now_rfc3339;
     use chrono::DateTime;
 
     #[test]
