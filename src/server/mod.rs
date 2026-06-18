@@ -1,5 +1,9 @@
 use std::fmt::Display;
 use std::future::Future;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 use std::{collections::VecDeque, error::Error, pin::Pin};
 
@@ -13,6 +17,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use eventsource_stream::{EventStream, Eventsource};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
@@ -2633,14 +2638,16 @@ async fn maybe_dump_compact_body_hash(
 }
 
 type BoxStreamError = Box<dyn Error + Send + Sync>;
+const MAX_PENDING_SSE_BYTES: usize = 16 * 1024 * 1024;
 
 struct SseStreamState<S> {
-    stream: Pin<Box<S>>,
+    stream: Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
     repair: SseRepair,
     pending: VecDeque<Bytes>,
     finished: bool,
     idle_timeout: Duration,
     cancellation: SseClientCancellation,
+    pending_bytes: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2660,6 +2667,72 @@ impl SseMetricContext {
     #[cfg(test)]
     fn unknown() -> Self {
         Self::new("unknown", "unknown")
+    }
+}
+
+struct PendingLimitedSseStream<S> {
+    stream: Pin<Box<S>>,
+    pending_bytes: Arc<AtomicUsize>,
+}
+
+fn bounded_eventsource_stream<S, E>(
+    stream: S,
+) -> (
+    Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
+    Arc<AtomicUsize>,
+)
+where
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Error + Send + Sync + 'static,
+{
+    let pending_bytes = Arc::new(AtomicUsize::new(0));
+    let stream = Box::pin(
+        PendingLimitedSseStream::new(Box::pin(stream), Arc::clone(&pending_bytes)).eventsource(),
+    );
+    (stream, pending_bytes)
+}
+
+impl<S> PendingLimitedSseStream<S> {
+    fn new(stream: Pin<Box<S>>, pending_bytes: Arc<AtomicUsize>) -> Self {
+        Self {
+            stream,
+            pending_bytes,
+        }
+    }
+}
+
+impl<S, E> futures_util::Stream for PendingLimitedSseStream<S>
+where
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Error + Send + Sync + 'static,
+{
+    type Item = Result<Bytes, BoxStreamError>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match self.stream.as_mut().poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                let pending =
+                    self.pending_bytes.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
+                if pending > MAX_PENDING_SSE_BYTES {
+                    let error = TokenproxyError::new(
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCode::UpstreamFailure,
+                        "SSE stream exceeded frame buffer limit without a frame boundary",
+                    );
+                    std::task::Poll::Ready(Some(Err(Box::new(error) as BoxStreamError)))
+                } else {
+                    std::task::Poll::Ready(Some(Ok(chunk)))
+                }
+            }
+            std::task::Poll::Ready(Some(Err(error))) => {
+                std::task::Poll::Ready(Some(Err(Box::new(error) as BoxStreamError)))
+            }
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
     }
 }
 
@@ -2713,16 +2786,14 @@ where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Error + Send + Sync + 'static,
 {
-    let mut stream = Box::pin(args.stream);
+    let (mut stream, pending_bytes) = bounded_eventsource_stream(args.stream);
     let mut repair = SseRepair::default();
 
     loop {
         match tokio::time::timeout(args.idle_timeout, stream.as_mut().next()).await {
-            Ok(Some(Ok(chunk))) => {
-                let frames = repair.observe_chunk(&chunk)?;
-                if frames.is_empty() {
-                    continue;
-                }
+            Ok(Some(Ok(event))) => {
+                pending_bytes.store(0, Ordering::Relaxed);
+                let frames = vec![repair.observe_event(event)?];
 
                 let first_event_duration_ms =
                     u64::try_from(args.started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -2751,6 +2822,7 @@ where
                     args.idle_timeout,
                     Some(args.metrics.clone()),
                     SseMetricContext::new(args.model_family, args.account_id_hash),
+                    pending_bytes,
                 ));
                 let mut response = response_with_headers(args.status, args.headers, body)?;
                 response.extensions_mut().insert(SseFirstFrameObserved);
@@ -2801,25 +2873,28 @@ where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Error + Send + Sync + 'static,
 {
+    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
     repair_sse_stream_from_state(
-        Box::pin(stream) as Pin<Box<S>>,
+        stream,
         SseRepair::default(),
         VecDeque::new(),
         false,
         idle_timeout,
         None,
         SseMetricContext::unknown(),
+        pending_bytes,
     )
 }
 
 fn repair_sse_stream_from_state<S, E>(
-    stream: Pin<Box<S>>,
+    stream: Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
     repair: SseRepair,
     pending: VecDeque<Bytes>,
     finished: bool,
     idle_timeout: Duration,
     metrics: Option<Metrics>,
     metric_context: SseMetricContext,
+    pending_bytes: Arc<AtomicUsize>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
 where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
@@ -2832,6 +2907,7 @@ where
         finished,
         idle_timeout,
         cancellation: SseClientCancellation::new(metrics, metric_context),
+        pending_bytes,
     };
 
     futures_util::stream::unfold(state, |mut state| async move {
@@ -2845,37 +2921,40 @@ where
 
         loop {
             match tokio::time::timeout(state.idle_timeout, state.stream.as_mut().next()).await {
-                Ok(Some(Ok(chunk))) => match state.repair.observe_chunk(&chunk) {
-                    Ok(frames) => {
-                        if let Some(metrics) = state.cancellation.metrics() {
-                            let metric_context = state.cancellation.metric_context();
-                            record_sse_response_event_metrics_labeled(
-                                metrics,
-                                &frames,
-                                &metric_context.model_family,
-                                &metric_context.account_id_hash,
-                            );
+                Ok(Some(Ok(event))) => {
+                    state.pending_bytes.store(0, Ordering::Relaxed);
+                    match state.repair.observe_event(event) {
+                        Ok(frame) => {
+                            if let Some(metrics) = state.cancellation.metrics() {
+                                let metric_context = state.cancellation.metric_context();
+                                record_sse_response_event_metrics_labeled(
+                                    metrics,
+                                    std::slice::from_ref(&frame),
+                                    &metric_context.model_family,
+                                    &metric_context.account_id_hash,
+                                );
+                            }
+                            state.pending.push_back(frame);
+                            if let Some(bytes) = state.pending.pop_front() {
+                                return Some((Ok(bytes), state));
+                            }
                         }
-                        state.pending.extend(frames);
-                        if let Some(bytes) = state.pending.pop_front() {
-                            return Some((Ok(bytes), state));
+                        Err(error) => {
+                            if let Some(metrics) = state.cancellation.metrics() {
+                                let metric_context = state.cancellation.metric_context();
+                                metrics.increment_sse_event_outcome_labeled(
+                                    "parse_error",
+                                    false,
+                                    &metric_context.model_family,
+                                    &metric_context.account_id_hash,
+                                );
+                            }
+                            state.finished = true;
+                            state.cancellation.mark_terminal();
+                            return Some((Err(Box::new(error) as BoxStreamError), state));
                         }
                     }
-                    Err(error) => {
-                        if let Some(metrics) = state.cancellation.metrics() {
-                            let metric_context = state.cancellation.metric_context();
-                            metrics.increment_sse_event_outcome_labeled(
-                                "parse_error",
-                                false,
-                                &metric_context.model_family,
-                                &metric_context.account_id_hash,
-                            );
-                        }
-                        state.finished = true;
-                        state.cancellation.mark_terminal();
-                        return Some((Err(Box::new(error) as BoxStreamError), state));
-                    }
-                },
+                }
                 Ok(Some(Err(error))) => {
                     if let Some(metrics) = state.cancellation.metrics() {
                         let metric_context = state.cancellation.metric_context();

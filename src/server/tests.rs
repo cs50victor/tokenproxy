@@ -4137,17 +4137,37 @@ async fn should_stop_repaired_sse_body_on_idle_timeout() {
 }
 
 #[tokio::test]
+async fn should_fail_when_sse_pending_buffer_exceeds_cap_without_frame_boundary() {
+    let chunk = Bytes::from(vec![b'a'; 1024 * 1024]);
+    let stream = futures_util::stream::iter(
+        (0..17).map(move |_| Ok::<Bytes, std::io::Error>(chunk.clone())),
+    );
+
+    let repaired = repair_sse_stream(stream);
+    futures_util::pin_mut!(repaired);
+    let error = repaired.next().await.unwrap().unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("SSE stream exceeded frame buffer limit")
+    );
+}
+
+#[tokio::test]
 async fn should_record_sse_client_cancellation_when_repaired_body_is_dropped() {
     let metrics = Metrics::default();
     let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
     let mut repaired = Box::pin(repair_sse_stream_from_state(
-        Box::pin(stream),
+        stream,
         SseRepair::default(),
         VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
         false,
         Duration::from_secs(300),
         Some(metrics.clone()),
         SseMetricContext::new("gpt-5", "acct_primary"),
+        pending_bytes,
     ));
 
     assert_eq!(
@@ -4176,14 +4196,16 @@ async fn should_record_sse_upstream_error_after_commit_with_route_labels() {
     let stream = futures_util::stream::iter(vec![Err::<Bytes, _>(std::io::Error::other(
         "upstream reset",
     ))]);
+    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
     let mut repaired = Box::pin(repair_sse_stream_from_state(
-        Box::pin(stream),
+        stream,
         SseRepair::default(),
         VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
         false,
         Duration::from_secs(300),
         Some(metrics.clone()),
         SseMetricContext::new("gpt-5", "acct_primary"),
+        pending_bytes,
     ));
 
     assert_eq!(
