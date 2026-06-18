@@ -50,10 +50,13 @@ pub fn compact_body_hash_record(
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
     let digest = Sha256::digest(bytes);
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
-        output.push_str(&format!("{byte:02x}"));
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     output
 }
@@ -69,21 +72,19 @@ fn redact_json_value(value: &mut Value, redact_json_pointers: &[String]) {
 fn redacted_headers(headers: &HeaderMap) -> Value {
     let mut redacted = serde_json::Map::new();
     for (name, value) in headers {
-        let value = if is_sensitive_header(name.as_str()) {
+        let name = name.as_str();
+        let value = if value.is_sensitive()
+            || matches!(
+                name,
+                "authorization" | "cookie" | "proxy-authorization" | "set-cookie" | "x-api-key"
+            ) {
             "[redacted]".to_string()
         } else {
             value.to_str().unwrap_or("[non-utf8]").to_string()
         };
-        redacted.insert(name.as_str().to_ascii_lowercase(), Value::String(value));
+        redacted.insert(name.to_ascii_lowercase(), Value::String(value));
     }
     Value::Object(redacted)
-}
-
-fn is_sensitive_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization" | "cookie" | "proxy-authorization" | "set-cookie" | "x-api-key"
-    )
 }
 
 #[cfg(test)]
@@ -134,6 +135,22 @@ mod tests {
         assert!(!record.to_string().contains("client-secret"));
         assert!(!record.to_string().contains("session=secret"));
         assert!(!record.to_string().contains("upstream-secret"));
+    }
+
+    #[test]
+    fn should_redact_sensitive_header_values_even_when_name_is_safe() {
+        use http::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        let mut token: HeaderValue = "secret-value".parse().unwrap();
+        token.set_sensitive(true);
+        headers.insert("x-trace-token", token);
+
+        let record =
+            request_body_dump_record("req_1", "POST", "/v1/responses", &headers, b"{}", &[]);
+
+        assert_eq!(record["headers"]["x-trace-token"], "[redacted]");
+        assert!(!record.to_string().contains("secret-value"));
     }
 
     #[test]

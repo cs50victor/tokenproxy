@@ -72,37 +72,6 @@ impl AccountHealthCell {
         }
     }
 
-    fn store(&self, health: AccountHealth) {
-        match health {
-            AccountHealth::Open => self.clear(),
-            AccountHealth::Unknown => {
-                self.deadline_ms.store(0, Ordering::Release);
-                self.transient_failure_count.store(0, Ordering::Release);
-                self.last_transient_failure_ms.store(0, Ordering::Release);
-                self.state.store(ACCOUNT_HEALTH_UNKNOWN, Ordering::Release);
-            }
-            AccountHealth::Throttled { next_retry_at_ms } => {
-                self.deadline_ms.store(next_retry_at_ms, Ordering::Release);
-                self.state
-                    .store(ACCOUNT_HEALTH_THROTTLED, Ordering::Release);
-            }
-            AccountHealth::UsageLimited { reset_at_ms } => {
-                self.deadline_ms.store(reset_at_ms, Ordering::Release);
-                self.transient_failure_count.store(0, Ordering::Release);
-                self.last_transient_failure_ms.store(0, Ordering::Release);
-                self.state
-                    .store(ACCOUNT_HEALTH_USAGE_LIMITED, Ordering::Release);
-            }
-            AccountHealth::AuthFailed => {
-                self.deadline_ms.store(0, Ordering::Release);
-                self.transient_failure_count.store(0, Ordering::Release);
-                self.last_transient_failure_ms.store(0, Ordering::Release);
-                self.state
-                    .store(ACCOUNT_HEALTH_AUTH_FAILED, Ordering::Release);
-            }
-        }
-    }
-
     pub(super) fn transient_failure_count(&self) -> u32 {
         self.transient_failure_count.load(Ordering::Acquire)
     }
@@ -157,12 +126,6 @@ impl AccountHealthCell {
         self.transient_failure_count.store(0, Ordering::Release);
         self.last_transient_failure_ms.store(0, Ordering::Release);
     }
-
-    fn clear_if_not_auth_failed(&self) {
-        if self.state.load(Ordering::Acquire) != ACCOUNT_HEALTH_AUTH_FAILED {
-            self.clear();
-        }
-    }
 }
 
 fn update_latency_ewma(cell: &AtomicU64, duration_ms: u64) {
@@ -213,8 +176,27 @@ impl AppState {
         log_format: LogFormat,
         shutdown_tx: watch::Sender<bool>,
     ) -> Result<Self, TokenproxyError> {
-        let upstream_client = build_upstream_http_client(&effective)?;
-        let account_health = Arc::new(account_health_cells(&effective));
+        let upstream_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
+            .pool_idle_timeout(Duration::from_millis(
+                effective.config.timeouts.pool_idle_ms,
+            ))
+            .build()
+            .map_err(|error| {
+                TokenproxyError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::InvalidConfig,
+                    format!("failed to build upstream HTTP client: {error}"),
+                )
+            })?;
+        let account_health = Arc::new(
+            effective
+                .config
+                .accounts
+                .iter()
+                .map(|account| (account.id.clone(), Arc::new(AccountHealthCell::new())))
+                .collect(),
+        );
         let metrics_enabled = effective.config.observability.metrics;
 
         Ok(Self {
@@ -256,7 +238,34 @@ impl AppState {
 
     pub(super) fn store_account_health(&self, account_id: &str, health: AccountHealth) {
         if let Some(cell) = self.account_health_cell(account_id) {
-            cell.store(health);
+            match health {
+                AccountHealth::Open => cell.clear(),
+                AccountHealth::Unknown => {
+                    cell.deadline_ms.store(0, Ordering::Release);
+                    cell.transient_failure_count.store(0, Ordering::Release);
+                    cell.last_transient_failure_ms.store(0, Ordering::Release);
+                    cell.state.store(ACCOUNT_HEALTH_UNKNOWN, Ordering::Release);
+                }
+                AccountHealth::Throttled { next_retry_at_ms } => {
+                    cell.deadline_ms.store(next_retry_at_ms, Ordering::Release);
+                    cell.state
+                        .store(ACCOUNT_HEALTH_THROTTLED, Ordering::Release);
+                }
+                AccountHealth::UsageLimited { reset_at_ms } => {
+                    cell.deadline_ms.store(reset_at_ms, Ordering::Release);
+                    cell.transient_failure_count.store(0, Ordering::Release);
+                    cell.last_transient_failure_ms.store(0, Ordering::Release);
+                    cell.state
+                        .store(ACCOUNT_HEALTH_USAGE_LIMITED, Ordering::Release);
+                }
+                AccountHealth::AuthFailed => {
+                    cell.deadline_ms.store(0, Ordering::Release);
+                    cell.transient_failure_count.store(0, Ordering::Release);
+                    cell.last_transient_failure_ms.store(0, Ordering::Release);
+                    cell.state
+                        .store(ACCOUNT_HEALTH_AUTH_FAILED, Ordering::Release);
+                }
+            }
         }
     }
 
@@ -268,8 +277,10 @@ impl AppState {
     }
 
     pub(super) fn clear_account_health_if_not_auth_failed(&self, account_id: &str) {
-        if let Some(cell) = self.account_health_cell(account_id) {
-            cell.clear_if_not_auth_failed();
+        if let Some(cell) = self.account_health_cell(account_id)
+            && cell.state.load(Ordering::Acquire) != ACCOUNT_HEALTH_AUTH_FAILED
+        {
+            cell.clear();
         }
     }
 
@@ -286,33 +297,6 @@ impl AppState {
             })
             .collect()
     }
-}
-
-fn account_health_cells(effective: &EffectiveConfig) -> BTreeMap<String, Arc<AccountHealthCell>> {
-    effective
-        .config
-        .accounts
-        .iter()
-        .map(|account| (account.id.clone(), Arc::new(AccountHealthCell::new())))
-        .collect()
-}
-
-fn build_upstream_http_client(
-    effective: &EffectiveConfig,
-) -> Result<reqwest::Client, TokenproxyError> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
-        .pool_idle_timeout(Duration::from_millis(
-            effective.config.timeouts.pool_idle_ms,
-        ))
-        .build()
-        .map_err(|error| {
-            TokenproxyError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::InvalidConfig,
-                format!("failed to build upstream HTTP client: {error}"),
-            )
-        })
 }
 
 #[cfg(test)]

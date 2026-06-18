@@ -14,7 +14,13 @@ pub fn parse_chatgpt_auth_json(input: &str) -> Result<ChatGptAuth, TokenproxyErr
         TokenproxyError::invalid_config(format!("auth_json_path contains invalid JSON: {error}"))
     })?;
 
-    validate_rfc3339_field(&value, "last_refresh")?;
+    if let Some(last_refresh) = string_field(&value, "last_refresh")
+        && parse_rfc3339(&last_refresh).is_none()
+    {
+        return Err(TokenproxyError::invalid_config(
+            "auth_json_path field last_refresh must be RFC3339",
+        ));
+    }
 
     let tokens = value.get("tokens").unwrap_or(&Value::Null);
     // Codex sends the OAuth access_token as the upstream bearer; the OIDC
@@ -38,18 +44,6 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned)
-}
-
-fn validate_rfc3339_field(value: &Value, field: &str) -> Result<(), TokenproxyError> {
-    let Some(raw) = string_field(value, field) else {
-        return Ok(());
-    };
-    if parse_rfc3339(&raw).is_none() {
-        return Err(TokenproxyError::invalid_config(format!(
-            "auth_json_path field {field} must be RFC3339"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -48,12 +48,15 @@ use crate::responses::replay::{
 };
 use crate::responses::state::ReplayState;
 use crate::responses::websocket::{WebSocketAction, classify_downstream_message};
+use crate::routing::account::normalize_service_tier;
 use crate::routing::{
     AccountConfig as RoutingAccountConfig, AccountHealth, AccountState, Endpoint, RouteRequest,
     Transport, account_static_compatible, select_account,
 };
-use crate::time_parse::{now_unix_ms, retry_after_deadline_ms as parse_retry_after_deadline_ms};
-use crate::timestamps::{now_rfc3339, now_timestamp_pair};
+use crate::time_parse::{
+    now_rfc3339, now_timestamp_pair, now_unix_ms,
+    retry_after_deadline_ms as parse_retry_after_deadline_ms,
+};
 use crate::usage::{
     UsageWindow, account_id_hash, usage_health_from_windows, usage_snapshot,
     usage_windows_from_error_body, usage_windows_from_headers,
@@ -285,7 +288,7 @@ async fn models(
     Ok(Json(model_list(accounts)))
 }
 
-async fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
+fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::NOT_FOUND,
         ErrorCode::UnsupportedRoute,
@@ -293,7 +296,7 @@ async fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
     )
 }
 
-async fn method_not_allowed(method: Method, uri: Uri) -> TokenproxyError {
+fn method_not_allowed(method: Method, uri: Uri) -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::METHOD_NOT_ALLOWED,
         ErrorCode::UnsupportedMethod,
@@ -312,7 +315,7 @@ async fn authenticated_method_not_allowed(
             let started = Instant::now();
             let method_name = method.as_str().to_string();
             let path = uri.path().to_string();
-            let error = method_not_allowed(method, uri).await;
+            let error = method_not_allowed(method, uri);
             local_error_response(&state, &method_name, &path, &path, error, started)
         }
         Err(error) => error.into_response(),
@@ -333,7 +336,7 @@ async fn authenticated_openai_unsupported_route(
     let started = Instant::now();
     let method_name = method.as_str().to_string();
     let path = uri.path().to_string();
-    let error = unsupported_route(method, uri).await;
+    let error = unsupported_route(method, uri);
     // Unmatched paths get a fixed metric label so attacker-chosen paths cannot
     // grow metric label cardinality without bound; the log keeps the real path.
     local_error_response(&state, &method_name, &path, "unmatched", error, started)
@@ -856,7 +859,10 @@ async fn relay_single_websocket_create(
         let route_request = if attempted_ids.is_empty() {
             initial_route_request.clone()
         } else {
-            websocket_failover_route_request(&initial_route_request)
+            let mut retry = initial_route_request.clone();
+            retry.pinned_account_id = None;
+            retry.requires_incremental_previous_response_id = false;
+            retry
         };
         let account = match select_next_account(state, &route_request, &attempted_ids).await {
             Ok(account) => account,
@@ -892,7 +898,9 @@ async fn relay_single_websocket_create(
             value.clone(),
             reused_upstream_previous_response,
         )?;
-        if should_count_full_replay_items(replay_state, &normalized) {
+        if !replay_state.last_completed_output_items.is_empty()
+            && normalized.get("previous_response_id").is_none()
+        {
             state.metrics.add_replay_items_for_reason(
                 "websocket",
                 "full_replay",
@@ -924,7 +932,7 @@ async fn relay_single_websocket_create(
         {
             if !reuse_retry_available {
                 let error = upstream_send_error(error);
-                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                record_account_transient_failure(state, &account, &HeaderMap::new());
                 replay_state.in_flight = false;
                 if attempted_ids.len() < max_attempts {
                     last_retryable_error = Some(error);
@@ -944,7 +952,7 @@ async fn relay_single_websocket_create(
             )
             .await
             {
-                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                record_account_transient_failure(state, &account, &HeaderMap::new());
                 replay_state.in_flight = false;
                 if attempted_ids.len() < max_attempts {
                     last_retryable_error = Some(error);
@@ -981,7 +989,7 @@ async fn relay_single_websocket_create(
                                     _ => upstream_closed_before_completed_error(),
                                 };
                                 if !first_event_seen {
-                                    record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                                    record_account_transient_failure(state, &account, &HeaderMap::new());
                                     replay_state.in_flight = false;
                                     if attempted_ids.len() < max_attempts {
                                         last_retryable_error = Some(error);
@@ -1112,7 +1120,7 @@ async fn relay_single_websocket_create(
                                 }
                                 let error = upstream_closed_before_completed_error();
                                 if !first_event_seen {
-                                    record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                                    record_account_transient_failure(state, &account, &HeaderMap::new());
                                     replay_state.in_flight = false;
                                     if attempted_ids.len() < max_attempts {
                                         last_retryable_error = Some(error);
@@ -1206,7 +1214,7 @@ async fn relay_single_websocket_create(
                             "upstream WebSocket idle timeout",
                         );
                         if !first_event_seen {
-                            record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                            record_account_transient_failure(state, &account, &HeaderMap::new());
                             replay_state.in_flight = false;
                             if attempted_ids.len() < max_attempts {
                                 last_retryable_error = Some(error);
@@ -1254,7 +1262,7 @@ async fn relay_single_websocket_create(
             )
             .await
             {
-                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                record_account_transient_failure(state, &account, &HeaderMap::new());
                 replay_state.in_flight = false;
                 if attempted_ids.len() < max_attempts {
                     last_retryable_error = Some(error);
@@ -1271,13 +1279,6 @@ async fn relay_single_websocket_create(
         }
         return Ok(());
     }
-}
-
-fn websocket_failover_route_request(route_request: &RouteRequest) -> RouteRequest {
-    let mut retry = route_request.clone();
-    retry.pinned_account_id = None;
-    retry.requires_incremental_previous_response_id = false;
-    retry
 }
 
 fn upstream_send_error(error: impl Display) -> TokenproxyError {
@@ -1451,17 +1452,11 @@ fn websocket_error_event_type(code: ErrorCode) -> &'static str {
     }
 }
 
-fn should_count_full_replay_items(replay_state: &ReplayState, payload: &Value) -> bool {
-    !replay_state.last_completed_output_items.is_empty()
-        && payload.get("previous_response_id").is_none()
-}
-
 fn replay_input_item_count(payload: &Value) -> u64 {
-    payload
-        .get("input")
-        .and_then(Value::as_array)
-        .map(|items| u64::try_from(items.len()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+    match payload.get("input").and_then(Value::as_array) {
+        Some(items) => u64::try_from(items.len()).unwrap_or(u64::MAX),
+        None => 0,
+    }
 }
 
 async fn ensure_upstream_session(
@@ -1551,7 +1546,7 @@ async fn ensure_upstream_session(
     let (socket, _) = match connect_result {
         Ok(Ok(socket)) => socket,
         Ok(Err(error)) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             return Err(TokenproxyError::new(
                 StatusCode::BAD_GATEWAY,
                 ErrorCode::UpstreamFailure,
@@ -1559,7 +1554,7 @@ async fn ensure_upstream_session(
             ));
         }
         Err(_) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             return Err(TokenproxyError::new(
                 StatusCode::GATEWAY_TIMEOUT,
                 ErrorCode::UpstreamFailure,
@@ -1726,7 +1721,7 @@ fn websocket_route_request(
 fn capture_completed_event(state: &mut ReplayState, value: &Value) {
     if value.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
         if let Some(item) = value.get("item").cloned() {
-            state.record_output_item_done(item);
+            state.pending_output_items.push(item);
         }
         return;
     }
@@ -1955,7 +1950,7 @@ async fn forward_to_upstream(
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             let connect_duration_ms =
                 u64::try_from(upstream_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             record_account_connect_duration(state, account, connect_duration_ms);
@@ -1979,7 +1974,7 @@ async fn forward_to_upstream(
             ));
         }
         Err(_) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             let connect_duration_ms =
                 u64::try_from(upstream_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             record_account_connect_duration(state, account, connect_duration_ms);
@@ -2297,26 +2292,24 @@ fn actual_service_tier_from_sse_frames(frames: &[Bytes]) -> Option<String> {
         let text = std::str::from_utf8(frame).ok()?;
         text.lines()
             .find_map(|line| line.strip_prefix("data:").map(str::trim))
-            .and_then(actual_service_tier_from_sse_data)
+            .and_then(|data| {
+                if data == "[DONE]" {
+                    return None;
+                }
+
+                let value = serde_json::from_str::<Value>(data).ok()?;
+                if value.get("type").and_then(Value::as_str) != Some("response.created") {
+                    return None;
+                }
+
+                value
+                    .pointer("/response/service_tier")
+                    .or_else(|| value.get("service_tier"))
+                    .and_then(Value::as_str)
+                    .filter(|tier| !tier.is_empty())
+                    .map(ToOwned::to_owned)
+            })
     })
-}
-
-fn actual_service_tier_from_sse_data(data: &str) -> Option<String> {
-    if data == "[DONE]" {
-        return None;
-    }
-
-    let value = serde_json::from_str::<Value>(data).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("response.created") {
-        return None;
-    }
-
-    value
-        .pointer("/response/service_tier")
-        .or_else(|| value.get("service_tier"))
-        .and_then(Value::as_str)
-        .filter(|tier| !tier.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn usage_metadata_from_sse_frames(frames: &[Bytes]) -> UsageMetadata {
@@ -2359,7 +2352,7 @@ fn record_websocket_request_shape(
     shape: &RequestShape,
 ) {
     replay_state.requested_service_tier =
-        normalized_requested_service_tier(Some(shape.service_tier.clone()));
+        Some(normalize_service_tier(&shape.service_tier).to_string());
     replay_state.reasoning_effort = Some(shape.reasoning_effort.clone());
     replay_state.verbosity = Some(shape.verbosity.clone());
     replay_state.store = Some(shape.store.clone());
@@ -2373,28 +2366,32 @@ fn record_websocket_request_shape(
     );
 }
 
-fn normalized_requested_service_tier(service_tier: Option<String>) -> Option<String> {
-    service_tier.map(|tier| {
-        if is_legacy_fast_service_tier(Some(&tier)) {
-            "priority".to_string()
-        } else {
-            tier
-        }
-    })
-}
-
 fn websocket_request_shape(replay_state: &ReplayState, value: &Value) -> RequestShape {
+    let service_tier = match websocket_string_field(replay_state, value, "service_tier") {
+        Some(tier) if is_legacy_fast_service_tier(Some(&tier)) => "priority".to_string(),
+        Some(tier) => tier,
+        None => "unknown".to_string(),
+    };
+    let store = value
+        .get("store")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            replay_state
+                .last_request_template
+                .as_ref()
+                .and_then(|template| template.get("store"))
+                .and_then(Value::as_bool)
+        })
+        .map(|store| store.to_string())
+        .unwrap_or_else(|| "unset".to_string());
+
     RequestShape {
-        service_tier: websocket_string_field(replay_state, value, "service_tier")
-            .and_then(|tier| normalized_requested_service_tier(Some(tier)))
-            .unwrap_or_else(|| "unknown".to_string()),
+        service_tier,
         reasoning_effort: websocket_nested_string_field(replay_state, value, "reasoning", "effort")
             .unwrap_or_else(|| "unset".to_string()),
         verbosity: websocket_nested_string_field(replay_state, value, "text", "verbosity")
             .unwrap_or_else(|| "unset".to_string()),
-        store: websocket_bool_field(replay_state, value, "store")
-            .map(|store| store.to_string())
-            .unwrap_or_else(|| "unset".to_string()),
+        store,
     }
 }
 
@@ -2441,16 +2438,6 @@ fn websocket_nested_string_field(
         .map(ToOwned::to_owned)
 }
 
-fn websocket_bool_field(replay_state: &ReplayState, value: &Value, field: &str) -> Option<bool> {
-    value.get(field).and_then(Value::as_bool).or_else(|| {
-        replay_state
-            .last_request_template
-            .as_ref()
-            .and_then(|template| template.get(field))
-            .and_then(Value::as_bool)
-    })
-}
-
 fn record_websocket_actual_service_tier(replay_state: &mut ReplayState, value: &Value) {
     if value.get("type").and_then(Value::as_str) != Some("response.created") {
         return;
@@ -2487,7 +2474,15 @@ fn record_account_websocket_event_health(
     account: &EffectiveAccount,
     event: &Value,
 ) {
-    if websocket_event_indicates_success(event) {
+    if event
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| {
+            event_type.starts_with("response.")
+                && !event_type.contains("error")
+                && !event_type.contains("failed")
+        })
+    {
         state.clear_account_health_if_not_auth_failed(&account.config.id);
     }
 }
@@ -2584,15 +2579,6 @@ async fn record_websocket_usage_limit_error_event(
         .insert(account.config.id.clone(), usage_windows);
 }
 
-fn websocket_event_indicates_success(event: &Value) -> bool {
-    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
-        return false;
-    };
-    event_type.starts_with("response.")
-        && !event_type.contains("error")
-        && !event_type.contains("failed")
-}
-
 async fn maybe_dump_compact_body_hash(
     state: &AppState,
     request_id: &str,
@@ -2623,10 +2609,11 @@ async fn maybe_dump_compact_body_hash(
 }
 
 type BoxStreamError = Box<dyn Error + Send + Sync>;
+type BoxedSseEventStream<S> = Pin<Box<EventStream<PendingLimitedSseStream<S>>>>;
 const MAX_PENDING_SSE_BYTES: usize = 16 * 1024 * 1024;
 
 struct SseStreamState<S> {
-    stream: Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
+    stream: BoxedSseEventStream<S>,
     repair: SseRepair,
     pending: VecDeque<Bytes>,
     finished: bool,
@@ -2655,12 +2642,7 @@ struct PendingLimitedSseStream<S> {
     pending_bytes: Arc<AtomicUsize>,
 }
 
-fn bounded_eventsource_stream<S, E>(
-    stream: S,
-) -> (
-    Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
-    Arc<AtomicUsize>,
-)
+fn bounded_eventsource_stream<S, E>(stream: S) -> (BoxedSseEventStream<S>, Arc<AtomicUsize>)
 where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Error + Send + Sync + 'static,
@@ -2769,94 +2751,71 @@ where
     let (mut stream, pending_bytes) = bounded_eventsource_stream(args.stream);
     let mut repair = SseRepair::default();
 
-    loop {
-        match tokio::time::timeout(args.idle_timeout, stream.as_mut().next()).await {
-            Ok(Some(Ok(event))) => {
-                pending_bytes.store(0, Ordering::Relaxed);
-                let frames = vec![repair.observe_event(event)?];
+    match tokio::time::timeout(args.idle_timeout, stream.as_mut().next()).await {
+        Ok(Some(Ok(event))) => {
+            pending_bytes.store(0, Ordering::Relaxed);
+            let frames = vec![repair.observe_event(event)?];
 
-                let first_event_duration_ms =
-                    u64::try_from(args.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                args.metrics.record_first_event_duration_labeled(
-                    args.endpoint,
-                    "sse",
-                    args.model_family,
-                    first_event_duration_ms,
-                );
-                record_sse_response_event_metrics_labeled(
-                    args.metrics,
-                    &frames,
-                    args.model_family,
-                    args.account_id_hash,
-                );
-                let metadata = StreamResponseMetadata {
-                    actual_service_tier: actual_service_tier_from_sse_frames(&frames),
-                    usage: usage_metadata_from_sse_frames(&frames),
-                    first_event_duration_ms: Some(first_event_duration_ms),
-                };
-                let body = Body::from_stream(repair_sse_stream_from_state(
-                    stream,
-                    repair,
-                    VecDeque::from(frames),
-                    false,
-                    args.idle_timeout,
+            let first_event_duration_ms =
+                u64::try_from(args.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            args.metrics.record_first_event_duration_labeled(
+                args.endpoint,
+                "sse",
+                args.model_family,
+                first_event_duration_ms,
+            );
+            record_sse_response_event_metrics_labeled(
+                args.metrics,
+                &frames,
+                args.model_family,
+                args.account_id_hash,
+            );
+            let metadata = StreamResponseMetadata {
+                actual_service_tier: actual_service_tier_from_sse_frames(&frames),
+                usage: usage_metadata_from_sse_frames(&frames),
+                first_event_duration_ms: Some(first_event_duration_ms),
+            };
+            let body = Body::from_stream(repair_sse_stream_from_state(SseStreamState {
+                stream,
+                repair,
+                pending: VecDeque::from(frames),
+                finished: false,
+                idle_timeout: args.idle_timeout,
+                cancellation: SseClientCancellation::new(
                     Some(args.metrics.clone()),
                     SseMetricContext::new(args.model_family, args.account_id_hash),
-                    pending_bytes,
-                ));
-                let mut response = response_with_headers(args.status, args.headers, body)?;
-                response.extensions_mut().insert(SseFirstFrameObserved);
-                return Ok((response, metadata));
-            }
-            Ok(Some(Err(error))) => {
-                return Err(TokenproxyError::new(
-                    StatusCode::BAD_GATEWAY,
-                    ErrorCode::UpstreamFailure,
-                    format!("failed to read first upstream SSE event: {error}"),
-                ));
-            }
-            Ok(None) => {
-                return Err(TokenproxyError::new(
-                    StatusCode::BAD_GATEWAY,
-                    ErrorCode::UpstreamFailure,
-                    "upstream SSE ended before first event",
-                ));
-            }
-            Err(_) => {
-                return Err(TokenproxyError::new(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    ErrorCode::UpstreamFailure,
-                    "upstream SSE idle timeout before first event",
-                ));
-            }
+                ),
+                pending_bytes,
+            }));
+            let mut response = response_with_headers(args.status, args.headers, body)?;
+            response.extensions_mut().insert(SseFirstFrameObserved);
+            Ok((response, metadata))
         }
+        Ok(Some(Err(error))) => Err(TokenproxyError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::UpstreamFailure,
+            format!("failed to read first upstream SSE event: {error}"),
+        )),
+        Ok(None) => Err(TokenproxyError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::UpstreamFailure,
+            "upstream SSE ended before first event",
+        )),
+        Err(_) => Err(TokenproxyError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            ErrorCode::UpstreamFailure,
+            "upstream SSE idle timeout before first event",
+        )),
     }
 }
 
 fn repair_sse_stream_from_state<S, E>(
-    stream: Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
-    repair: SseRepair,
-    pending: VecDeque<Bytes>,
-    finished: bool,
-    idle_timeout: Duration,
-    metrics: Option<Metrics>,
-    metric_context: SseMetricContext,
-    pending_bytes: Arc<AtomicUsize>,
+    state: SseStreamState<S>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
 where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Error + Send + Sync + 'static,
 {
-    let state = SseStreamState {
-        stream,
-        repair,
-        pending,
-        finished,
-        idle_timeout,
-        cancellation: SseClientCancellation::new(metrics, metric_context),
-        pending_bytes,
-    };
-
     futures_util::stream::unfold(state, |mut state| async move {
         if let Some(bytes) = state.pending.pop_front() {
             return Some((Ok(bytes), state));
@@ -2925,17 +2884,16 @@ where
                     state.finished = true;
                     state.cancellation.mark_terminal();
                     return Some((
-                        Err(Box::new(sse_idle_timeout_error()) as BoxStreamError),
+                        Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "upstream SSE idle timeout",
+                        )) as BoxStreamError),
                         state,
                     ));
                 }
             }
         }
     })
-}
-
-fn sse_idle_timeout_error() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream SSE idle timeout")
 }
 
 async fn forward_with_precommit_failover(
@@ -2989,9 +2947,10 @@ async fn forward_with_precommit_failover(
         response.extensions_mut().insert(HttpMetricContext {
             model_family: route_request.model_family.clone(),
             stream: route_request.stream,
-            requested_service_tier: normalized_requested_service_tier(
-                route_request.service_tier.clone(),
-            ),
+            requested_service_tier: route_request
+                .service_tier
+                .as_deref()
+                .map(|service_tier| normalize_service_tier(service_tier).to_string()),
             reasoning_effort: attempt
                 .request_shape
                 .as_ref()
@@ -3081,10 +3040,10 @@ fn account_selection_health(
     account: &EffectiveAccount,
     usage_windows: Option<&[UsageWindow]>,
 ) -> AccountHealth {
-    let runtime_health = state
-        .account_health_cell(&account.config.id)
-        .map(|cell| cell.load())
-        .unwrap_or(AccountHealth::Open);
+    let runtime_health = match state.account_health_cell(&account.config.id) {
+        Some(cell) => cell.load(),
+        None => AccountHealth::Open,
+    };
     if matches!(runtime_health, AccountHealth::UsageLimited { .. }) {
         return runtime_health;
     }
@@ -3120,7 +3079,16 @@ fn body_with_request_transforms(
     let Some(object) = value.as_object_mut() else {
         return Ok(body.clone());
     };
-    normalize_legacy_service_tier(object);
+    if object
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .is_some_and(|tier| is_legacy_fast_service_tier(Some(tier)))
+    {
+        object.insert(
+            "service_tier".to_string(),
+            Value::String("priority".to_string()),
+        );
+    }
 
     if needs_prompt_cache_key && !object.contains_key("prompt_cache_key") {
         value =
@@ -3136,19 +3104,6 @@ fn body_with_request_transforms(
                 format!("failed to serialize request body with prompt cache key: {error}"),
             )
         })
-}
-
-fn normalize_legacy_service_tier(object: &mut serde_json::Map<String, Value>) {
-    if object
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .is_some_and(|tier| is_legacy_fast_service_tier(Some(tier)))
-    {
-        object.insert(
-            "service_tier".to_string(),
-            Value::String("priority".to_string()),
-        );
-    }
 }
 
 fn is_legacy_fast_service_tier(service_tier: Option<&str>) -> bool {
@@ -3298,7 +3253,7 @@ async fn record_account_http_status(
             | StatusCode::INTERNAL_SERVER_ERROR
             | StatusCode::SERVICE_UNAVAILABLE
     ) {
-        record_account_transient_failure(state, account, headers).await;
+        record_account_transient_failure(state, account, headers);
         return;
     } else if status.is_success() {
         None
@@ -3348,38 +3303,28 @@ fn record_account_first_event_duration(
     }
 }
 
-async fn record_account_transient_failure(
+fn record_account_transient_failure(
     state: &AppState,
     account: &EffectiveAccount,
     headers: &HeaderMap,
 ) {
     let now_ms = now_unix_ms();
-    let failure_count = state
-        .account_health_cell(&account.config.id)
-        .map(|cell| cell.increment_transient_failure_count_at(now_ms))
-        .unwrap_or(1);
+    let failure_count = match state.account_health_cell(&account.config.id) {
+        Some(cell) => cell.increment_transient_failure_count_at(now_ms),
+        None => 1,
+    };
     state.store_account_health(
         &account.config.id,
-        transient_failure_health(state, account, headers, now_ms, failure_count),
+        AccountHealth::Throttled {
+            next_retry_at_ms: throttle_deadline_ms(
+                headers,
+                now_ms,
+                &state.effective.config.retry,
+                &account.config.id,
+                failure_count,
+            ),
+        },
     );
-}
-
-fn transient_failure_health(
-    state: &AppState,
-    account: &EffectiveAccount,
-    headers: &HeaderMap,
-    now_ms: u64,
-    failure_count: u32,
-) -> AccountHealth {
-    AccountHealth::Throttled {
-        next_retry_at_ms: throttle_deadline_ms(
-            headers,
-            now_ms,
-            &state.effective.config.retry,
-            &account.config.id,
-            failure_count,
-        ),
-    }
 }
 
 fn retry_after_deadline_ms(headers: &HeaderMap, now_ms: u64) -> Option<u64> {
@@ -3444,24 +3389,23 @@ async fn select_next_account(
         .iter()
         .filter(|account| !attempted_ids.contains(&account.config.id))
         .map(|account| {
-            let recent_failure_count = state
-                .account_health_cell(&account.config.id)
-                .map(|cell| cell.transient_failure_count())
-                .unwrap_or(0);
+            let recent_failure_count = match state.account_health_cell(&account.config.id) {
+                Some(cell) => cell.transient_failure_count(),
+                None => 0,
+            };
             let health = account_selection_health(
                 state,
                 account,
                 usage_windows.get(&account.config.id).map(Vec::as_slice),
             );
-            let (connect_bucket, first_event_bucket) = state
-                .account_health_cell(&account.config.id)
-                .map(|cell| {
-                    (
+            let (connect_bucket, first_event_bucket) =
+                match state.account_health_cell(&account.config.id) {
+                    Some(cell) => (
                         cell.connect_latency_bucket(),
                         cell.first_event_latency_bucket(),
-                    )
-                })
-                .unwrap_or((0, 0));
+                    ),
+                    None => (0, 0),
+                };
             routing_account_state(
                 account,
                 health,
@@ -3491,8 +3435,16 @@ async fn select_next_account(
             event: "route_selection",
             timestamp_local: &timestamps.local,
             timestamp_utc: &timestamps.utc,
-            endpoint: endpoint_name(route_request.endpoint),
-            transport: transport_name(route_request.transport),
+            endpoint: match route_request.endpoint {
+                Endpoint::ChatCompletions => "/v1/chat/completions",
+                Endpoint::Responses => "/v1/responses",
+                Endpoint::ResponsesCompact => "/v1/responses/compact",
+                Endpoint::AnthropicMessages => "/v1/messages",
+            },
+            transport: match route_request.transport {
+                Transport::Http => "http",
+                Transport::WebSocket => "websocket",
+            },
             model_family: &route_request.model_family,
             selected_account_id_hash: &selected_account_id_hash,
             excluded_account_id_hash: &excluded_account_id_hash,
@@ -3511,22 +3463,6 @@ async fn select_next_account(
                 "selected account is missing from effective config",
             )
         })
-}
-
-fn endpoint_name(endpoint: Endpoint) -> &'static str {
-    match endpoint {
-        Endpoint::ChatCompletions => "/v1/chat/completions",
-        Endpoint::Responses => "/v1/responses",
-        Endpoint::ResponsesCompact => "/v1/responses/compact",
-        Endpoint::AnthropicMessages => "/v1/messages",
-    }
-}
-
-fn transport_name(transport: Transport) -> &'static str {
-    match transport {
-        Transport::Http => "http",
-        Transport::WebSocket => "websocket",
-    }
 }
 
 fn should_retry_precommit(status: StatusCode) -> bool {
@@ -4623,8 +4559,7 @@ fn should_record_websocket_usage_metadata_and_service_tiers_for_log() {
     let mut replay_state = ReplayState::default();
     let metrics = Metrics::default();
 
-    replay_state.requested_service_tier =
-        normalized_requested_service_tier(Some("fast".to_string()));
+    replay_state.requested_service_tier = Some(normalize_service_tier("fast").to_string());
     record_websocket_actual_service_tier(
         &mut replay_state,
         &ws_event(
@@ -4923,16 +4858,15 @@ where
     E: Error + Send + Sync + 'static,
 {
     let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    repair_sse_stream_from_state(
+    repair_sse_stream_from_state(SseStreamState {
         stream,
-        SseRepair::default(),
-        VecDeque::new(),
-        false,
+        repair: SseRepair::default(),
+        pending: VecDeque::new(),
+        finished: false,
         idle_timeout,
-        None,
-        SseMetricContext::unknown(),
+        cancellation: SseClientCancellation::new(None, SseMetricContext::unknown()),
         pending_bytes,
-    )
+    })
 }
 
 #[cfg(test)]
@@ -5073,16 +5007,18 @@ async fn should_record_sse_client_cancellation_when_repaired_body_is_dropped() {
     let metrics = Metrics::default();
     let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
     let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    let mut repaired = Box::pin(repair_sse_stream_from_state(
+    let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
         stream,
-        SseRepair::default(),
-        VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
-        false,
-        Duration::from_secs(300),
-        Some(metrics.clone()),
-        SseMetricContext::new("gpt-5", "acct_primary"),
+        repair: SseRepair::default(),
+        pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
+        finished: false,
+        idle_timeout: Duration::from_secs(300),
+        cancellation: SseClientCancellation::new(
+            Some(metrics.clone()),
+            SseMetricContext::new("gpt-5", "acct_primary"),
+        ),
         pending_bytes,
-    ));
+    }));
 
     assert_eq!(
         repaired.as_mut().next().await.unwrap().unwrap(),
@@ -5112,16 +5048,18 @@ async fn should_record_sse_upstream_error_after_commit_with_route_labels() {
         "upstream reset",
     ))]);
     let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    let mut repaired = Box::pin(repair_sse_stream_from_state(
+    let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
         stream,
-        SseRepair::default(),
-        VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
-        false,
-        Duration::from_secs(300),
-        Some(metrics.clone()),
-        SseMetricContext::new("gpt-5", "acct_primary"),
+        repair: SseRepair::default(),
+        pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
+        finished: false,
+        idle_timeout: Duration::from_secs(300),
+        cancellation: SseClientCancellation::new(
+            Some(metrics.clone()),
+            SseMetricContext::new("gpt-5", "acct_primary"),
+        ),
         pending_bytes,
-    ));
+    }));
 
     assert_eq!(
         repaired.as_mut().next().await.unwrap().unwrap(),
@@ -6153,7 +6091,13 @@ async fn should_return_426_for_responses_and_compact_get_without_websocket_upgra
     assert_eq!(responses.status(), StatusCode::UPGRADE_REQUIRED);
     let body = to_bytes(responses.into_body(), 1024 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "GET /v1/responses requires WebSocket upgrade"
+    );
+    assert_eq!(body["error"]["type"], "tokenproxy_error");
     assert_eq!(body["error"]["code"], "unsupported_method");
+    assert!(body["error"]["param"].is_null());
     assert!(
         body["error"]["tokenproxy_request_id"]
             .as_str()
@@ -6176,7 +6120,13 @@ async fn should_return_426_for_responses_and_compact_get_without_websocket_upgra
     assert_eq!(compact.status(), StatusCode::UPGRADE_REQUIRED);
     let body = to_bytes(compact.into_body(), 1024 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "GET /v1/responses/compact does not support WebSocket transport"
+    );
+    assert_eq!(body["error"]["type"], "tokenproxy_error");
     assert_eq!(body["error"]["code"], "unsupported_method");
+    assert!(body["error"]["param"].is_null());
 
     let metrics = state.metrics.snapshot();
     assert_eq!(

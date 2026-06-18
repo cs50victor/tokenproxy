@@ -1,5 +1,12 @@
+use std::borrow::Cow;
+
 pub fn model_family_label(model: &str) -> String {
-    let model = model.trim().to_ascii_lowercase();
+    let model = model.trim();
+    let model = if model.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(model.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(model)
+    };
     if model.is_empty() || model == "unknown" {
         return "unknown".to_string();
     }
@@ -27,6 +34,7 @@ mod tests {
     #[test]
     fn should_label_major_model_family() {
         assert_eq!(model_family_label("gpt-5.5"), "gpt-5");
+        assert_eq!(model_family_label("GPT-5.5"), "gpt-5");
         assert_eq!(model_family_label("gpt-4o-mini"), "gpt-4o");
         assert_eq!(model_family_label("o3-mini"), "o3-mini");
         assert_eq!(model_family_label("unknown"), "unknown");

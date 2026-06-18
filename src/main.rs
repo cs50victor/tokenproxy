@@ -11,7 +11,7 @@ use tokenproxy::logging::{
     LogFormat, StartupConfigSummary, StartupLogLine, shutdown_forced_log_line, startup_log_line,
 };
 use tokenproxy::server::{AppState, app};
-use tokenproxy::timestamps::now_timestamp_pair;
+use tokenproxy::time_parse::now_timestamp_pair;
 use tokio::sync::watch;
 
 #[derive(Debug, Parser)]
@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogFormat::Text
     };
     let startup_config = startup_config_summary(&effective);
+    let bind_label = bind.to_string();
 
     if cli.dry_run {
         let timestamps = now_timestamp_pair();
@@ -81,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timestamp_local: &timestamps.local,
                 timestamp_utc: &timestamps.utc,
                 server_id: &effective.config.server.id,
-                bind: &bind.to_string(),
+                bind: &bind_label,
                 enabled_accounts: effective.accounts.len(),
                 config: &startup_config,
             },)
@@ -99,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             timestamp_local: &timestamps.local,
             timestamp_utc: &timestamps.utc,
             server_id: &effective.config.server.id,
-            bind: &bind.to_string(),
+            bind: &bind_label,
             enabled_accounts: effective.accounts.len(),
             config: &startup_config,
         },)

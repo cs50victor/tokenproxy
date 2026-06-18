@@ -34,7 +34,20 @@ pub fn build_upstream_headers(
     let mut output = HeaderMap::new();
 
     for (name, value) in inbound {
-        if should_strip_header(name, allow_openai_headers) {
+        let lower = name.as_str();
+        let forward_openai_header =
+            allow_openai_headers && matches!(lower, "openai-organization" | "openai-project");
+        if lower == AUTHORIZATION.as_str()
+            || lower == HOST.as_str()
+            || lower == CONTENT_LENGTH.as_str()
+            || HOP_BY_HOP.contains(&lower)
+            || lower == "x-api-key"
+            || lower == "api-key"
+            // reqwest is built without decompression features and tokenproxy strips
+            // Content-Encoding from responses, so force identity upstream encoding.
+            || lower == "accept-encoding"
+            || (lower.starts_with("openai-") && !forward_openai_header)
+        {
             continue;
         }
         output.append(name.clone(), value.clone());
@@ -43,10 +56,10 @@ pub fn build_upstream_headers(
     output.insert(HOST, header_value(upstream_host, "upstream host")?);
     match auth {
         UpstreamAuth::Bearer => {
-            output.insert(
-                AUTHORIZATION,
-                sensitive_bearer_header_value(upstream_token, "authorization")?,
-            );
+            let mut authorization =
+                header_value(&format!("Bearer {upstream_token}"), "authorization")?;
+            authorization.set_sensitive(true);
+            output.insert(AUTHORIZATION, authorization);
             // ChatGPT Codex auth pairs the OAuth access-token bearer with the
             // workspace id header; see codex-rs model-provider BearerAuthProvider.
             if let Some(account_id) = chatgpt_account_id {
@@ -103,25 +116,6 @@ pub fn filter_downstream_response_headers(upstream: &HeaderMap) -> HeaderMap {
     output
 }
 
-fn should_strip_header(name: &HeaderName, allow_openai_headers: bool) -> bool {
-    let lower = name.as_str();
-    lower == AUTHORIZATION.as_str()
-        || lower == HOST.as_str()
-        || lower == CONTENT_LENGTH.as_str()
-        || HOP_BY_HOP.contains(&lower)
-        || lower == "x-api-key"
-        || lower == "api-key"
-        // reqwest is built without decompression features and tokenproxy strips
-        // Content-Encoding from responses, so force identity upstream encoding.
-        || lower == "accept-encoding"
-        || (lower.starts_with("openai-")
-            && !should_forward_openai_header(lower, allow_openai_headers))
-}
-
-fn should_forward_openai_header(lower: &str, allow_openai_headers: bool) -> bool {
-    allow_openai_headers && matches!(lower, "openai-organization" | "openai-project")
-}
-
 fn header_value(value: &str, label: &str) -> Result<HeaderValue, TokenproxyError> {
     HeaderValue::from_str(value).map_err(|error| {
         TokenproxyError::new(
@@ -130,15 +124,6 @@ fn header_value(value: &str, label: &str) -> Result<HeaderValue, TokenproxyError
             format!("invalid {label} header value: {error}"),
         )
     })
-}
-
-fn sensitive_bearer_header_value(
-    bearer_token: &str,
-    label: &str,
-) -> Result<HeaderValue, TokenproxyError> {
-    let mut value = header_value(&format!("Bearer {bearer_token}"), label)?;
-    value.set_sensitive(true);
-    Ok(value)
 }
 
 #[cfg(test)]

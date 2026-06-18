@@ -28,6 +28,16 @@ pub struct AccountConfig {
     pub supports_anthropic_messages: bool,
 }
 
+// Legacy "fast" requests map to the "priority" service tier.
+pub(crate) fn normalize_service_tier(service_tier: &str) -> &str {
+    let trimmed = service_tier.trim();
+    if trimmed.eq_ignore_ascii_case("fast") {
+        "priority"
+    } else {
+        trimmed
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountState {
     pub config: AccountConfig,

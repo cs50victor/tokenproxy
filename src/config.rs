@@ -189,6 +189,23 @@ impl Default for AccountConfig {
     }
 }
 
+impl AccountConfig {
+    fn supports_any_route(&self) -> bool {
+        self.supports_chat_completions
+            || self.supports_responses
+            || self.supports_responses_ws
+            || self.supports_compact
+            || self.supports_anthropic_messages
+    }
+
+    fn requires_model_allowlist(&self) -> bool {
+        self.supports_chat_completions
+            || self.supports_responses
+            || self.supports_responses_ws
+            || self.supports_anthropic_messages
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub enum AccountKind {
     #[serde(rename = "openai_api_key")]
@@ -315,6 +332,11 @@ fn parse_cli_override(raw: &str) -> Result<(String, TomlValue), TokenproxyError>
             "empty key in -c override: {raw}"
         )));
     }
+    if key.split('.').any(str::is_empty) {
+        return Err(TokenproxyError::invalid_config(format!(
+            "empty path segment in -c override: {raw}"
+        )));
+    }
 
     let value = match parse_toml_value(value.trim()) {
         Ok(value) => value,
@@ -340,19 +362,19 @@ fn parse_toml_value(raw: &str) -> Result<TomlValue, toml::de::Error> {
 
 fn apply_single_override(root: &mut TomlValue, path: &str, value: TomlValue) {
     let mut current = root;
-    let parts = path.split('.').collect::<Vec<_>>();
+    let mut parts = path.split('.').peekable();
 
-    for (index, part) in parts.iter().enumerate() {
-        let is_last = index == parts.len() - 1;
+    while let Some(part) = parts.next() {
+        let is_last = parts.peek().is_none();
 
         if is_last {
             match current {
                 TomlValue::Table(table) => {
-                    table.insert((*part).to_string(), value);
+                    table.insert(part.to_string(), value);
                 }
                 _ => {
                     let mut table = toml::map::Map::new();
-                    table.insert((*part).to_string(), value);
+                    table.insert(part.to_string(), value);
                     *current = TomlValue::Table(table);
                 }
             }
@@ -362,14 +384,14 @@ fn apply_single_override(root: &mut TomlValue, path: &str, value: TomlValue) {
         match current {
             TomlValue::Table(table) => {
                 current = table
-                    .entry((*part).to_string())
+                    .entry(part.to_string())
                     .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
             }
             _ => {
                 *current = TomlValue::Table(toml::map::Map::new());
                 if let TomlValue::Table(table) = current {
                     current = table
-                        .entry((*part).to_string())
+                        .entry(part.to_string())
                         .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
                 }
             }
@@ -678,7 +700,7 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
     }
 
     for account in &config.accounts {
-        if account.enabled && !account_supports_any_route(account) {
+        if account.enabled && !account.supports_any_route() {
             return Err(TokenproxyError::invalid_config(format!(
                 "enabled account {} must support at least one tokenproxy route",
                 account.id
@@ -714,8 +736,7 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
                 account.id
             )));
         }
-        if account.enabled && account_requires_model_allowlist(account) && account.models.is_empty()
-        {
+        if account.enabled && account.requires_model_allowlist() && account.models.is_empty() {
             return Err(TokenproxyError::invalid_config(format!(
                 "enabled account {} must set models for routed generation endpoints",
                 account.id
@@ -725,21 +746,6 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
     }
 
     Ok(())
-}
-
-fn account_supports_any_route(account: &AccountConfig) -> bool {
-    account.supports_chat_completions
-        || account.supports_responses
-        || account.supports_responses_ws
-        || account.supports_compact
-        || account.supports_anthropic_messages
-}
-
-fn account_requires_model_allowlist(account: &AccountConfig) -> bool {
-    account.supports_chat_completions
-        || account.supports_responses
-        || account.supports_responses_ws
-        || account.supports_anthropic_messages
 }
 
 fn validate_base_url(config: &Config, account: &AccountConfig) -> Result<(), TokenproxyError> {
@@ -1097,6 +1103,29 @@ mod tests {
         );
         assert!(config.server.allow_openai_request_headers);
         assert_eq!(config.accounts[0].models, vec!["gpt-5.5"]);
+    }
+
+    #[test]
+    fn should_reject_cli_override_paths_with_empty_segments() {
+        let error = parse_config_with_cli_overrides(None, &["server..id=tokenproxy".to_string()])
+            .unwrap_err();
+
+        assert_eq!(error.code.as_str(), "invalid_config");
+        assert!(error.message.contains("empty path segment"));
+    }
+
+    #[test]
+    fn should_fallback_malformed_cli_override_values_to_strings() {
+        let config = parse_config_with_cli_overrides(
+            None,
+            &["downstream_auth.token_env='TOKENPROXY_CLIENT_KEY".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.downstream_auth.token_env.as_str(),
+            "TOKENPROXY_CLIENT_KEY"
+        );
     }
 
     #[test]

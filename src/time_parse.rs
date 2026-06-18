@@ -1,12 +1,18 @@
-use std::time::SystemTime;
-
 use chrono::DateTime;
 use chrono::Datelike;
 use chrono::FixedOffset;
+use chrono::Local;
+use chrono::Offset;
 use chrono::SecondsFormat;
 use chrono::TimeDelta;
 use chrono::Utc;
 use humantime::parse_duration;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimestampPair {
+    pub local: String,
+    pub utc: String,
+}
 
 pub fn parse_rfc3339(value: &str) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(value).ok()
@@ -22,6 +28,23 @@ pub fn format_rfc3339<Tz: chrono::TimeZone>(value: DateTime<Tz>) -> Option<Strin
         return None;
     }
     Some(value.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+}
+
+pub fn now_timestamp_pair() -> TimestampPair {
+    let utc = Utc::now();
+    let local_offset = Local::now().offset().fix();
+    timestamp_pair_at(utc, local_offset)
+}
+
+pub fn now_rfc3339() -> String {
+    format_rfc3339(Utc::now()).expect("UTC timestamp formats as RFC3339")
+}
+
+pub fn timestamp_pair_at(utc: DateTime<Utc>, local_offset: FixedOffset) -> TimestampPair {
+    let local = format_rfc3339(utc.with_timezone(&local_offset))
+        .expect("local timestamp formats as RFC3339");
+    let utc = format_rfc3339(utc).expect("UTC timestamp formats as RFC3339");
+    TimestampPair { local, utc }
 }
 
 pub fn rfc3339_after_duration(observed_at: &str, duration: &str) -> Option<String> {
@@ -42,22 +65,15 @@ pub fn rfc3339_after_seconds(observed_at: &str, seconds: f64) -> Option<String> 
 
 pub fn retry_after_deadline_ms(value: &str, now_ms: u64) -> Option<u64> {
     let value = value.trim();
-    if let Some(seconds) = parse_retry_after_delta_seconds(value) {
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = i64::try_from(value.parse::<u64>().ok()?).ok()?;
         let now = DateTime::from_timestamp_millis(i64::try_from(now_ms).ok()?)?;
         let duration = TimeDelta::try_seconds(seconds)?;
         return Some(timestamp_ms(now.checked_add_signed(duration)?));
     }
     // Retry-After uses HTTP-date, including obsolete RFC 850 and asctime forms.
     let deadline = httpdate::parse_http_date(value).ok()?;
-    Some(system_time_unix_ms(deadline))
-}
-
-fn parse_retry_after_delta_seconds(value: &str) -> Option<i64> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let seconds = value.parse::<u64>().ok()?;
-    i64::try_from(seconds).ok()
+    Some(timestamp_ms(DateTime::<Utc>::from(deadline)))
 }
 
 pub fn unix_ms_from_rfc3339(value: &str) -> Option<u64> {
@@ -80,10 +96,6 @@ pub fn timestamp_ms<Tz: chrono::TimeZone>(value: DateTime<Tz>) -> u64 {
     u64::try_from(value.timestamp_millis()).unwrap_or(0)
 }
 
-pub fn system_time_unix_ms(value: SystemTime) -> u64 {
-    timestamp_ms(DateTime::<Utc>::from(value))
-}
-
 pub fn now_unix_ms() -> u64 {
     timestamp_ms(Utc::now())
 }
@@ -91,6 +103,7 @@ pub fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn should_parse_rfc3339_with_chrono_datetime_type() {
@@ -186,5 +199,44 @@ mod tests {
     fn should_reject_signed_retry_after_delta_seconds() {
         assert!(retry_after_deadline_ms("+12", 5_000).is_none());
         assert!(retry_after_deadline_ms("-12", 5_000).is_none());
+    }
+
+    #[test]
+    fn should_format_local_offset_and_utc_timestamps_from_same_instant() {
+        let utc = DateTime::parse_from_rfc3339("2026-05-27T12:00:00Z")
+            .unwrap()
+            .to_utc();
+        let offset = FixedOffset::west_opt(7 * 60 * 60).unwrap();
+
+        let pair = timestamp_pair_at(utc, offset);
+
+        assert_eq!(pair.local, "2026-05-27T05:00:00-07:00");
+        assert_eq!(pair.utc, "2026-05-27T12:00:00Z");
+    }
+
+    #[test]
+    fn should_format_current_timestamp_pair_as_rfc3339() {
+        let pair = now_timestamp_pair();
+
+        DateTime::parse_from_rfc3339(&pair.local).expect("local timestamp parses as RFC3339");
+        DateTime::parse_from_rfc3339(&pair.utc).expect("UTC timestamp parses as RFC3339");
+    }
+
+    #[test]
+    fn should_format_current_utc_timestamp_as_rfc3339() {
+        let timestamp = now_rfc3339();
+
+        DateTime::parse_from_rfc3339(&timestamp).expect("UTC timestamp parses as RFC3339");
+    }
+
+    #[test]
+    fn should_format_utc_local_offset_as_z() {
+        let utc = Utc.with_ymd_and_hms(2026, 5, 27, 12, 0, 0).unwrap();
+        let offset = FixedOffset::east_opt(0).unwrap();
+
+        let pair = timestamp_pair_at(utc, offset);
+
+        assert_eq!(pair.local, "2026-05-27T12:00:00Z");
+        assert_eq!(pair.utc, "2026-05-27T12:00:00Z");
     }
 }
