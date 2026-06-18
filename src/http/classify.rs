@@ -3,8 +3,8 @@ use bytes::Bytes;
 use serde_json::Value;
 
 use crate::error::{ErrorCode, TokenproxyError};
-use crate::model::model_family_label;
 use crate::routing::account::normalize_service_tier;
+use crate::routing::model_family_label;
 use crate::routing::{Endpoint, RouteRequest, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

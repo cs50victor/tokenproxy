@@ -165,12 +165,6 @@ fn latency_bucket(duration_ms: u64) -> u16 {
 }
 
 impl AppState {
-    #[cfg(test)]
-    pub fn new(effective: EffectiveConfig) -> Result<Self, TokenproxyError> {
-        let (shutdown_tx, _) = watch::channel(false);
-        Self::new_with_log_format_and_shutdown(effective, LogFormat::Text, shutdown_tx)
-    }
-
     pub fn new_with_log_format_and_shutdown(
         effective: EffectiveConfig,
         log_format: LogFormat,
@@ -269,13 +263,6 @@ impl AppState {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn clear_account_health(&self, account_id: &str) {
-        if let Some(cell) = self.account_health_cell(account_id) {
-            cell.clear();
-        }
-    }
-
     pub(super) fn clear_account_health_if_not_auth_failed(&self, account_id: &str) {
         if let Some(cell) = self.account_health_cell(account_id)
             && cell.state.load(Ordering::Acquire) != ACCOUNT_HEALTH_AUTH_FAILED
@@ -300,11 +287,28 @@ impl AppState {
 }
 
 #[cfg(test)]
-#[test]
-fn should_reset_transient_failure_count_after_quiet_window() {
-    let cell = AccountHealthCell::new();
+pub mod tests {
+    use super::*;
 
-    assert_eq!(cell.increment_transient_failure_count_at(1_000), 1);
-    assert_eq!(cell.increment_transient_failure_count_at(2_000), 2);
-    assert_eq!(cell.increment_transient_failure_count_at(302_000), 1);
+    impl AppState {
+        pub fn new(effective: EffectiveConfig) -> Result<Self, TokenproxyError> {
+            let (shutdown_tx, _) = watch::channel(false);
+            Self::new_with_log_format_and_shutdown(effective, LogFormat::Text, shutdown_tx)
+        }
+
+        pub fn clear_account_health(&self, account_id: &str) {
+            if let Some(cell) = self.account_health_cell(account_id) {
+                cell.clear();
+            }
+        }
+    }
+
+    #[test]
+    fn should_reset_transient_failure_count_after_quiet_window() {
+        let cell = AccountHealthCell::new();
+
+        assert_eq!(cell.increment_transient_failure_count_at(1_000), 1);
+        assert_eq!(cell.increment_transient_failure_count_at(2_000), 2);
+        assert_eq!(cell.increment_transient_failure_count_at(302_000), 1);
+    }
 }

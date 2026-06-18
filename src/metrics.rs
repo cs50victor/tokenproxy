@@ -1030,10 +1030,7 @@ mod tests {
 
         assert!(!text.contains("tokenproxy_account_usage_reset_timestamp_seconds"));
     }
-}
 
-#[cfg(test)]
-mod counter_tests {
     use super::*;
 
     #[test]

@@ -40,7 +40,6 @@ use crate::http::models::model_list;
 use crate::http::sse_repair::SseRepair;
 use crate::logging::{RequestLog, RouteSelectionLog};
 use crate::metrics::{Metrics, prometheus_text_with_usage};
-use crate::model::model_family_label;
 use crate::observability::{compact_body_hash_record, request_body_dump_record, sha256_hex};
 use crate::responses::replay::{
     ReplayPlan, is_compacted_request_window, is_previous_response_not_found_event,
@@ -49,6 +48,7 @@ use crate::responses::replay::{
 use crate::responses::state::ReplayState;
 use crate::responses::websocket::{WebSocketAction, classify_downstream_message};
 use crate::routing::account::normalize_service_tier;
+use crate::routing::model_family_label;
 use crate::routing::{
     AccountConfig as RoutingAccountConfig, AccountHealth, AccountState, Endpoint, RouteRequest,
     Transport, account_static_compatible, select_account,
@@ -3619,1473 +3619,1428 @@ fn routing_account_state(
 }
 
 #[cfg(test)]
-use {
-    crate::config::{AccountConfig, Config, EffectiveConfig},
-    futures_util::TryStreamExt,
-    std::{net::SocketAddr, sync::Mutex as StdMutex},
-    tokio::{net::TcpListener, time::sleep},
-    tokio_tungstenite::{accept_async, accept_hdr_async},
-    tower::ServiceExt,
-};
+mod tests {
+    use super::*;
+    use crate::config::{AccountConfig, Config, EffectiveConfig};
+    use futures_util::TryStreamExt;
+    use std::{net::SocketAddr, sync::Mutex as StdMutex};
+    use tokio::{net::TcpListener, time::sleep};
+    use tokio_tungstenite::{accept_async, accept_hdr_async};
+    use tower::ServiceExt;
 
-#[cfg(test)]
-impl SseMetricContext {
-    fn unknown() -> Self {
-        Self::new("unknown", "unknown")
-    }
-}
-
-#[cfg(test)]
-async fn fake_websocket_upstream(accepted_count: Arc<AtomicUsize>) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            accepted_count.fetch_add(1, Ordering::Relaxed);
-            tokio::spawn(async move {
-                if let Ok(mut socket) = accept_async(stream).await {
-                    while socket.next().await.is_some() {}
-                }
-            });
+    impl SseMetricContext {
+        fn unknown() -> Self {
+            Self::new("unknown", "unknown")
         }
-    });
-    address
-}
+    }
 
-#[cfg(test)]
-#[allow(clippy::result_large_err)]
-async fn fake_header_capture_websocket_upstream(
-    request_ids: Arc<StdMutex<Vec<Option<String>>>>,
-) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let request_ids = Arc::clone(&request_ids);
-            tokio::spawn(async move {
-                let callback =
-                    |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                     response| {
-                        let request_id = request
-                            .headers()
-                            .get("x-tokenproxy-request-id")
-                            .and_then(|value| value.to_str().ok())
-                            .map(ToOwned::to_owned);
-                        request_ids
-                            .lock()
-                            .expect("request id capture lock is not poisoned")
-                            .push(request_id);
-                        Ok(response)
-                    };
-                if let Ok(mut socket) = accept_hdr_async(stream, callback).await {
-                    while socket.next().await.is_some() {}
-                }
-            });
+    async fn fake_websocket_upstream(accepted_count: Arc<AtomicUsize>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted_count.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(async move {
+                    if let Ok(mut socket) = accept_async(stream).await {
+                        while socket.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    #[allow(clippy::result_large_err)]
+    async fn fake_header_capture_websocket_upstream(
+        request_ids: Arc<StdMutex<Vec<Option<String>>>>,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let request_ids = Arc::clone(&request_ids);
+                tokio::spawn(async move {
+                    let callback =
+                        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response| {
+                            let request_id = request
+                                .headers()
+                                .get("x-tokenproxy-request-id")
+                                .and_then(|value| value.to_str().ok())
+                                .map(ToOwned::to_owned);
+                            request_ids
+                                .lock()
+                                .expect("request id capture lock is not poisoned")
+                                .push(request_id);
+                            Ok(response)
+                        };
+                    if let Ok(mut socket) = accept_hdr_async(stream, callback).await {
+                        while socket.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    fn effective_config(accounts: Vec<EffectiveAccount>) -> EffectiveConfig {
+        let mut config = Config::default();
+        config.accounts = accounts
+            .iter()
+            .map(|account| account.config.clone())
+            .collect();
+        config.server.allow_insecure_upstream = true;
+        config.retry = RetryConfig {
+            max_precommit_retries: 1,
+            ..RetryConfig::default()
+        };
+        EffectiveConfig {
+            config,
+            downstream_token: "client-key".to_string(),
+            account_hash_key: "test-account-hash-key".to_string(),
+            accounts,
         }
-    });
-    address
-}
-
-#[cfg(test)]
-fn effective_config(accounts: Vec<EffectiveAccount>) -> EffectiveConfig {
-    let mut config = Config::default();
-    config.accounts = accounts
-        .iter()
-        .map(|account| account.config.clone())
-        .collect();
-    config.server.allow_insecure_upstream = true;
-    config.retry = RetryConfig {
-        max_precommit_retries: 1,
-        ..RetryConfig::default()
-    };
-    EffectiveConfig {
-        config,
-        downstream_token: "client-key".to_string(),
-        account_hash_key: "test-account-hash-key".to_string(),
-        accounts,
     }
-}
 
-#[cfg(test)]
-fn account(id: &str, base_url: String, bearer_token: &str, priority: i32) -> EffectiveAccount {
-    EffectiveAccount {
-        config: AccountConfig {
-            id: id.to_string(),
-            kind: AccountKind::OpenAiApiKey,
-            base_url,
-            token_env: Some(format!("{id}_TOKEN")),
-            priority,
-            models: vec!["gpt-5.5".to_string()],
-            supports_chat_completions: true,
-            supports_responses: true,
-            supports_responses_ws: true,
-            supports_compact: true,
-            service_tiers: vec!["default".to_string(), "priority".to_string()],
-            ..AccountConfig::default()
-        },
-        bearer_token: bearer_token.to_string(),
-        chatgpt_account_id: None,
-        prompt_cache_key_seed: None,
+    fn account(id: &str, base_url: String, bearer_token: &str, priority: i32) -> EffectiveAccount {
+        EffectiveAccount {
+            config: AccountConfig {
+                id: id.to_string(),
+                kind: AccountKind::OpenAiApiKey,
+                base_url,
+                token_env: Some(format!("{id}_TOKEN")),
+                priority,
+                models: vec!["gpt-5.5".to_string()],
+                supports_chat_completions: true,
+                supports_responses: true,
+                supports_responses_ws: true,
+                supports_compact: true,
+                service_tiers: vec!["default".to_string(), "priority".to_string()],
+                ..AccountConfig::default()
+            },
+            bearer_token: bearer_token.to_string(),
+            chatgpt_account_id: None,
+            prompt_cache_key_seed: None,
+        }
     }
-}
 
-#[cfg(test)]
-fn anthropic_account(id: &str, base_url: String, api_key: &str, priority: i32) -> EffectiveAccount {
-    EffectiveAccount {
-        config: AccountConfig {
-            id: id.to_string(),
-            kind: AccountKind::AnthropicApiKey,
-            base_url,
-            token_env: Some(format!("{id}_TOKEN")),
-            priority,
-            models: vec!["claude-sonnet-4.5".to_string()],
-            supports_anthropic_messages: true,
-            service_tiers: Vec::new(),
-            ..AccountConfig::default()
-        },
-        bearer_token: api_key.to_string(),
-        chatgpt_account_id: None,
-        prompt_cache_key_seed: None,
+    fn anthropic_account(
+        id: &str,
+        base_url: String,
+        api_key: &str,
+        priority: i32,
+    ) -> EffectiveAccount {
+        EffectiveAccount {
+            config: AccountConfig {
+                id: id.to_string(),
+                kind: AccountKind::AnthropicApiKey,
+                base_url,
+                token_env: Some(format!("{id}_TOKEN")),
+                priority,
+                models: vec!["claude-sonnet-4.5".to_string()],
+                supports_anthropic_messages: true,
+                service_tiers: Vec::new(),
+                ..AccountConfig::default()
+            },
+            bearer_token: api_key.to_string(),
+            chatgpt_account_id: None,
+            prompt_cache_key_seed: None,
+        }
     }
-}
 
-#[cfg(test)]
-fn ws_event(text: &str) -> Value {
-    serde_json::from_str(text).expect("test event payload parses")
-}
+    fn ws_event(text: &str) -> Value {
+        serde_json::from_str(text).expect("test event payload parses")
+    }
 
-#[cfg(test)]
-#[test]
-fn should_record_first_websocket_template_without_transport_fields() {
-    let account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    let mut state = ReplayState::default();
+    #[test]
+    fn should_record_first_websocket_template_without_transport_fields() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let mut state = ReplayState::default();
 
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "stream": true,
+                "background": true,
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+
+        assert!(payload.get("stream").is_none());
+        assert!(payload.get("background").is_none());
+        assert_eq!(state.account_id.as_deref(), Some("primary"));
+        assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
+    }
+
+    #[test]
+    fn should_add_prompt_cache_key_to_first_websocket_template_when_account_has_seed() {
+        let mut account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        account.prompt_cache_key_seed = Some("stable-seed".to_string());
+        let mut state = ReplayState::default();
+
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload["prompt_cache_key"].as_str(),
+            Some("tp_35de55d6cc39b7f4a248e35e6ed26116")
+        );
+        assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
+    }
+
+    #[test]
+    fn should_preserve_websocket_prompt_cache_key_supplied_by_client() {
+        let mut account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        account.prompt_cache_key_seed = Some("stable-seed".to_string());
+        let mut state = ReplayState::default();
+
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "prompt_cache_key": "client-key",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(payload["prompt_cache_key"].as_str(), Some("client-key"));
+    }
+
+    #[test]
+    fn should_keep_prompt_cache_key_on_incremental_websocket_payload() {
+        let mut account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        account.prompt_cache_key_seed = Some("stable-seed".to_string());
+        let mut state = ReplayState::default();
+        prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+        state.record_completed("resp_1".to_string(), vec![]);
+
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "input": [{"type": "message", "role": "user", "content": "next"}]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            payload["prompt_cache_key"].as_str(),
+            Some("tp_35de55d6cc39b7f4a248e35e6ed26116")
+        );
+    }
+
+    #[test]
+    fn should_route_followup_websocket_create_from_last_request_template() {
+        let state = ReplayState {
+            last_request_template: Some(serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "service_tier": "priority",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            })),
+            ..ReplayState::default()
+        };
+
+        let context = websocket_route_context(
+            &state,
+            &serde_json::json!({
+                "type": "response.create",
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(context.model, "gpt-5.5");
+        assert_eq!(context.service_tier.as_deref(), Some("priority"));
+        assert_eq!(context.model_family, "gpt-5");
+    }
+
+    #[test]
+    fn should_mark_websocket_route_request_as_requiring_incremental_when_previous_response_id_is_present()
+     {
+        let state = ReplayState::default();
+        let value = serde_json::json!({
             "type": "response.create",
             "model": "gpt-5.5",
-            "stream": true,
-            "background": true,
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-
-    assert!(payload.get("stream").is_none());
-    assert!(payload.get("background").is_none());
-    assert_eq!(state.account_id.as_deref(), Some("primary"));
-    assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
-}
-
-#[cfg(test)]
-#[test]
-fn should_add_prompt_cache_key_to_first_websocket_template_when_account_has_seed() {
-    let mut account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    account.prompt_cache_key_seed = Some("stable-seed".to_string());
-    let mut state = ReplayState::default();
-
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-
-    assert_eq!(
-        payload["prompt_cache_key"].as_str(),
-        Some("tp_35de55d6cc39b7f4a248e35e6ed26116")
-    );
-    assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
-}
-
-#[cfg(test)]
-#[test]
-fn should_preserve_websocket_prompt_cache_key_supplied_by_client() {
-    let mut account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    account.prompt_cache_key_seed = Some("stable-seed".to_string());
-    let mut state = ReplayState::default();
-
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "prompt_cache_key": "client-key",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-
-    assert_eq!(payload["prompt_cache_key"].as_str(), Some("client-key"));
-}
-
-#[cfg(test)]
-#[test]
-fn should_keep_prompt_cache_key_on_incremental_websocket_payload() {
-    let mut account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    account.prompt_cache_key_seed = Some("stable-seed".to_string());
-    let mut state = ReplayState::default();
-    prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-    state.record_completed("resp_1".to_string(), vec![]);
-
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "input": [{"type": "message", "role": "user", "content": "next"}]
-        }),
-    )
-    .unwrap();
-
-    assert_eq!(
-        payload["prompt_cache_key"].as_str(),
-        Some("tp_35de55d6cc39b7f4a248e35e6ed26116")
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn should_route_followup_websocket_create_from_last_request_template() {
-    let state = ReplayState {
-        last_request_template: Some(serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "service_tier": "priority",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        })),
-        ..ReplayState::default()
-    };
-
-    let context = websocket_route_context(
-        &state,
-        &serde_json::json!({
-            "type": "response.create",
-            "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
-        }),
-    )
-    .unwrap();
-
-    assert_eq!(context.model, "gpt-5.5");
-    assert_eq!(context.service_tier.as_deref(), Some("priority"));
-    assert_eq!(context.model_family, "gpt-5");
-}
-
-#[cfg(test)]
-#[test]
-fn should_mark_websocket_route_request_as_requiring_incremental_when_previous_response_id_is_present()
- {
-    let state = ReplayState::default();
-    let value = serde_json::json!({
-        "type": "response.create",
-        "model": "gpt-5.5",
-        "previous_response_id": "resp_1",
-        "input": [{"type": "message", "role": "user", "content": "next"}]
-    });
-    let context = websocket_route_context(&state, &value).unwrap();
-
-    let request = websocket_route_request(&state, &context, &value);
-
-    assert!(request.requires_incremental_previous_response_id);
-}
-
-#[cfg(test)]
-#[test]
-fn should_prepare_incremental_websocket_payload_after_completed_response() {
-    let account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    let mut state = ReplayState::default();
-    prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-    state.record_completed(
-        "resp_1".to_string(),
-        vec![serde_json::json!({"type": "message", "phase": "final", "content": "hello"})],
-    );
-
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
-        }),
-    )
-    .unwrap();
-
-    assert_eq!(payload["previous_response_id"], "resp_1");
-    assert_eq!(payload["input"].as_array().unwrap().len(), 1);
-}
-
-#[cfg(test)]
-#[test]
-fn should_prepare_full_replay_after_reconnected_websocket_loses_previous_state() {
-    let account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    let mut state = ReplayState::default();
-    prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-    state.record_completed(
-        "resp_1".to_string(),
-        vec![serde_json::json!({"type": "message", "phase": "final", "content": "hello"})],
-    );
-
-    let payload = prepare_websocket_upstream_payload_with_hash_key(
-        &mut state,
-        &account,
-        "",
-        serde_json::json!({
-            "type": "response.create",
             "previous_response_id": "resp_1",
-            "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
-        }),
-        false,
-    )
-    .unwrap();
-
-    assert!(payload.get("previous_response_id").is_none());
-    assert_eq!(payload["model"], "gpt-5.5");
-    assert_eq!(payload["input"][1]["phase"], "final");
-    assert_eq!(payload["input"].as_array().unwrap().len(), 3);
-}
-
-#[cfg(test)]
-#[test]
-fn should_prepare_full_replay_when_incremental_is_not_supported() {
-    let mut account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    account.config.supports_responses_ws = true;
-    account.config.supports_incremental_previous_response_id = false;
-    let mut state = ReplayState::default();
-    prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-    state.record_completed(
-        "resp_1".to_string(),
-        vec![serde_json::json!({"type": "message", "phase": "final", "content": "hello"})],
-    );
-
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "previous_response_id": "stale",
-            "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
-        }),
-    )
-    .unwrap();
-
-    assert!(payload.get("previous_response_id").is_none());
-    assert_eq!(payload["model"], "gpt-5.5");
-    assert_eq!(payload["input"][1]["phase"], "final");
-    assert_eq!(payload["input"].as_array().unwrap().len(), 3);
-}
-
-#[cfg(test)]
-#[test]
-fn should_advance_full_replay_template_after_non_incremental_turn() {
-    let mut account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    account.config.supports_responses_ws = true;
-    account.config.supports_incremental_previous_response_id = false;
-    let mut state = ReplayState::default();
-    prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "hello"}]
-        }),
-    )
-    .unwrap();
-    state.record_completed(
-        "resp_1".to_string(),
-        vec![serde_json::json!({
-            "type": "message",
-            "phase": "final",
-            "content": "first answer"
-        })],
-    );
-
-    let first_replay = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
-        }),
-    )
-    .unwrap();
-    assert_eq!(state.last_request_template.as_ref().unwrap(), &first_replay);
-    state.record_completed(
-        "resp_2".to_string(),
-        vec![serde_json::json!({
-            "type": "message",
-            "phase": "final",
-            "content": "second answer"
-        })],
-    );
-
-    let second_replay = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
             "input": [{"type": "message", "role": "user", "content": "next"}]
-        }),
-    )
-    .unwrap();
+        });
+        let context = websocket_route_context(&state, &value).unwrap();
 
-    let input = second_replay["input"].as_array().unwrap();
-    assert_eq!(input.len(), 5);
-    assert_eq!(input[0]["content"], "hello");
-    assert_eq!(input[1]["content"], "first answer");
-    assert_eq!(input[2]["call_id"], "call_1");
-    assert_eq!(input[3]["content"], "second answer");
-    assert_eq!(input[4]["content"], "next");
-}
+        let request = websocket_route_request(&state, &context, &value);
 
-#[cfg(test)]
-#[test]
-fn should_capture_websocket_output_item_events_for_completed_replay_state() {
-    let mut state = ReplayState::default();
+        assert!(request.requires_incremental_previous_response_id);
+    }
 
-    capture_completed_event(
-        &mut state,
-        &ws_event(
-            r#"{"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"hello","x_unknown":true}}"#,
-        ),
-    );
-    capture_completed_event(
-        &mut state,
-        &ws_event(r#"{"type":"response.completed","response":{"id":"resp_1"}}"#),
-    );
+    #[test]
+    fn should_prepare_incremental_websocket_payload_after_completed_response() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let mut state = ReplayState::default();
+        prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+        state.record_completed(
+            "resp_1".to_string(),
+            vec![serde_json::json!({"type": "message", "phase": "final", "content": "hello"})],
+        );
 
-    assert_eq!(state.last_completed_response_id.as_deref(), Some("resp_1"));
-    assert!(state.pending_output_items.is_empty());
-    assert_eq!(state.last_completed_output_items.len(), 1);
-    assert_eq!(state.last_completed_output_items[0]["phase"], "final");
-    assert_eq!(state.last_completed_output_items[0]["x_unknown"], true);
-}
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
+            }),
+        )
+        .unwrap();
 
-#[cfg(test)]
-#[test]
-fn should_prefer_completed_websocket_output_over_buffered_output_items() {
-    let mut state = ReplayState::default();
+        assert_eq!(payload["previous_response_id"], "resp_1");
+        assert_eq!(payload["input"].as_array().unwrap().len(), 1);
+    }
 
-    capture_completed_event(
-        &mut state,
-        &ws_event(
-            r#"{"type":"response.output_item.done","item":{"type":"message","phase":"draft","content":"old"}}"#,
-        ),
-    );
-    capture_completed_event(
-        &mut state,
-        &ws_event(
-            r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","phase":"final","content":"new"}]}}"#,
-        ),
-    );
+    #[test]
+    fn should_prepare_full_replay_after_reconnected_websocket_loses_previous_state() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let mut state = ReplayState::default();
+        prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+        state.record_completed(
+            "resp_1".to_string(),
+            vec![serde_json::json!({"type": "message", "phase": "final", "content": "hello"})],
+        );
 
-    assert!(state.pending_output_items.is_empty());
-    assert_eq!(state.last_completed_output_items.len(), 1);
-    assert_eq!(state.last_completed_output_items[0]["phase"], "final");
-    assert_eq!(state.last_completed_output_items[0]["content"], "new");
-}
+        let payload = prepare_websocket_upstream_payload_with_hash_key(
+            &mut state,
+            &account,
+            "",
+            serde_json::json!({
+                "type": "response.create",
+                "previous_response_id": "resp_1",
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
+            }),
+            false,
+        )
+        .unwrap();
 
-#[cfg(test)]
-#[test]
-fn should_reset_replay_state_when_compacted_window_is_used() {
-    let account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    let mut state = ReplayState::default();
-    prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [{"type": "message", "role": "user", "content": "old"}]
-        }),
-    )
-    .unwrap();
-    state.record_completed(
-        "resp_old".to_string(),
-        vec![serde_json::json!({"type": "message", "phase": "final", "content": "old"})],
-    );
+        assert!(payload.get("previous_response_id").is_none());
+        assert_eq!(payload["model"], "gpt-5.5");
+        assert_eq!(payload["input"][1]["phase"], "final");
+        assert_eq!(payload["input"].as_array().unwrap().len(), 3);
+    }
 
-    let payload = prepare_websocket_upstream_payload(
-        &mut state,
-        &account,
-        serde_json::json!({
-            "type": "response.create",
-            "model": "gpt-5.5",
-            "input": [
-                {"type": "message", "role": "user", "content": "kept"},
-                {"type": "compaction", "encrypted_content": "gAAAAABpM0Yj"},
-                {"type": "message", "role": "user", "content": "next"}
-            ]
-        }),
-    )
-    .unwrap();
+    #[test]
+    fn should_prepare_full_replay_when_incremental_is_not_supported() {
+        let mut account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        account.config.supports_responses_ws = true;
+        account.config.supports_incremental_previous_response_id = false;
+        let mut state = ReplayState::default();
+        prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+        state.record_completed(
+            "resp_1".to_string(),
+            vec![serde_json::json!({"type": "message", "phase": "final", "content": "hello"})],
+        );
 
-    assert!(payload.get("previous_response_id").is_none());
-    assert_eq!(payload["input"].as_array().unwrap().len(), 3);
-    assert!(state.last_completed_response_id.is_none());
-    assert!(state.last_completed_output_items.is_empty());
-    assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
-}
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "previous_response_id": "stale",
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
+            }),
+        )
+        .unwrap();
 
-#[cfg(test)]
-fn prepare_websocket_upstream_payload(
-    replay_state: &mut ReplayState,
-    account: &EffectiveAccount,
-    value: Value,
-) -> Result<Value, TokenproxyError> {
-    prepare_websocket_upstream_payload_with_hash_key(replay_state, account, "", value, true)
-}
+        assert!(payload.get("previous_response_id").is_none());
+        assert_eq!(payload["model"], "gpt-5.5");
+        assert_eq!(payload["input"][1]["phase"], "final");
+        assert_eq!(payload["input"].as_array().unwrap().len(), 3);
+    }
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_open_one_upstream_websocket_for_reused_account_session() {
-    let accepted_count = Arc::new(AtomicUsize::new(0));
-    let upstream = fake_websocket_upstream(Arc::clone(&accepted_count)).await;
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        format!("http://{upstream}/v1"),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts.first().unwrap().clone();
-    let mut session = None;
+    #[test]
+    fn should_advance_full_replay_template_after_non_incremental_turn() {
+        let mut account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        account.config.supports_responses_ws = true;
+        account.config.supports_incremental_previous_response_id = false;
+        let mut state = ReplayState::default();
+        prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "hello"}]
+            }),
+        )
+        .unwrap();
+        state.record_completed(
+            "resp_1".to_string(),
+            vec![serde_json::json!({
+                "type": "message",
+                "phase": "final",
+                "content": "first answer"
+            })],
+        );
 
-    ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_reuse")
+        let first_replay = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "ok"}]
+            }),
+        )
+        .unwrap();
+        assert_eq!(state.last_request_template.as_ref().unwrap(), &first_replay);
+        state.record_completed(
+            "resp_2".to_string(),
+            vec![serde_json::json!({
+                "type": "message",
+                "phase": "final",
+                "content": "second answer"
+            })],
+        );
+
+        let second_replay = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "input": [{"type": "message", "role": "user", "content": "next"}]
+            }),
+        )
+        .unwrap();
+
+        let input = second_replay["input"].as_array().unwrap();
+        assert_eq!(input.len(), 5);
+        assert_eq!(input[0]["content"], "hello");
+        assert_eq!(input[1]["content"], "first answer");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["content"], "second answer");
+        assert_eq!(input[4]["content"], "next");
+    }
+
+    #[test]
+    fn should_capture_websocket_output_item_events_for_completed_replay_state() {
+        let mut state = ReplayState::default();
+
+        capture_completed_event(
+            &mut state,
+            &ws_event(
+                r#"{"type":"response.output_item.done","item":{"type":"message","phase":"final","content":"hello","x_unknown":true}}"#,
+            ),
+        );
+        capture_completed_event(
+            &mut state,
+            &ws_event(r#"{"type":"response.completed","response":{"id":"resp_1"}}"#),
+        );
+
+        assert_eq!(state.last_completed_response_id.as_deref(), Some("resp_1"));
+        assert!(state.pending_output_items.is_empty());
+        assert_eq!(state.last_completed_output_items.len(), 1);
+        assert_eq!(state.last_completed_output_items[0]["phase"], "final");
+        assert_eq!(state.last_completed_output_items[0]["x_unknown"], true);
+    }
+
+    #[test]
+    fn should_prefer_completed_websocket_output_over_buffered_output_items() {
+        let mut state = ReplayState::default();
+
+        capture_completed_event(
+            &mut state,
+            &ws_event(
+                r#"{"type":"response.output_item.done","item":{"type":"message","phase":"draft","content":"old"}}"#,
+            ),
+        );
+        capture_completed_event(
+            &mut state,
+            &ws_event(
+                r#"{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","phase":"final","content":"new"}]}}"#,
+            ),
+        );
+
+        assert!(state.pending_output_items.is_empty());
+        assert_eq!(state.last_completed_output_items.len(), 1);
+        assert_eq!(state.last_completed_output_items[0]["phase"], "final");
+        assert_eq!(state.last_completed_output_items[0]["content"], "new");
+    }
+
+    #[test]
+    fn should_reset_replay_state_when_compacted_window_is_used() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let mut state = ReplayState::default();
+        prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [{"type": "message", "role": "user", "content": "old"}]
+            }),
+        )
+        .unwrap();
+        state.record_completed(
+            "resp_old".to_string(),
+            vec![serde_json::json!({"type": "message", "phase": "final", "content": "old"})],
+        );
+
+        let payload = prepare_websocket_upstream_payload(
+            &mut state,
+            &account,
+            serde_json::json!({
+                "type": "response.create",
+                "model": "gpt-5.5",
+                "input": [
+                    {"type": "message", "role": "user", "content": "kept"},
+                    {"type": "compaction", "encrypted_content": "gAAAAABpM0Yj"},
+                    {"type": "message", "role": "user", "content": "next"}
+                ]
+            }),
+        )
+        .unwrap();
+
+        assert!(payload.get("previous_response_id").is_none());
+        assert_eq!(payload["input"].as_array().unwrap().len(), 3);
+        assert!(state.last_completed_response_id.is_none());
+        assert!(state.last_completed_output_items.is_empty());
+        assert_eq!(state.last_request_template.as_ref().unwrap(), &payload);
+    }
+
+    fn prepare_websocket_upstream_payload(
+        replay_state: &mut ReplayState,
+        account: &EffectiveAccount,
+        value: Value,
+    ) -> Result<Value, TokenproxyError> {
+        prepare_websocket_upstream_payload_with_hash_key(replay_state, account, "", value, true)
+    }
+
+    #[tokio::test]
+    async fn should_open_one_upstream_websocket_for_reused_account_session() {
+        let accepted_count = Arc::new(AtomicUsize::new(0));
+        let upstream = fake_websocket_upstream(Arc::clone(&accepted_count)).await;
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts.first().unwrap().clone();
+        let mut session = None;
+
+        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_reuse")
+            .await
+            .unwrap();
+        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_reuse")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(accepted_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn should_reconnect_expired_upstream_websocket_session() {
+        let accepted_count = Arc::new(AtomicUsize::new(0));
+        let upstream = fake_websocket_upstream(Arc::clone(&accepted_count)).await;
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts.first().unwrap().clone();
+        let mut session = None;
+
+        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_expired_1")
+            .await
+            .unwrap();
+        session.as_mut().unwrap().opened_at = Instant::now() - UPSTREAM_WS_MAX_SESSION_AGE;
+        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_expired_2")
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(accepted_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn should_forward_generated_request_id_on_upstream_websocket_handshake() {
+        let request_ids = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_header_capture_websocket_upstream(Arc::clone(&request_ids)).await;
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts.first().unwrap().clone();
+        let mut session = None;
+
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            "gpt",
+            "req_0000000000000042",
+        )
         .await
         .unwrap();
-    ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_reuse")
-        .await
+        sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(
+            request_ids
+                .lock()
+                .expect("request id capture lock is not poisoned")
+                .as_slice(),
+            &[Some("req_0000000000000042".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_back_off_account_after_websocket_connect_failure() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
         .unwrap();
-    sleep(Duration::from_millis(25)).await;
+        let selected = state.effective.accounts[0].clone();
+        let mut session = None;
 
-    assert_eq!(accepted_count.load(Ordering::Relaxed), 1);
-}
+        let error =
+            ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_failed")
+                .await
+                .expect_err("closed local port should fail websocket connect");
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_reconnect_expired_upstream_websocket_session() {
-    let accepted_count = Arc::new(AtomicUsize::new(0));
-    let upstream = fake_websocket_upstream(Arc::clone(&accepted_count)).await;
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        format!("http://{upstream}/v1"),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts.first().unwrap().clone();
-    let mut session = None;
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        let AccountHealth::Throttled { next_retry_at_ms } =
+            state.account_health_cell("primary").unwrap().load()
+        else {
+            panic!("expected throttled health");
+        };
+        assert!(next_retry_at_ms > now_unix_ms());
+    }
 
-    ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_expired_1")
-        .await
-        .unwrap();
-    session.as_mut().unwrap().opened_at = Instant::now() - UPSTREAM_WS_MAX_SESSION_AGE;
-    ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_expired_2")
-        .await
-        .unwrap();
-    sleep(Duration::from_millis(25)).await;
+    #[test]
+    fn should_reuse_persistent_upstream_websocket_for_same_account() {
+        assert!(!should_replace_upstream_session(
+            Some("primary"),
+            "primary",
+            Some(Duration::from_secs(30)),
+            UPSTREAM_WS_MAX_SESSION_AGE
+        ));
+        assert!(should_replace_upstream_session(
+            None,
+            "primary",
+            None,
+            UPSTREAM_WS_MAX_SESSION_AGE
+        ));
+        assert!(should_replace_upstream_session(
+            Some("primary"),
+            "secondary",
+            Some(Duration::from_secs(30)),
+            UPSTREAM_WS_MAX_SESSION_AGE
+        ));
+        assert!(should_replace_upstream_session(
+            Some("primary"),
+            "primary",
+            Some(UPSTREAM_WS_MAX_SESSION_AGE),
+            UPSTREAM_WS_MAX_SESSION_AGE
+        ));
+    }
 
-    assert_eq!(accepted_count.load(Ordering::Relaxed), 2);
-}
+    #[test]
+    fn should_mark_upstream_websocket_authorization_header_sensitive() {
+        let header = upstream_authorization_header("upstream-token").unwrap();
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_forward_generated_request_id_on_upstream_websocket_handshake() {
-    let request_ids = Arc::new(StdMutex::new(Vec::new()));
-    let upstream = fake_header_capture_websocket_upstream(Arc::clone(&request_ids)).await;
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        format!("http://{upstream}/v1"),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts.first().unwrap().clone();
-    let mut session = None;
+        assert_eq!(header, "Bearer upstream-token");
+        assert!(header.is_sensitive());
+    }
 
-    ensure_upstream_session(
-        &state,
-        &selected,
-        &mut session,
-        "gpt",
-        "req_0000000000000042",
-    )
-    .await
-    .unwrap();
-    sleep(Duration::from_millis(25)).await;
+    #[test]
+    fn should_map_public_routes_to_chatgpt_codex_upstream_paths() {
+        let mut chatgpt = account(
+            "chatgpt",
+            "https://chatgpt.com/backend-api/codex".to_string(),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
 
-    assert_eq!(
-        request_ids
-            .lock()
-            .expect("request id capture lock is not poisoned")
-            .as_slice(),
-        &[Some("req_0000000000000042".to_string())]
-    );
-}
+        let responses = upstream_url_for_path(&chatgpt, "/v1/responses").unwrap();
+        let compact = upstream_url_for_path(&chatgpt, "/v1/responses/compact").unwrap();
+        let websocket = websocket_upstream_url_for_account(&chatgpt).unwrap();
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_back_off_account_after_websocket_connect_failure() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-    let mut session = None;
+        assert_eq!(
+            responses.as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(
+            compact.as_str(),
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
+        assert_eq!(
+            websocket.as_str(),
+            "wss://chatgpt.com/backend-api/codex/responses"
+        );
+    }
 
-    let error = ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_failed")
-        .await
-        .expect_err("closed local port should fail websocket connect");
+    #[test]
+    fn should_keep_openai_api_key_upstream_paths_under_v1() {
+        let openai = account(
+            "openai",
+            "https://api.openai.com/v1".to_string(),
+            "upstream-token",
+            100,
+        );
 
-    assert_eq!(error.status, StatusCode::BAD_GATEWAY);
-    let AccountHealth::Throttled { next_retry_at_ms } =
-        state.account_health_cell("primary").unwrap().load()
-    else {
-        panic!("expected throttled health");
-    };
-    assert!(next_retry_at_ms > now_unix_ms());
-}
+        let responses = upstream_url_for_path(&openai, "/v1/responses").unwrap();
+        let compact = upstream_url_for_path(&openai, "/v1/responses/compact").unwrap();
+        let websocket = websocket_upstream_url_for_account(&openai).unwrap();
 
-#[cfg(test)]
-#[test]
-fn should_reuse_persistent_upstream_websocket_for_same_account() {
-    assert!(!should_replace_upstream_session(
-        Some("primary"),
-        "primary",
-        Some(Duration::from_secs(30)),
-        UPSTREAM_WS_MAX_SESSION_AGE
-    ));
-    assert!(should_replace_upstream_session(
-        None,
-        "primary",
-        None,
-        UPSTREAM_WS_MAX_SESSION_AGE
-    ));
-    assert!(should_replace_upstream_session(
-        Some("primary"),
-        "secondary",
-        Some(Duration::from_secs(30)),
-        UPSTREAM_WS_MAX_SESSION_AGE
-    ));
-    assert!(should_replace_upstream_session(
-        Some("primary"),
-        "primary",
-        Some(UPSTREAM_WS_MAX_SESSION_AGE),
-        UPSTREAM_WS_MAX_SESSION_AGE
-    ));
-}
+        assert_eq!(responses.as_str(), "https://api.openai.com/v1/responses");
+        assert_eq!(
+            compact.as_str(),
+            "https://api.openai.com/v1/responses/compact"
+        );
+        assert_eq!(websocket.as_str(), "wss://api.openai.com/v1/responses");
+        assert!(upstream_url_for_path(&openai, "/v1/messages").is_err());
+    }
 
-#[cfg(test)]
-#[test]
-fn should_mark_upstream_websocket_authorization_header_sensitive() {
-    let header = upstream_authorization_header("upstream-token").unwrap();
+    #[test]
+    fn should_keep_anthropic_api_key_upstream_messages_path_under_v1() {
+        let anthropic = anthropic_account(
+            "anthropic",
+            "https://api.anthropic.com".to_string(),
+            "upstream-token",
+            100,
+        );
+        let versioned_anthropic = anthropic_account(
+            "anthropic-versioned",
+            "https://api.anthropic.com/v1".to_string(),
+            "upstream-token",
+            100,
+        );
 
-    assert_eq!(header, "Bearer upstream-token");
-    assert!(header.is_sensitive());
-}
+        let messages = upstream_url_for_path(&anthropic, "/v1/messages").unwrap();
+        let versioned_messages =
+            upstream_url_for_path(&versioned_anthropic, "/v1/messages").unwrap();
 
-#[cfg(test)]
-#[test]
-fn should_map_public_routes_to_chatgpt_codex_upstream_paths() {
-    let mut chatgpt = account(
-        "chatgpt",
-        "https://chatgpt.com/backend-api/codex".to_string(),
-        "upstream-token",
-        100,
-    );
-    chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+        assert_eq!(messages.as_str(), "https://api.anthropic.com/v1/messages");
+        assert_eq!(
+            versioned_messages.as_str(),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert!(upstream_url_for_path(&anthropic, "/v1/responses").is_err());
+    }
 
-    let responses = upstream_url_for_path(&chatgpt, "/v1/responses").unwrap();
-    let compact = upstream_url_for_path(&chatgpt, "/v1/responses/compact").unwrap();
-    let websocket = websocket_upstream_url_for_account(&chatgpt).unwrap();
+    #[test]
+    fn should_extract_safe_http_log_context_from_upstream_headers() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", "req_upstream".parse().unwrap());
+        headers.insert("cf-ray", "ray-lax".parse().unwrap());
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
 
-    assert_eq!(
-        responses.as_str(),
-        "https://chatgpt.com/backend-api/codex/responses"
-    );
-    assert_eq!(
-        compact.as_str(),
-        "https://chatgpt.com/backend-api/codex/responses/compact"
-    );
-    assert_eq!(
-        websocket.as_str(),
-        "wss://chatgpt.com/backend-api/codex/responses"
-    );
-}
+        let context = http_log_context(&account, &headers, "test-account-hash-key");
 
-#[cfg(test)]
-#[test]
-fn should_keep_openai_api_key_upstream_paths_under_v1() {
-    let openai = account(
-        "openai",
-        "https://api.openai.com/v1".to_string(),
-        "upstream-token",
-        100,
-    );
+        assert_eq!(
+            context.account_id_hash,
+            account_id_hash("primary", "test-account-hash-key")
+        );
+        assert_eq!(context.upstream_request_id.as_deref(), Some("req_upstream"));
+        assert_eq!(context.cloudflare_ray.as_deref(), Some("ray-lax"));
+        assert!(!format!("{context:?}").contains("secret"));
+    }
 
-    let responses = upstream_url_for_path(&openai, "/v1/responses").unwrap();
-    let compact = upstream_url_for_path(&openai, "/v1/responses/compact").unwrap();
-    let websocket = websocket_upstream_url_for_account(&openai).unwrap();
+    #[test]
+    fn should_extract_actual_service_tier_from_json_response_body() {
+        assert_eq!(
+            actual_service_tier_from_value(&ws_event(r#"{"id":"resp","service_tier":"default"}"#))
+                .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            actual_service_tier_from_value(&ws_event(r#"{"id":"resp","service_tier":""}"#)),
+            None
+        );
+    }
 
-    assert_eq!(responses.as_str(), "https://api.openai.com/v1/responses");
-    assert_eq!(
-        compact.as_str(),
-        "https://api.openai.com/v1/responses/compact"
-    );
-    assert_eq!(websocket.as_str(), "wss://api.openai.com/v1/responses");
-    assert!(upstream_url_for_path(&openai, "/v1/messages").is_err());
-}
+    #[test]
+    fn should_extract_cached_input_tokens_from_known_usage_shapes() {
+        assert_eq!(
+            usage_metadata_from_value(&ws_event(
+                r#"{"usage":{"input_tokens_details":{"cached_tokens":17}}}"#
+            ))
+            .cached_input_tokens,
+            Some(17)
+        );
+        assert_eq!(
+            usage_metadata_from_value(&ws_event(
+                r#"{"usage":{"prompt_tokens_details":{"cached_tokens":23}}}"#
+            ))
+            .cached_input_tokens,
+            Some(23)
+        );
+        assert_eq!(
+            usage_metadata_from_value(&ws_event(r#"{"usage":{}}"#)).cached_input_tokens,
+            None
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_keep_anthropic_api_key_upstream_messages_path_under_v1() {
-    let anthropic = anthropic_account(
-        "anthropic",
-        "https://api.anthropic.com".to_string(),
-        "upstream-token",
-        100,
-    );
-    let versioned_anthropic = anthropic_account(
-        "anthropic-versioned",
-        "https://api.anthropic.com/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-
-    let messages = upstream_url_for_path(&anthropic, "/v1/messages").unwrap();
-    let versioned_messages = upstream_url_for_path(&versioned_anthropic, "/v1/messages").unwrap();
-
-    assert_eq!(messages.as_str(), "https://api.anthropic.com/v1/messages");
-    assert_eq!(
-        versioned_messages.as_str(),
-        "https://api.anthropic.com/v1/messages"
-    );
-    assert!(upstream_url_for_path(&anthropic, "/v1/responses").is_err());
-}
-
-#[cfg(test)]
-#[test]
-fn should_extract_safe_http_log_context_from_upstream_headers() {
-    let account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert("x-request-id", "req_upstream".parse().unwrap());
-    headers.insert("cf-ray", "ray-lax".parse().unwrap());
-    headers.insert("authorization", "Bearer secret".parse().unwrap());
-
-    let context = http_log_context(&account, &headers, "test-account-hash-key");
-
-    assert_eq!(
-        context.account_id_hash,
-        account_id_hash("primary", "test-account-hash-key")
-    );
-    assert_eq!(context.upstream_request_id.as_deref(), Some("req_upstream"));
-    assert_eq!(context.cloudflare_ray.as_deref(), Some("ray-lax"));
-    assert!(!format!("{context:?}").contains("secret"));
-}
-
-#[cfg(test)]
-#[test]
-fn should_extract_actual_service_tier_from_json_response_body() {
-    assert_eq!(
-        actual_service_tier_from_value(&ws_event(r#"{"id":"resp","service_tier":"default"}"#))
-            .as_deref(),
-        Some("default")
-    );
-    assert_eq!(
-        actual_service_tier_from_value(&ws_event(r#"{"id":"resp","service_tier":""}"#)),
-        None
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn should_extract_cached_input_tokens_from_known_usage_shapes() {
-    assert_eq!(
-        usage_metadata_from_value(&ws_event(
-            r#"{"usage":{"input_tokens_details":{"cached_tokens":17}}}"#
-        ))
-        .cached_input_tokens,
-        Some(17)
-    );
-    assert_eq!(
-        usage_metadata_from_value(&ws_event(
-            r#"{"usage":{"prompt_tokens_details":{"cached_tokens":23}}}"#
-        ))
-        .cached_input_tokens,
-        Some(23)
-    );
-    assert_eq!(
-        usage_metadata_from_value(&ws_event(r#"{"usage":{}}"#)).cached_input_tokens,
-        None
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn should_extract_reasoning_tokens_from_responses_usage_shape() {
-    assert_eq!(
-        usage_metadata_from_value(&ws_event(
-            r#"{"usage":{"output_tokens_details":{"reasoning_tokens":31}}}"#
-        ))
-        .reasoning_tokens,
-        Some(31)
-    );
-    assert_eq!(
-        usage_metadata_from_value(&ws_event(r#"{"usage":{"output_tokens_details":{}}}"#))
+    #[test]
+    fn should_extract_reasoning_tokens_from_responses_usage_shape() {
+        assert_eq!(
+            usage_metadata_from_value(&ws_event(
+                r#"{"usage":{"output_tokens_details":{"reasoning_tokens":31}}}"#
+            ))
             .reasoning_tokens,
-        None
-    );
-}
+            Some(31)
+        );
+        assert_eq!(
+            usage_metadata_from_value(&ws_event(r#"{"usage":{"output_tokens_details":{}}}"#))
+                .reasoning_tokens,
+            None
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_extract_usage_metadata_from_sse_completed_frame() {
-    let frames = vec![Bytes::from_static(
+    #[test]
+    fn should_extract_usage_metadata_from_sse_completed_frame() {
+        let frames = vec![Bytes::from_static(
         br#"event: response.completed
 data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens_details":{"cached_tokens":17},"output_tokens_details":{"reasoning_tokens":31}}}}
 
 "#,
     )];
 
-    assert_eq!(
-        usage_metadata_from_sse_frames(&frames),
-        UsageMetadata {
-            cached_input_tokens: Some(17),
-            reasoning_tokens: Some(31),
-        }
-    );
-}
+        assert_eq!(
+            usage_metadata_from_sse_frames(&frames),
+            UsageMetadata {
+                cached_input_tokens: Some(17),
+                reasoning_tokens: Some(31),
+            }
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_record_websocket_usage_metadata_and_service_tiers_for_log() {
-    let mut replay_state = ReplayState::default();
-    let metrics = Metrics::default();
+    #[test]
+    fn should_record_websocket_usage_metadata_and_service_tiers_for_log() {
+        let mut replay_state = ReplayState::default();
+        let metrics = Metrics::default();
 
-    replay_state.requested_service_tier = Some(normalize_service_tier("fast").to_string());
-    record_websocket_actual_service_tier(
-        &mut replay_state,
-        &ws_event(
-            r#"{"type":"response.created","response":{"id":"resp_1","service_tier":"default"}}"#,
-        ),
-    );
-    record_websocket_usage_metadata(
-        &metrics,
-        &mut replay_state,
-        "gpt",
-        &ws_event(
-            r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"prompt_tokens_details":{"cached_tokens":17},"output_tokens_details":{"reasoning_tokens":31}}}}"#,
-        ),
-    );
-    record_websocket_actual_service_tier(
-        &mut replay_state,
-        &ws_event(r#"{"type":"response.output_text.delta","delta":"ignored"}"#),
-    );
+        replay_state.requested_service_tier = Some(normalize_service_tier("fast").to_string());
+        record_websocket_actual_service_tier(
+            &mut replay_state,
+            &ws_event(
+                r#"{"type":"response.created","response":{"id":"resp_1","service_tier":"default"}}"#,
+            ),
+        );
+        record_websocket_usage_metadata(
+            &metrics,
+            &mut replay_state,
+            "gpt",
+            &ws_event(
+                r#"{"type":"response.completed","response":{"id":"resp_1","usage":{"prompt_tokens_details":{"cached_tokens":17},"output_tokens_details":{"reasoning_tokens":31}}}}"#,
+            ),
+        );
+        record_websocket_actual_service_tier(
+            &mut replay_state,
+            &ws_event(r#"{"type":"response.output_text.delta","delta":"ignored"}"#),
+        );
 
-    assert_eq!(
-        replay_state.requested_service_tier.as_deref(),
-        Some("priority")
-    );
-    assert_eq!(replay_state.actual_service_tier.as_deref(), Some("default"));
-    assert_eq!(replay_state.cached_input_tokens, Some(17));
-    assert_eq!(replay_state.reasoning_tokens, Some(31));
-    assert_eq!(
-        metrics.snapshot().cached_input_tokens,
-        vec![(
-            crate::metrics::CachedInputTokensMetricKey {
-                endpoint: "/v1/responses".to_string(),
-                model_family: "gpt".to_string(),
-            },
-            17,
-        )]
-    );
-}
+        assert_eq!(
+            replay_state.requested_service_tier.as_deref(),
+            Some("priority")
+        );
+        assert_eq!(replay_state.actual_service_tier.as_deref(), Some("default"));
+        assert_eq!(replay_state.cached_input_tokens, Some(17));
+        assert_eq!(replay_state.reasoning_tokens, Some(31));
+        assert_eq!(
+            metrics.snapshot().cached_input_tokens,
+            vec![(
+                crate::metrics::CachedInputTokensMetricKey {
+                    endpoint: "/v1/responses".to_string(),
+                    model_family: "gpt".to_string(),
+                },
+                17,
+            )]
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_record_websocket_request_shape_fields_for_log_and_metrics() {
-    let mut replay_state = ReplayState {
-        last_request_template: Some(serde_json::json!({
-            "service_tier": "default",
-            "reasoning": {"effort": "medium"},
-            "text": {"verbosity": "high"},
-            "store": true
-        })),
-        ..ReplayState::default()
-    };
-    let metrics = Metrics::default();
-    let shape = websocket_request_shape(
-        &replay_state,
-        &serde_json::json!({
-            "type": "response.create",
-            "service_tier": "fast",
-            "reasoning": {"effort": "high"},
-            "store": false,
-            "input": []
-        }),
-    );
+    #[test]
+    fn should_record_websocket_request_shape_fields_for_log_and_metrics() {
+        let mut replay_state = ReplayState {
+            last_request_template: Some(serde_json::json!({
+                "service_tier": "default",
+                "reasoning": {"effort": "medium"},
+                "text": {"verbosity": "high"},
+                "store": true
+            })),
+            ..ReplayState::default()
+        };
+        let metrics = Metrics::default();
+        let shape = websocket_request_shape(
+            &replay_state,
+            &serde_json::json!({
+                "type": "response.create",
+                "service_tier": "fast",
+                "reasoning": {"effort": "high"},
+                "store": false,
+                "input": []
+            }),
+        );
 
-    record_websocket_request_shape(&metrics, &mut replay_state, "gpt", &shape);
+        record_websocket_request_shape(&metrics, &mut replay_state, "gpt", &shape);
 
-    assert_eq!(
-        replay_state.requested_service_tier.as_deref(),
-        Some("priority")
-    );
-    assert_eq!(replay_state.reasoning_effort.as_deref(), Some("high"));
-    assert_eq!(replay_state.verbosity.as_deref(), Some("high"));
-    assert_eq!(replay_state.store.as_deref(), Some("false"));
-    assert_eq!(
-        metrics.snapshot().request_shapes,
-        vec![(
-            crate::metrics::RequestShapeMetricKey {
-                endpoint: "/v1/responses".to_string(),
-                model_family: "gpt".to_string(),
-                service_tier: "priority".to_string(),
-                reasoning_effort: "high".to_string(),
-                verbosity: "high".to_string(),
-                store: "false".to_string(),
-            },
-            1
-        )]
-    );
-}
+        assert_eq!(
+            replay_state.requested_service_tier.as_deref(),
+            Some("priority")
+        );
+        assert_eq!(replay_state.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(replay_state.verbosity.as_deref(), Some("high"));
+        assert_eq!(replay_state.store.as_deref(), Some("false"));
+        assert_eq!(
+            metrics.snapshot().request_shapes,
+            vec![(
+                crate::metrics::RequestShapeMetricKey {
+                    endpoint: "/v1/responses".to_string(),
+                    model_family: "gpt".to_string(),
+                    service_tier: "priority".to_string(),
+                    reasoning_effort: "high".to_string(),
+                    verbosity: "high".to_string(),
+                    store: "false".to_string(),
+                },
+                1
+            )]
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_extract_actual_service_tier_from_sse_response_created_frame() {
-    let frames = vec![Bytes::from_static(
-        br#"event: response.created
+    #[test]
+    fn should_extract_actual_service_tier_from_sse_response_created_frame() {
+        let frames = vec![Bytes::from_static(
+            br#"event: response.created
 data: {"type":"response.created","response":{"id":"resp_1","service_tier":"default"}}
 
 "#,
-    )];
+        )];
 
-    assert_eq!(
-        actual_service_tier_from_sse_frames(&frames).as_deref(),
-        Some("default")
-    );
-}
+        assert_eq!(
+            actual_service_tier_from_sse_frames(&frames).as_deref(),
+            Some("default")
+        );
+    }
 
-#[cfg(test)]
-fn record_sse_response_event_metrics(metrics: &Metrics, frames: &[Bytes]) {
-    record_sse_response_event_metrics_labeled(metrics, frames, "unknown", "unknown");
-}
+    fn record_sse_response_event_metrics(metrics: &Metrics, frames: &[Bytes]) {
+        record_sse_response_event_metrics_labeled(metrics, frames, "unknown", "unknown");
+    }
 
-#[cfg(test)]
-#[test]
-fn should_record_websocket_sessions_as_request_metrics() {
-    let metrics = Metrics::default();
+    #[test]
+    fn should_record_websocket_sessions_as_request_metrics() {
+        let metrics = Metrics::default();
 
-    record_websocket_request_metrics(
-        &metrics,
-        StatusCode::SERVICE_UNAVAILABLE,
-        37,
-        Some("gpt"),
-        Some("acct_hash"),
-    );
+        record_websocket_request_metrics(
+            &metrics,
+            StatusCode::SERVICE_UNAVAILABLE,
+            37,
+            Some("gpt"),
+            Some("acct_hash"),
+        );
 
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.requests_total, 1);
-    assert_eq!(
-        snapshot.request_outcomes,
-        vec![(
-            crate::metrics::RequestMetricKey {
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.requests_total, 1);
+        assert_eq!(
+            snapshot.request_outcomes,
+            vec![(
+                crate::metrics::RequestMetricKey {
+                    endpoint: "/v1/responses".to_string(),
+                    transport: "websocket".to_string(),
+                    status_class: "5xx".to_string(),
+                    model_family: "gpt".to_string(),
+                    account_id_hash: "acct_hash".to_string(),
+                },
+                1,
+            )]
+        );
+        assert_eq!(
+            snapshot.request_duration_labels[0].0,
+            crate::metrics::RequestDurationMetricKey {
                 endpoint: "/v1/responses".to_string(),
                 transport: "websocket".to_string(),
-                status_class: "5xx".to_string(),
                 model_family: "gpt".to_string(),
-                account_id_hash: "acct_hash".to_string(),
-            },
-            1,
-        )]
-    );
-    assert_eq!(
-        snapshot.request_duration_labels[0].0,
-        crate::metrics::RequestDurationMetricKey {
-            endpoint: "/v1/responses".to_string(),
-            transport: "websocket".to_string(),
-            model_family: "gpt".to_string(),
-            stream: "true".to_string(),
-        }
-    );
-    assert_eq!(snapshot.request_duration_labels[0].1.count, 1);
-    assert_eq!(snapshot.request_duration_labels[0].1.sum_ms, 37);
-}
+                stream: "true".to_string(),
+            }
+        );
+        assert_eq!(snapshot.request_duration_labels[0].1.count, 1);
+        assert_eq!(snapshot.request_duration_labels[0].1.sum_ms, 37);
+    }
 
-#[cfg(test)]
-#[test]
-fn should_record_bounded_upstream_websocket_response_event_metrics() {
-    let metrics = Metrics::default();
+    #[test]
+    fn should_record_bounded_upstream_websocket_response_event_metrics() {
+        let metrics = Metrics::default();
 
-    record_upstream_websocket_response_event_metric(
-        &metrics,
-        &ws_event(r#"{"type":"response.completed","response":{"id":"resp_1"}}"#),
-    );
-    record_upstream_websocket_response_event_metric(
-        &metrics,
-        &ws_event(r#"{"type":"response.output_text.delta","delta":"hello"}"#),
-    );
-    record_upstream_websocket_response_event_metric(
-        &metrics,
-        &ws_event(r#"{"type":"error","error":{"code":"usage_limit_reached"}}"#),
-    );
-    record_upstream_websocket_response_event_metric(
-        &metrics,
-        &ws_event(r#"{"type":"response.custom.future_event"}"#),
-    );
+        record_upstream_websocket_response_event_metric(
+            &metrics,
+            &ws_event(r#"{"type":"response.completed","response":{"id":"resp_1"}}"#),
+        );
+        record_upstream_websocket_response_event_metric(
+            &metrics,
+            &ws_event(r#"{"type":"response.output_text.delta","delta":"hello"}"#),
+        );
+        record_upstream_websocket_response_event_metric(
+            &metrics,
+            &ws_event(r#"{"type":"error","error":{"code":"usage_limit_reached"}}"#),
+        );
+        record_upstream_websocket_response_event_metric(
+            &metrics,
+            &ws_event(r#"{"type":"response.custom.future_event"}"#),
+        );
 
-    let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot();
 
-    assert_eq!(
-        snapshot.websocket_event_outcomes,
-        vec![
-            (
+        assert_eq!(
+            snapshot.websocket_event_outcomes,
+            vec![
+                (
+                    crate::metrics::WebSocketEventMetricKey {
+                        event_type: "error".to_string(),
+                        success: false,
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::WebSocketEventMetricKey {
+                        event_type: "response.completed".to_string(),
+                        success: true,
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::WebSocketEventMetricKey {
+                        event_type: "response.other".to_string(),
+                        success: true,
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::WebSocketEventMetricKey {
+                        event_type: "response.output_text.delta".to_string(),
+                        success: true,
+                    },
+                    1,
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_downstream_backpressure_when_websocket_send_waits_too_long() {
+        let metrics = Metrics::default();
+
+        let error = send_downstream_with_backpressure(
+            &metrics,
+            std::future::pending::<Result<(), std::io::Error>>(),
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, ErrorCode::UpstreamFailure);
+        assert!(
+            error
+                .message
+                .contains("downstream WebSocket send backpressure")
+        );
+        assert_eq!(
+            metrics.snapshot().websocket_event_outcomes,
+            vec![(
                 crate::metrics::WebSocketEventMetricKey {
-                    event_type: "error".to_string(),
+                    event_type: "downstream_backpressure".to_string(),
                     success: false,
                 },
                 1,
-            ),
-            (
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_signal_websocket_session_event_overflow() {
+        let metrics = Metrics::default();
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let (overflow_tx, overflow_rx) = watch::channel(false);
+
+        assert!(try_enqueue_downstream_session_event(
+            &events_tx,
+            &overflow_tx,
+            &metrics,
+            DownstreamSessionEvent::Message(DownstreamMessage::Ping(vec![1].into())),
+        ));
+        assert!(!try_enqueue_downstream_session_event(
+            &events_tx,
+            &overflow_tx,
+            &metrics,
+            DownstreamSessionEvent::Message(DownstreamMessage::Ping(vec![2].into())),
+        ));
+
+        assert!(*overflow_rx.borrow());
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(DownstreamSessionEvent::Message(_))
+        ));
+        assert_eq!(
+            metrics.snapshot().websocket_event_outcomes,
+            vec![(
                 crate::metrics::WebSocketEventMetricKey {
-                    event_type: "response.completed".to_string(),
-                    success: true,
+                    event_type: "downstream_event_overflow".to_string(),
+                    success: false,
                 },
                 1,
-            ),
-            (
-                crate::metrics::WebSocketEventMetricKey {
-                    event_type: "response.other".to_string(),
-                    success: true,
-                },
-                1,
-            ),
-            (
-                crate::metrics::WebSocketEventMetricKey {
-                    event_type: "response.output_text.delta".to_string(),
-                    success: true,
-                },
-                1,
-            ),
-        ]
-    );
-}
+            )]
+        );
+    }
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_downstream_backpressure_when_websocket_send_waits_too_long() {
-    let metrics = Metrics::default();
+    fn repair_sse_stream<S, E>(
+        stream: S,
+    ) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
+    where
+        S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
+        E: Error + Send + Sync + 'static,
+    {
+        repair_sse_stream_with_idle_timeout(stream, Duration::from_secs(300))
+    }
 
-    let error = send_downstream_with_backpressure(
-        &metrics,
-        std::future::pending::<Result<(), std::io::Error>>(),
-        Duration::from_millis(10),
-    )
-    .await
-    .unwrap_err();
+    fn repair_sse_stream_with_idle_timeout<S, E>(
+        stream: S,
+        idle_timeout: Duration,
+    ) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
+    where
+        S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
+        E: Error + Send + Sync + 'static,
+    {
+        let (stream, pending_bytes) = bounded_eventsource_stream(stream);
+        repair_sse_stream_from_state(SseStreamState {
+            stream,
+            repair: SseRepair::default(),
+            pending: VecDeque::new(),
+            finished: false,
+            idle_timeout,
+            cancellation: SseClientCancellation::new(None, SseMetricContext::unknown()),
+            pending_bytes,
+        })
+    }
 
-    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(error.code, ErrorCode::UpstreamFailure);
-    assert!(
-        error
-            .message
-            .contains("downstream WebSocket send backpressure")
-    );
-    assert_eq!(
-        metrics.snapshot().websocket_event_outcomes,
-        vec![(
-            crate::metrics::WebSocketEventMetricKey {
-                event_type: "downstream_backpressure".to_string(),
-                success: false,
-            },
-            1,
-        )]
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_signal_websocket_session_event_overflow() {
-    let metrics = Metrics::default();
-    let (events_tx, mut events_rx) = mpsc::channel(1);
-    let (overflow_tx, overflow_rx) = watch::channel(false);
-
-    assert!(try_enqueue_downstream_session_event(
-        &events_tx,
-        &overflow_tx,
-        &metrics,
-        DownstreamSessionEvent::Message(DownstreamMessage::Ping(vec![1].into())),
-    ));
-    assert!(!try_enqueue_downstream_session_event(
-        &events_tx,
-        &overflow_tx,
-        &metrics,
-        DownstreamSessionEvent::Message(DownstreamMessage::Ping(vec![2].into())),
-    ));
-
-    assert!(*overflow_rx.borrow());
-    assert!(matches!(
-        events_rx.recv().await,
-        Some(DownstreamSessionEvent::Message(_))
-    ));
-    assert_eq!(
-        metrics.snapshot().websocket_event_outcomes,
-        vec![(
-            crate::metrics::WebSocketEventMetricKey {
-                event_type: "downstream_event_overflow".to_string(),
-                success: false,
-            },
-            1,
-        )]
-    );
-}
-
-#[cfg(test)]
-fn repair_sse_stream<S, E>(
-    stream: S,
-) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
-where
-    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
-    E: Error + Send + Sync + 'static,
-{
-    repair_sse_stream_with_idle_timeout(stream, Duration::from_secs(300))
-}
-
-#[cfg(test)]
-fn repair_sse_stream_with_idle_timeout<S, E>(
-    stream: S,
-    idle_timeout: Duration,
-) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
-where
-    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
-    E: Error + Send + Sync + 'static,
-{
-    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    repair_sse_stream_from_state(SseStreamState {
-        stream,
-        repair: SseRepair::default(),
-        pending: VecDeque::new(),
-        finished: false,
-        idle_timeout,
-        cancellation: SseClientCancellation::new(None, SseMetricContext::unknown()),
-        pending_bytes,
-    })
-}
-
-#[cfg(test)]
-#[test]
-fn should_record_bounded_sse_response_event_metrics() {
-    let metrics = Metrics::default();
-    let frames = vec![
-        Bytes::from_static(
-            br#"event: response.completed
+    #[test]
+    fn should_record_bounded_sse_response_event_metrics() {
+        let metrics = Metrics::default();
+        let frames = vec![
+            Bytes::from_static(
+                br#"event: response.completed
 data: {"type":"response.completed","response":{"id":"resp_1"}}
 
 "#,
-        ),
-        Bytes::from_static(
-            br#"event: response.output_text.delta
+            ),
+            Bytes::from_static(
+                br#"event: response.output_text.delta
 data: {"type":"response.output_text.delta","delta":"hello"}
 
 "#,
-        ),
-        Bytes::from_static(
-            br#"data: {"type":"response.failed","response":{"id":"resp_2"}}
+            ),
+            Bytes::from_static(
+                br#"data: {"type":"response.failed","response":{"id":"resp_2"}}
 
 "#,
-        ),
-        Bytes::from_static(
-            br#"event: response.custom.future_event
+            ),
+            Bytes::from_static(
+                br#"event: response.custom.future_event
 data: {"type":"response.custom.future_event"}
 
 "#,
-        ),
-    ];
+            ),
+        ];
 
-    record_sse_response_event_metrics(&metrics, &frames);
+        record_sse_response_event_metrics(&metrics, &frames);
 
-    let snapshot = metrics.snapshot();
-    assert_eq!(
-        snapshot.sse_event_outcomes,
-        vec![
-            (
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.sse_event_outcomes,
+            vec![
+                (
+                    crate::metrics::SseEventMetricKey {
+                        event_type: "response.completed".to_string(),
+                        success: true,
+                        model_family: "unknown".to_string(),
+                        account_id_hash: "unknown".to_string(),
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::SseEventMetricKey {
+                        event_type: "response.failed".to_string(),
+                        success: false,
+                        model_family: "unknown".to_string(),
+                        account_id_hash: "unknown".to_string(),
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::SseEventMetricKey {
+                        event_type: "response.other".to_string(),
+                        success: true,
+                        model_family: "unknown".to_string(),
+                        account_id_hash: "unknown".to_string(),
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::SseEventMetricKey {
+                        event_type: "response.output_text.delta".to_string(),
+                        success: true,
+                        model_family: "unknown".to_string(),
+                        account_id_hash: "unknown".to_string(),
+                    },
+                    1,
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_timeout_waiting_for_first_sse_event() {
+        let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        let metrics = Metrics::default();
+
+        let error = sse_response_after_first_event(SseFirstEvent {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            stream,
+            metrics: &metrics,
+            endpoint: "/v1/responses",
+            model_family: "gpt",
+            account_id_hash: "acct_primary",
+            started: Instant::now(),
+            idle_timeout: Duration::from_millis(10),
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(error.code, ErrorCode::UpstreamFailure);
+        assert!(error.message.contains("SSE idle timeout"));
+    }
+
+    #[tokio::test]
+    async fn should_stop_repaired_sse_body_on_idle_timeout() {
+        let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+
+        let repaired = repair_sse_stream_with_idle_timeout(stream, Duration::from_millis(10));
+        futures_util::pin_mut!(repaired);
+        let item = repaired.next().await.unwrap().unwrap_err();
+
+        assert!(item.to_string().contains("SSE idle timeout"));
+    }
+
+    #[tokio::test]
+    async fn should_fail_when_sse_pending_buffer_exceeds_cap_without_frame_boundary() {
+        let chunk = Bytes::from(vec![b'a'; 1024 * 1024]);
+        let stream = futures_util::stream::iter(
+            (0..17).map(move |_| Ok::<Bytes, std::io::Error>(chunk.clone())),
+        );
+
+        let repaired = repair_sse_stream(stream);
+        futures_util::pin_mut!(repaired);
+        let error = repaired.next().await.unwrap().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("SSE stream exceeded frame buffer limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_sse_client_cancellation_when_repaired_body_is_dropped() {
+        let metrics = Metrics::default();
+        let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        let (stream, pending_bytes) = bounded_eventsource_stream(stream);
+        let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
+            stream,
+            repair: SseRepair::default(),
+            pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
+            finished: false,
+            idle_timeout: Duration::from_secs(300),
+            cancellation: SseClientCancellation::new(
+                Some(metrics.clone()),
+                SseMetricContext::new("gpt-5", "acct_primary"),
+            ),
+            pending_bytes,
+        }));
+
+        assert_eq!(
+            repaired.as_mut().next().await.unwrap().unwrap(),
+            Bytes::from_static(b"event: response.created\n\n")
+        );
+        drop(repaired);
+
+        assert_eq!(
+            metrics.snapshot().sse_event_outcomes,
+            vec![(
                 crate::metrics::SseEventMetricKey {
-                    event_type: "response.completed".to_string(),
+                    event_type: "client_cancelled".to_string(),
                     success: true,
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "unknown".to_string(),
+                    model_family: "gpt-5".to_string(),
+                    account_id_hash: "acct_primary".to_string(),
                 },
                 1,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_sse_upstream_error_after_commit_with_route_labels() {
+        let metrics = Metrics::default();
+        let stream = futures_util::stream::iter(vec![Err::<Bytes, _>(std::io::Error::other(
+            "upstream reset",
+        ))]);
+        let (stream, pending_bytes) = bounded_eventsource_stream(stream);
+        let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
+            stream,
+            repair: SseRepair::default(),
+            pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
+            finished: false,
+            idle_timeout: Duration::from_secs(300),
+            cancellation: SseClientCancellation::new(
+                Some(metrics.clone()),
+                SseMetricContext::new("gpt-5", "acct_primary"),
             ),
-            (
+            pending_bytes,
+        }));
+
+        assert_eq!(
+            repaired.as_mut().next().await.unwrap().unwrap(),
+            Bytes::from_static(b"event: response.created\n\n")
+        );
+        let error = repaired.as_mut().next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("upstream reset"));
+
+        assert_eq!(
+            metrics.snapshot().sse_event_outcomes,
+            vec![(
                 crate::metrics::SseEventMetricKey {
-                    event_type: "response.failed".to_string(),
+                    event_type: "upstream_stream_error".to_string(),
                     success: false,
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "unknown".to_string(),
+                    model_family: "gpt-5".to_string(),
+                    account_id_hash: "acct_primary".to_string(),
                 },
                 1,
-            ),
-            (
-                crate::metrics::SseEventMetricKey {
-                    event_type: "response.other".to_string(),
-                    success: true,
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "unknown".to_string(),
-                },
-                1,
-            ),
-            (
-                crate::metrics::SseEventMetricKey {
-                    event_type: "response.output_text.delta".to_string(),
-                    success: true,
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "unknown".to_string(),
-                },
-                1,
-            ),
-        ]
-    );
-}
+            )]
+        );
+    }
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_timeout_waiting_for_first_sse_event() {
-    let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
-    let metrics = Metrics::default();
-
-    let error = sse_response_after_first_event(SseFirstEvent {
-        status: StatusCode::OK,
-        headers: HeaderMap::new(),
-        stream,
-        metrics: &metrics,
-        endpoint: "/v1/responses",
-        model_family: "gpt",
-        account_id_hash: "acct_primary",
-        started: Instant::now(),
-        idle_timeout: Duration::from_millis(10),
-    })
-    .await
-    .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::GATEWAY_TIMEOUT);
-    assert_eq!(error.code, ErrorCode::UpstreamFailure);
-    assert!(error.message.contains("SSE idle timeout"));
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_stop_repaired_sse_body_on_idle_timeout() {
-    let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
-
-    let repaired = repair_sse_stream_with_idle_timeout(stream, Duration::from_millis(10));
-    futures_util::pin_mut!(repaired);
-    let item = repaired.next().await.unwrap().unwrap_err();
-
-    assert!(item.to_string().contains("SSE idle timeout"));
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_fail_when_sse_pending_buffer_exceeds_cap_without_frame_boundary() {
-    let chunk = Bytes::from(vec![b'a'; 1024 * 1024]);
-    let stream = futures_util::stream::iter(
-        (0..17).map(move |_| Ok::<Bytes, std::io::Error>(chunk.clone())),
-    );
-
-    let repaired = repair_sse_stream(stream);
-    futures_util::pin_mut!(repaired);
-    let error = repaired.next().await.unwrap().unwrap_err();
-
-    assert!(
-        error
-            .to_string()
-            .contains("SSE stream exceeded frame buffer limit")
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_sse_client_cancellation_when_repaired_body_is_dropped() {
-    let metrics = Metrics::default();
-    let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
-    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
-        stream,
-        repair: SseRepair::default(),
-        pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
-        finished: false,
-        idle_timeout: Duration::from_secs(300),
-        cancellation: SseClientCancellation::new(
-            Some(metrics.clone()),
-            SseMetricContext::new("gpt-5", "acct_primary"),
-        ),
-        pending_bytes,
-    }));
-
-    assert_eq!(
-        repaired.as_mut().next().await.unwrap().unwrap(),
-        Bytes::from_static(b"event: response.created\n\n")
-    );
-    drop(repaired);
-
-    assert_eq!(
-        metrics.snapshot().sse_event_outcomes,
-        vec![(
-            crate::metrics::SseEventMetricKey {
-                event_type: "client_cancelled".to_string(),
-                success: true,
-                model_family: "gpt-5".to_string(),
-                account_id_hash: "acct_primary".to_string(),
-            },
-            1,
-        )]
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_sse_upstream_error_after_commit_with_route_labels() {
-    let metrics = Metrics::default();
-    let stream = futures_util::stream::iter(vec![Err::<Bytes, _>(std::io::Error::other(
-        "upstream reset",
-    ))]);
-    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
-        stream,
-        repair: SseRepair::default(),
-        pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
-        finished: false,
-        idle_timeout: Duration::from_secs(300),
-        cancellation: SseClientCancellation::new(
-            Some(metrics.clone()),
-            SseMetricContext::new("gpt-5", "acct_primary"),
-        ),
-        pending_bytes,
-    }));
-
-    assert_eq!(
-        repaired.as_mut().next().await.unwrap().unwrap(),
-        Bytes::from_static(b"event: response.created\n\n")
-    );
-    let error = repaired.as_mut().next().await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("upstream reset"));
-
-    assert_eq!(
-        metrics.snapshot().sse_event_outcomes,
-        vec![(
-            crate::metrics::SseEventMetricKey {
-                event_type: "upstream_stream_error".to_string(),
-                success: false,
-                model_family: "gpt-5".to_string(),
-                account_id_hash: "acct_primary".to_string(),
-            },
-            1,
-        )]
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_repair_sse_stream_chunks_before_downstream_body() {
-    let stream = futures_util::stream::iter(vec![
+    #[tokio::test]
+    async fn should_repair_sse_stream_chunks_before_downstream_body() {
+        let stream = futures_util::stream::iter(vec![
         Ok::<_, std::io::Error>(Bytes::from_static(
             br#"data: {"type":"response.output_item.done","item":{"type":"message","phase":"final"}}"#,
         )),
@@ -5096,1063 +5051,1040 @@ async fn should_repair_sse_stream_chunks_before_downstream_body() {
         Ok(Bytes::from_static(b"\n\n")),
     ]);
 
-    let chunks = repair_sse_stream(stream)
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    let joined = chunks
-        .iter()
-        .map(|bytes| std::str::from_utf8(bytes).unwrap())
-        .collect::<String>();
+        let chunks = repair_sse_stream(stream)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let joined = chunks
+            .iter()
+            .map(|bytes| std::str::from_utf8(bytes).unwrap())
+            .collect::<String>();
 
-    assert!(joined.contains(r#""response":{"id":"resp_1","output":[{"phase":"final""#));
-}
+        assert!(joined.contains(r#""response":{"id":"resp_1","output":[{"phase":"final""#));
+    }
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_not_flush_partial_sse_frame_when_upstream_ends_after_commit() {
-    let stream = futures_util::stream::iter(vec![
-        Ok::<_, std::io::Error>(Bytes::from_static(br#"data: {"type":"response.created"}"#)),
-        Ok(Bytes::from_static(b"\n\n")),
-        Ok(Bytes::from_static(
-            br#"data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
-        )),
-    ]);
+    #[tokio::test]
+    async fn should_not_flush_partial_sse_frame_when_upstream_ends_after_commit() {
+        let stream = futures_util::stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(br#"data: {"type":"response.created"}"#)),
+            Ok(Bytes::from_static(b"\n\n")),
+            Ok(Bytes::from_static(
+                br#"data: {"type":"response.completed","response":{"id":"resp_1"}}"#,
+            )),
+        ]);
 
-    let chunks = repair_sse_stream(stream)
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
+        let chunks = repair_sse_stream(stream)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
 
-    assert_eq!(
-        chunks,
-        vec![Bytes::from_static(
-            br#"data: {"type":"response.created"}
+        assert_eq!(
+            chunks,
+            vec![Bytes::from_static(
+                br#"data: {"type":"response.created"}
 
 "#
-        )]
-    );
-}
+            )]
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_add_stable_prompt_cache_key_to_responses_when_account_has_seed() {
-    let mut primary = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    primary.prompt_cache_key_seed = Some("stable-seed".to_string());
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
+    #[test]
+    fn should_add_stable_prompt_cache_key_to_responses_when_account_has_seed() {
+        let mut primary = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        primary.prompt_cache_key_seed = Some("stable-seed".to_string());
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
 
-    let body = body_with_request_transforms(
-        &Bytes::from_static(br#"{"model":"gpt-5.5","input":[]}"#),
-        &request,
-        &primary,
-    )
-    .unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    assert_eq!(
-        body["prompt_cache_key"].as_str(),
-        Some("tp_35de55d6cc39b7f4a248e35e6ed26116")
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn should_preserve_client_supplied_prompt_cache_key() {
-    let mut primary = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    primary.prompt_cache_key_seed = Some("stable-seed".to_string());
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
-
-    let body = body_with_request_transforms(
-        &Bytes::from_static(br#"{"model":"gpt-5.5","prompt_cache_key":"client-key","input":[]}"#),
-        &request,
-        &primary,
-    )
-    .unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    assert_eq!(body["prompt_cache_key"].as_str(), Some("client-key"));
-}
-
-#[cfg(test)]
-#[test]
-fn should_normalize_legacy_fast_service_tier_before_http_upstream_forwarding() {
-    let account = account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    );
-    let request = RouteRequest {
-        endpoint: Endpoint::ChatCompletions,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: Some("fast".to_string()),
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
-
-    let body = body_with_request_transforms(
-        &Bytes::from_static(br#"{"model":"gpt-5.5","service_tier":"fast"}"#),
-        &request,
-        &account,
-    )
-    .unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-    assert_eq!(body["service_tier"].as_str(), Some("priority"));
-    assert!(body.get("prompt_cache_key").is_none());
-}
-
-#[cfg(test)]
-#[test]
-fn should_identify_only_precommit_retry_statuses() {
-    assert!(should_retry_precommit(StatusCode::INTERNAL_SERVER_ERROR));
-    assert!(should_retry_precommit(StatusCode::SERVICE_UNAVAILABLE));
-    assert!(should_retry_precommit(StatusCode::TOO_MANY_REQUESTS));
-    assert!(!should_retry_precommit(StatusCode::OK));
-}
-
-#[cfg(test)]
-#[test]
-fn should_not_retry_sse_response_after_first_event_is_observed() {
-    let mut response = Response::builder()
-        .status(StatusCode::SERVICE_UNAVAILABLE)
-        .body(Body::empty())
+        let body = body_with_request_transforms(
+            &Bytes::from_static(br#"{"model":"gpt-5.5","input":[]}"#),
+            &request,
+            &primary,
+        )
         .unwrap();
-    response.extensions_mut().insert(SseFirstFrameObserved);
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert!(!should_retry_precommit_response(&response));
-}
+        assert_eq!(
+            body["prompt_cache_key"].as_str(),
+            Some("tp_35de55d6cc39b7f4a248e35e6ed26116")
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_reject_only_compressed_request_content_encoding() {
-    let mut identity = HeaderMap::new();
-    identity.insert("content-encoding", "identity".parse().unwrap());
-    assert!(reject_compressed_body(&identity).is_ok());
+    #[test]
+    fn should_preserve_client_supplied_prompt_cache_key() {
+        let mut primary = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        primary.prompt_cache_key_seed = Some("stable-seed".to_string());
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
 
-    let mut compressed = HeaderMap::new();
-    compressed.insert("content-encoding", "gzip".parse().unwrap());
-    let error = reject_compressed_body(&compressed).unwrap_err();
-    assert_eq!(error.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
-    assert_eq!(error.code, ErrorCode::UnsupportedMediaType);
+        let body = body_with_request_transforms(
+            &Bytes::from_static(
+                br#"{"model":"gpt-5.5","prompt_cache_key":"client-key","input":[]}"#,
+            ),
+            &request,
+            &primary,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let mut layered = HeaderMap::new();
-    layered.insert("content-encoding", "identity, br".parse().unwrap());
-    assert_eq!(
-        reject_compressed_body(&layered).unwrap_err().code,
-        ErrorCode::UnsupportedMediaType
-    );
-}
+        assert_eq!(body["prompt_cache_key"].as_str(), Some("client-key"));
+    }
 
-#[cfg(test)]
-#[test]
-fn should_compare_downstream_bearer_tokens_by_content_and_length() {
-    assert!(constant_time_eq(b"Bearer client-key", b"Bearer client-key"));
-    assert!(!constant_time_eq(
-        b"Bearer client-key",
-        b"Bearer client-kez"
-    ));
-    assert!(!constant_time_eq(
-        b"Bearer client-key",
-        b"Bearer client-key-extra"
-    ));
-    assert!(!constant_time_eq(
-        b"Bearer client-key-extra",
-        b"Bearer client-key"
-    ));
-}
+    #[test]
+    fn should_normalize_legacy_fast_service_tier_before_http_upstream_forwarding() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let request = RouteRequest {
+            endpoint: Endpoint::ChatCompletions,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: Some("fast".to_string()),
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_select_next_account_after_attempted_account_is_excluded() {
-    let state = AppState::new(effective_config(vec![
-        account(
-            "first",
+        let body = body_with_request_transforms(
+            &Bytes::from_static(br#"{"model":"gpt-5.5","service_tier":"fast"}"#),
+            &request,
+            &account,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(body["service_tier"].as_str(), Some("priority"));
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn should_identify_only_precommit_retry_statuses() {
+        assert!(should_retry_precommit(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(should_retry_precommit(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(should_retry_precommit(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!should_retry_precommit(StatusCode::OK));
+    }
+
+    #[test]
+    fn should_not_retry_sse_response_after_first_event_is_observed() {
+        let mut response = Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::empty())
+            .unwrap();
+        response.extensions_mut().insert(SseFirstFrameObserved);
+
+        assert!(!should_retry_precommit_response(&response));
+    }
+
+    #[test]
+    fn should_reject_only_compressed_request_content_encoding() {
+        let mut identity = HeaderMap::new();
+        identity.insert("content-encoding", "identity".parse().unwrap());
+        assert!(reject_compressed_body(&identity).is_ok());
+
+        let mut compressed = HeaderMap::new();
+        compressed.insert("content-encoding", "gzip".parse().unwrap());
+        let error = reject_compressed_body(&compressed).unwrap_err();
+        assert_eq!(error.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(error.code, ErrorCode::UnsupportedMediaType);
+
+        let mut layered = HeaderMap::new();
+        layered.insert("content-encoding", "identity, br".parse().unwrap());
+        assert_eq!(
+            reject_compressed_body(&layered).unwrap_err().code,
+            ErrorCode::UnsupportedMediaType
+        );
+    }
+
+    #[test]
+    fn should_compare_downstream_bearer_tokens_by_content_and_length() {
+        assert!(constant_time_eq(b"Bearer client-key", b"Bearer client-key"));
+        assert!(!constant_time_eq(
+            b"Bearer client-key",
+            b"Bearer client-kez"
+        ));
+        assert!(!constant_time_eq(
+            b"Bearer client-key",
+            b"Bearer client-key-extra"
+        ));
+        assert!(!constant_time_eq(
+            b"Bearer client-key-extra",
+            b"Bearer client-key"
+        ));
+    }
+
+    #[tokio::test]
+    async fn should_select_next_account_after_attempted_account_is_excluded() {
+        let state = AppState::new(effective_config(vec![
+            account(
+                "first",
+                "http://127.0.0.1:1/v1".to_string(),
+                "first-token",
+                100,
+            ),
+            account(
+                "second",
+                "http://127.0.0.1:2/v1".to_string(),
+                "second-token",
+                90,
+            ),
+        ]))
+        .unwrap();
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let selected = select_next_account(&state, &request, &["first".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(selected.config.id, "second");
+    }
+
+    #[tokio::test]
+    async fn should_use_observed_latency_buckets_when_selecting_equal_priority_accounts() {
+        let state = AppState::new(effective_config(vec![
+            account(
+                "slow",
+                "http://127.0.0.1:1/v1".to_string(),
+                "slow-token",
+                100,
+            ),
+            account(
+                "fast",
+                "http://127.0.0.1:2/v1".to_string(),
+                "fast-token",
+                100,
+            ),
+        ]))
+        .unwrap();
+        state
+            .account_health_cell("slow")
+            .unwrap()
+            .record_connect_duration_ms(1_000);
+        state
+            .account_health_cell("slow")
+            .unwrap()
+            .record_first_event_duration_ms(2_000);
+        state
+            .account_health_cell("fast")
+            .unwrap()
+            .record_connect_duration_ms(25);
+        state
+            .account_health_cell("fast")
+            .unwrap()
+            .record_first_event_duration_ms(50);
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let selected = select_next_account(&state, &request, &[]).await.unwrap();
+
+        assert_eq!(selected.config.id, "fast");
+    }
+
+    #[tokio::test]
+    async fn should_record_route_exclusion_metrics_by_reason() {
+        let mut wrong_model = account(
+            "wrong-model",
+            "http://127.0.0.1:1/v1".to_string(),
+            "wrong-token",
+            100,
+        );
+        wrong_model.config.models = vec!["gpt-4.1".to_string()];
+        let state = AppState::new(effective_config(vec![
+            wrong_model,
+            account(
+                "selected",
+                "http://127.0.0.1:2/v1".to_string(),
+                "selected-token",
+                90,
+            ),
+        ]))
+        .unwrap();
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let selected = select_next_account(&state, &request, &[]).await.unwrap();
+
+        assert_eq!(selected.config.id, "selected");
+        assert_eq!(
+            state.metrics.snapshot().route_exclusions,
+            vec![(
+                crate::metrics::RouteExclusionMetricKey {
+                    reason: "model_unsupported".to_string(),
+                },
+                1,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_route_websocket_previous_response_id_to_incremental_account() {
+        let mut non_incremental = account(
+            "non-incremental",
             "http://127.0.0.1:1/v1".to_string(),
             "first-token",
             100,
-        ),
-        account(
-            "second",
+        );
+        non_incremental
+            .config
+            .supports_incremental_previous_response_id = false;
+        let incremental = account(
+            "incremental",
             "http://127.0.0.1:2/v1".to_string(),
             "second-token",
             90,
-        ),
-    ]))
-    .unwrap();
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
+        );
+        let state = AppState::new(effective_config(vec![non_incremental, incremental])).unwrap();
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::WebSocket,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: true,
+            model_family: "gpt-5".to_string(),
+            stream: true,
+        };
 
-    let selected = select_next_account(&state, &request, &["first".to_string()])
-        .await
+        let selected = select_next_account(&state, &request, &[]).await.unwrap();
+
+        assert_eq!(selected.config.id, "incremental");
+        assert_eq!(
+            state.metrics.snapshot().route_exclusions,
+            vec![(
+                crate::metrics::RouteExclusionMetricKey {
+                    reason: "websocket_continuation_unsupported".to_string(),
+                },
+                1,
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_exclude_usage_limited_accounts_from_selection() {
+        let state = AppState::new(effective_config(vec![
+            account(
+                "first",
+                "http://127.0.0.1:1/v1".to_string(),
+                "first-token",
+                100,
+            ),
+            account(
+                "second",
+                "http://127.0.0.1:2/v1".to_string(),
+                "second-token",
+                90,
+            ),
+        ]))
+        .unwrap();
+        state.usage_windows.lock().await.insert(
+            "first".to_string(),
+            vec![UsageWindow {
+                window: "codex_usage_limit".to_string(),
+                limit: None,
+                remaining: Some(0),
+                remaining_percent: None,
+                rate_limit_pressure: "limited".to_string(),
+                reset_after: Some("60s".to_string()),
+                reset_at: Some("2999-01-01T00:00:00Z".to_string()),
+                source: "usage_limit_reached_error".to_string(),
+                observed_at: "2026-05-27T11:24:18Z".to_string(),
+                limited: true,
+            }],
+        );
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let selected = select_next_account(&state, &request, &[]).await.unwrap();
+
+        assert_eq!(selected.config.id, "second");
+    }
+
+    #[tokio::test]
+    async fn should_exclude_auth_failed_runtime_accounts_from_selection() {
+        let state = AppState::new(effective_config(vec![
+            account(
+                "first",
+                "http://127.0.0.1:1/v1".to_string(),
+                "first-token",
+                100,
+            ),
+            account(
+                "second",
+                "http://127.0.0.1:2/v1".to_string(),
+                "second-token",
+                90,
+            ),
+        ]))
+        .unwrap();
+        state.store_account_health("first", AccountHealth::AuthFailed);
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let selected = select_next_account(&state, &request, &[]).await.unwrap();
+
+        assert_eq!(selected.config.id, "second");
+    }
+
+    #[test]
+    fn should_store_runtime_health_in_per_account_atomic_cells() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
         .unwrap();
 
-    assert_eq!(selected.config.id, "second");
-}
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
+        );
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_use_observed_latency_buckets_when_selecting_equal_priority_accounts() {
-    let state = AppState::new(effective_config(vec![
-        account(
-            "slow",
-            "http://127.0.0.1:1/v1".to_string(),
-            "slow-token",
-            100,
-        ),
-        account(
-            "fast",
-            "http://127.0.0.1:2/v1".to_string(),
-            "fast-token",
-            100,
-        ),
-    ]))
-    .unwrap();
-    state
-        .account_health_cell("slow")
-        .unwrap()
-        .record_connect_duration_ms(1_000);
-    state
-        .account_health_cell("slow")
-        .unwrap()
-        .record_first_event_duration_ms(2_000);
-    state
-        .account_health_cell("fast")
-        .unwrap()
-        .record_connect_duration_ms(25);
-    state
-        .account_health_cell("fast")
-        .unwrap()
-        .record_first_event_duration_ms(50);
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
-
-    let selected = select_next_account(&state, &request, &[]).await.unwrap();
-
-    assert_eq!(selected.config.id, "fast");
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_route_exclusion_metrics_by_reason() {
-    let mut wrong_model = account(
-        "wrong-model",
-        "http://127.0.0.1:1/v1".to_string(),
-        "wrong-token",
-        100,
-    );
-    wrong_model.config.models = vec!["gpt-4.1".to_string()];
-    let state = AppState::new(effective_config(vec![
-        wrong_model,
-        account(
-            "selected",
-            "http://127.0.0.1:2/v1".to_string(),
-            "selected-token",
-            90,
-        ),
-    ]))
-    .unwrap();
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
-
-    let selected = select_next_account(&state, &request, &[]).await.unwrap();
-
-    assert_eq!(selected.config.id, "selected");
-    assert_eq!(
-        state.metrics.snapshot().route_exclusions,
-        vec![(
-            crate::metrics::RouteExclusionMetricKey {
-                reason: "model_unsupported".to_string(),
+        state.store_account_health(
+            "primary",
+            AccountHealth::Throttled {
+                next_retry_at_ms: 42,
             },
-            1,
-        )]
-    );
-}
+        );
+        assert_eq!(
+            state.account_health_snapshot().get("primary"),
+            Some(&AccountHealth::Throttled {
+                next_retry_at_ms: 42
+            })
+        );
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_route_websocket_previous_response_id_to_incremental_account() {
-    let mut non_incremental = account(
-        "non-incremental",
-        "http://127.0.0.1:1/v1".to_string(),
-        "first-token",
-        100,
-    );
-    non_incremental
-        .config
-        .supports_incremental_previous_response_id = false;
-    let incremental = account(
-        "incremental",
-        "http://127.0.0.1:2/v1".to_string(),
-        "second-token",
-        90,
-    );
-    let state = AppState::new(effective_config(vec![non_incremental, incremental])).unwrap();
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::WebSocket,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: true,
-        model_family: "gpt-5".to_string(),
-        stream: true,
-    };
+        state.clear_account_health_if_not_auth_failed("primary");
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
+        );
 
-    let selected = select_next_account(&state, &request, &[]).await.unwrap();
+        state.store_account_health("primary", AccountHealth::AuthFailed);
+        state.clear_account_health_if_not_auth_failed("primary");
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::AuthFailed
+        );
+        state.clear_account_health("primary");
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
+        );
+    }
 
-    assert_eq!(selected.config.id, "incremental");
-    assert_eq!(
-        state.metrics.snapshot().route_exclusions,
-        vec![(
-            crate::metrics::RouteExclusionMetricKey {
-                reason: "websocket_continuation_unsupported".to_string(),
+    #[tokio::test]
+    async fn should_record_and_clear_runtime_http_account_health() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
+
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::UNAUTHORIZED,
+            &HeaderMap::new(),
+            None,
+        )
+        .await;
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::AuthFailed
+        );
+
+        record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None)
+            .await;
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::AuthFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn should_clear_transient_throttle_after_successful_http_response() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
+        state.store_account_health(
+            "primary",
+            AccountHealth::Throttled {
+                next_retry_at_ms: 1_000,
             },
-            1,
-        )]
-    );
-}
+        );
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_exclude_usage_limited_accounts_from_selection() {
-    let state = AppState::new(effective_config(vec![
-        account(
-            "first",
+        record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None)
+            .await;
+
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
+        );
+    }
+
+    #[tokio::test]
+    async fn should_clear_transient_throttle_after_successful_websocket_event() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
             "http://127.0.0.1:1/v1".to_string(),
-            "first-token",
+            "upstream-token",
             100,
-        ),
-        account(
-            "second",
-            "http://127.0.0.1:2/v1".to_string(),
-            "second-token",
-            90,
-        ),
-    ]))
-    .unwrap();
-    state.usage_windows.lock().await.insert(
-        "first".to_string(),
-        vec![UsageWindow {
-            window: "codex_usage_limit".to_string(),
-            limit: None,
-            remaining: Some(0),
-            remaining_percent: None,
-            rate_limit_pressure: "limited".to_string(),
-            reset_after: Some("60s".to_string()),
-            reset_at: Some("2999-01-01T00:00:00Z".to_string()),
-            source: "usage_limit_reached_error".to_string(),
-            observed_at: "2026-05-27T11:24:18Z".to_string(),
-            limited: true,
-        }],
-    );
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
+        state.store_account_health(
+            "primary",
+            AccountHealth::Throttled {
+                next_retry_at_ms: 1_000,
+            },
+        );
 
-    let selected = select_next_account(&state, &request, &[]).await.unwrap();
+        record_account_websocket_event_health(
+            &state,
+            &selected,
+            &ws_event(r#"{"type":"response.output_item.done","item":{"id":"item_1"}}"#),
+        );
 
-    assert_eq!(selected.config.id, "second");
-}
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
+        );
+    }
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_exclude_auth_failed_runtime_accounts_from_selection() {
-    let state = AppState::new(effective_config(vec![
-        account(
-            "first",
+    #[tokio::test]
+    async fn should_not_clear_transient_throttle_after_previous_response_not_found_websocket_event()
+    {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
             "http://127.0.0.1:1/v1".to_string(),
-            "first-token",
+            "upstream-token",
             100,
-        ),
-        account(
-            "second",
-            "http://127.0.0.1:2/v1".to_string(),
-            "second-token",
-            90,
-        ),
-    ]))
-    .unwrap();
-    state.store_account_health("first", AccountHealth::AuthFailed);
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
+        state.store_account_health(
+            "primary",
+            AccountHealth::Throttled {
+                next_retry_at_ms: 1_000,
+            },
+        );
 
-    let selected = select_next_account(&state, &request, &[]).await.unwrap();
+        record_account_websocket_event_health(
+            &state,
+            &selected,
+            &ws_event(r#"{"type":"error","error":{"code":"previous_response_not_found"}}"#),
+        );
 
-    assert_eq!(selected.config.id, "second");
-}
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Throttled {
+                next_retry_at_ms: 1_000
+            }
+        );
+    }
 
-#[cfg(test)]
-#[test]
-fn should_store_runtime_health_in_per_account_atomic_cells() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
+    #[tokio::test]
+    async fn should_record_usage_limit_error_from_websocket_event() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
 
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::Open
-    );
-
-    state.store_account_health(
-        "primary",
-        AccountHealth::Throttled {
-            next_retry_at_ms: 42,
-        },
-    );
-    assert_eq!(
-        state.account_health_snapshot().get("primary"),
-        Some(&AccountHealth::Throttled {
-            next_retry_at_ms: 42
-        })
-    );
-
-    state.clear_account_health_if_not_auth_failed("primary");
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::Open
-    );
-
-    state.store_account_health("primary", AccountHealth::AuthFailed);
-    state.clear_account_health_if_not_auth_failed("primary");
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::AuthFailed
-    );
-    state.clear_account_health("primary");
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::Open
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_and_clear_runtime_http_account_health() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-
-    record_account_http_status(
-        &state,
-        &selected,
-        StatusCode::UNAUTHORIZED,
-        &HeaderMap::new(),
-        None,
-    )
-    .await;
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::AuthFailed
-    );
-
-    record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None).await;
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::AuthFailed
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_clear_transient_throttle_after_successful_http_response() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-    state.store_account_health(
-        "primary",
-        AccountHealth::Throttled {
-            next_retry_at_ms: 1_000,
-        },
-    );
-
-    record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None).await;
-
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::Open
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_clear_transient_throttle_after_successful_websocket_event() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-    state.store_account_health(
-        "primary",
-        AccountHealth::Throttled {
-            next_retry_at_ms: 1_000,
-        },
-    );
-
-    record_account_websocket_event_health(
-        &state,
-        &selected,
-        &ws_event(r#"{"type":"response.output_item.done","item":{"id":"item_1"}}"#),
-    );
-
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::Open
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_not_clear_transient_throttle_after_previous_response_not_found_websocket_event() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-    state.store_account_health(
-        "primary",
-        AccountHealth::Throttled {
-            next_retry_at_ms: 1_000,
-        },
-    );
-
-    record_account_websocket_event_health(
-        &state,
-        &selected,
-        &ws_event(r#"{"type":"error","error":{"code":"previous_response_not_found"}}"#),
-    );
-
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::Throttled {
-            next_retry_at_ms: 1_000
-        }
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_usage_limit_error_from_websocket_event() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-
-    record_websocket_usage_limit_error_event(
+        record_websocket_usage_limit_error_event(
         &state,
         &selected,
         &ws_event(r#"{"type":"error","error":{"code":"usage_limit_reached","resets_at":"2026-05-27T15:07:00Z"}}"#),
     )
     .await;
 
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::UsageLimited {
-            reset_at_ms: chrono::DateTime::parse_from_rfc3339("2026-05-27T15:07:00Z")
-                .unwrap()
-                .timestamp_millis() as u64
-        }
-    );
-    let usage_windows = state.usage_windows.lock().await;
-    let windows = usage_windows.get("primary").unwrap();
-    assert_eq!(windows[0].window, "codex_usage_limit");
-    assert_eq!(windows[0].source, "usage_limit_reached_error");
-    assert_eq!(windows[0].reset_at.as_deref(), Some("2026-05-27T15:07:00Z"));
-}
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::UsageLimited {
+                reset_at_ms: chrono::DateTime::parse_from_rfc3339("2026-05-27T15:07:00Z")
+                    .unwrap()
+                    .timestamp_millis() as u64
+            }
+        );
+        let usage_windows = state.usage_windows.lock().await;
+        let windows = usage_windows.get("primary").unwrap();
+        assert_eq!(windows[0].window, "codex_usage_limit");
+        assert_eq!(windows[0].source, "usage_limit_reached_error");
+        assert_eq!(windows[0].reset_at.as_deref(), Some("2026-05-27T15:07:00Z"));
+    }
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_back_off_account_after_transient_http_failure() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-
-    record_account_http_status(
-        &state,
-        &selected,
-        StatusCode::SERVICE_UNAVAILABLE,
-        &HeaderMap::new(),
-        None,
-    )
-    .await;
-
-    let AccountHealth::Throttled { next_retry_at_ms } =
-        state.account_health_cell("primary").unwrap().load()
-    else {
-        panic!("expected throttled health");
-    };
-    assert!(next_retry_at_ms > now_unix_ms());
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_count_repeated_transient_failures_until_success() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-
-    record_account_http_status(
-        &state,
-        &selected,
-        StatusCode::SERVICE_UNAVAILABLE,
-        &HeaderMap::new(),
-        None,
-    )
-    .await;
-    record_account_http_status(
-        &state,
-        &selected,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        &HeaderMap::new(),
-        None,
-    )
-    .await;
-
-    assert_eq!(
-        state
-            .account_health_cell("primary")
-            .unwrap()
-            .transient_failure_count(),
-        2
-    );
-
-    record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None).await;
-
-    assert_eq!(
-        state
-            .account_health_cell("primary")
-            .unwrap()
-            .transient_failure_count(),
-        0
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn should_parse_retry_after_delta_and_http_date_deadlines() {
-    let mut headers = HeaderMap::new();
-    headers.insert("retry-after", "12".parse().unwrap());
-
-    assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(17_000));
-
-    headers.insert(
-        "retry-after",
-        "Thu, 01 Jan 1970 00:00:10 GMT".parse().unwrap(),
-    );
-    assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(10_000));
-
-    headers.insert(
-        "retry-after",
-        "Thursday, 01-Jan-70 00:00:11 GMT".parse().unwrap(),
-    );
-    assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(11_000));
-
-    headers.insert("retry-after", "Thu Jan  1 00:00:12 1970".parse().unwrap());
-    assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(12_000));
-}
-
-#[cfg(test)]
-#[test]
-fn should_compute_throttle_deadline_with_retry_after_policy_and_bounded_jitter() {
-    let mut headers = HeaderMap::new();
-    headers.insert("retry-after", "120".parse().unwrap());
-    let retry = RetryConfig {
-        honor_retry_after: true,
-        base_backoff_ms: 250,
-        max_backoff_ms: 30_000,
-        max_precommit_retries: 1,
-    };
-
-    assert_eq!(
-        throttle_deadline_ms(&headers, 1_000, &retry, "primary", 1),
-        121_000
-    );
-
-    let no_retry_after = RetryConfig {
-        honor_retry_after: false,
-        base_backoff_ms: 250,
-        max_backoff_ms: 400,
-        max_precommit_retries: 1,
-    };
-    let deadline = throttle_deadline_ms(&headers, 1_000, &no_retry_after, "primary", 1);
-
-    assert!((1_250..=1_400).contains(&deadline));
-}
-
-#[cfg(test)]
-#[test]
-fn should_grow_transient_backoff_exponentially_until_cap() {
-    let retry = RetryConfig {
-        honor_retry_after: false,
-        base_backoff_ms: 250,
-        max_backoff_ms: 1_000,
-        max_precommit_retries: 1,
-    };
-
-    assert_eq!(exponential_backoff_ms(&retry, 1), 250);
-    assert_eq!(exponential_backoff_ms(&retry, 2), 500);
-    assert_eq!(exponential_backoff_ms(&retry, 3), 1_000);
-    assert_eq!(exponential_backoff_ms(&retry, 30), 1_000);
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_throttled_health_until_retry_after_deadline() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-    let mut headers = HeaderMap::new();
-    headers.insert("retry-after", "120".parse().unwrap());
-
-    record_account_http_status(
-        &state,
-        &selected,
-        StatusCode::TOO_MANY_REQUESTS,
-        &headers,
-        None,
-    )
-    .await;
-
-    let AccountHealth::Throttled { next_retry_at_ms } =
-        state.account_health_cell("primary").unwrap().load()
-    else {
-        panic!("expected throttled health");
-    };
-    assert!(next_retry_at_ms >= now_unix_ms() + 119_000);
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_record_usage_limited_reset_in_account_health_cell() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let selected = state.effective.accounts[0].clone();
-    let reset_at_ms = now_unix_ms() + 60_000;
-
-    record_account_http_status(
-        &state,
-        &selected,
-        StatusCode::TOO_MANY_REQUESTS,
-        &HeaderMap::new(),
-        Some(AccountHealth::UsageLimited { reset_at_ms }),
-    )
-    .await;
-
-    assert_eq!(
-        state.account_health_cell("primary").unwrap().load(),
-        AccountHealth::UsageLimited { reset_at_ms }
-    );
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_exclude_usage_limited_account_cell_from_selection() {
-    let state = AppState::new(effective_config(vec![
-        account(
-            "first",
+    #[tokio::test]
+    async fn should_back_off_account_after_transient_http_failure() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
             "http://127.0.0.1:1/v1".to_string(),
-            "first-token",
+            "upstream-token",
             100,
-        ),
-        account(
-            "second",
-            "http://127.0.0.1:2/v1".to_string(),
-            "second-token",
-            90,
-        ),
-    ]))
-    .unwrap();
-    state.store_account_health(
-        "first",
-        AccountHealth::UsageLimited {
-            reset_at_ms: now_unix_ms() + 60_000,
-        },
-    );
-    let request = RouteRequest {
-        endpoint: Endpoint::Responses,
-        transport: Transport::Http,
-        model: "gpt-5.5".to_string(),
-        service_tier: None,
-        pinned_account_id: None,
-        requires_incremental_previous_response_id: false,
-        model_family: "gpt-5".to_string(),
-        stream: false,
-    };
-
-    let selected = select_next_account(&state, &request, &[]).await.unwrap();
-
-    assert_eq!(selected.config.id, "second");
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn should_require_auth_before_route_errors_except_healthz() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-    let app = app(state);
-
-    let generation_wrong_method = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/chat/completions")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+        )]))
         .unwrap();
-    assert_eq!(generation_wrong_method.status(), StatusCode::UNAUTHORIZED);
+        let selected = state.effective.accounts[0].clone();
 
-    let models_wrong_method = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/models")
-                .body(Body::empty())
-                .unwrap(),
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &HeaderMap::new(),
+            None,
         )
-        .await
-        .unwrap();
-    assert_eq!(models_wrong_method.status(), StatusCode::UNAUTHORIZED);
+        .await;
 
-    let metrics_wrong_method = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/metrics")
-                .body(Body::empty())
-                .unwrap(),
+        let AccountHealth::Throttled { next_retry_at_ms } =
+            state.account_health_cell("primary").unwrap().load()
+        else {
+            panic!("expected throttled health");
+        };
+        assert!(next_retry_at_ms > now_unix_ms());
+    }
+
+    #[tokio::test]
+    async fn should_count_repeated_transient_failures_until_success() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
+
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &HeaderMap::new(),
+            None,
         )
-        .await
-        .unwrap();
-    assert_eq!(metrics_wrong_method.status(), StatusCode::UNAUTHORIZED);
-
-    let unsupported_openai_route = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/files")
-                .body(Body::empty())
-                .unwrap(),
+        .await;
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &HeaderMap::new(),
+            None,
         )
-        .await
+        .await;
+
+        assert_eq!(
+            state
+                .account_health_cell("primary")
+                .unwrap()
+                .transient_failure_count(),
+            2
+        );
+
+        record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None)
+            .await;
+
+        assert_eq!(
+            state
+                .account_health_cell("primary")
+                .unwrap()
+                .transient_failure_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn should_parse_retry_after_delta_and_http_date_deadlines() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "12".parse().unwrap());
+
+        assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(17_000));
+
+        headers.insert(
+            "retry-after",
+            "Thu, 01 Jan 1970 00:00:10 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(10_000));
+
+        headers.insert(
+            "retry-after",
+            "Thursday, 01-Jan-70 00:00:11 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(11_000));
+
+        headers.insert("retry-after", "Thu Jan  1 00:00:12 1970".parse().unwrap());
+        assert_eq!(retry_after_deadline_ms(&headers, 5_000), Some(12_000));
+    }
+
+    #[test]
+    fn should_compute_throttle_deadline_with_retry_after_policy_and_bounded_jitter() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "120".parse().unwrap());
+        let retry = RetryConfig {
+            honor_retry_after: true,
+            base_backoff_ms: 250,
+            max_backoff_ms: 30_000,
+            max_precommit_retries: 1,
+        };
+
+        assert_eq!(
+            throttle_deadline_ms(&headers, 1_000, &retry, "primary", 1),
+            121_000
+        );
+
+        let no_retry_after = RetryConfig {
+            honor_retry_after: false,
+            base_backoff_ms: 250,
+            max_backoff_ms: 400,
+            max_precommit_retries: 1,
+        };
+        let deadline = throttle_deadline_ms(&headers, 1_000, &no_retry_after, "primary", 1);
+
+        assert!((1_250..=1_400).contains(&deadline));
+    }
+
+    #[test]
+    fn should_grow_transient_backoff_exponentially_until_cap() {
+        let retry = RetryConfig {
+            honor_retry_after: false,
+            base_backoff_ms: 250,
+            max_backoff_ms: 1_000,
+            max_precommit_retries: 1,
+        };
+
+        assert_eq!(exponential_backoff_ms(&retry, 1), 250);
+        assert_eq!(exponential_backoff_ms(&retry, 2), 500);
+        assert_eq!(exponential_backoff_ms(&retry, 3), 1_000);
+        assert_eq!(exponential_backoff_ms(&retry, 30), 1_000);
+    }
+
+    #[tokio::test]
+    async fn should_record_throttled_health_until_retry_after_deadline() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
         .unwrap();
-    assert_eq!(unsupported_openai_route.status(), StatusCode::UNAUTHORIZED);
-}
+        let selected = state.effective.accounts[0].clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "120".parse().unwrap());
 
-#[cfg(test)]
-#[tokio::test]
-async fn should_return_426_for_responses_and_compact_get_without_websocket_upgrade() {
-    let state = AppState::new(effective_config(vec![account(
-        "primary",
-        "http://127.0.0.1:1/v1".to_string(),
-        "upstream-token",
-        100,
-    )]))
-    .unwrap();
-
-    // GET /v1/responses without an upgrade exercises the responses_ws
-    // rejection branch; GET /v1/responses/compact has no WebSocket transport
-    // even with upgrade headers present.
-    let responses = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/responses")
-                .header("authorization", "Bearer client-key")
-                .body(Body::empty())
-                .unwrap(),
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+            None,
         )
-        .await
-        .unwrap();
-    assert_eq!(responses.status(), StatusCode::UPGRADE_REQUIRED);
-    let body = to_bytes(responses.into_body(), 1024 * 1024).await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        body["error"]["message"],
-        "GET /v1/responses requires WebSocket upgrade"
-    );
-    assert_eq!(body["error"]["type"], "tokenproxy_error");
-    assert_eq!(body["error"]["code"], "unsupported_method");
-    assert!(body["error"]["param"].is_null());
-    assert!(
-        body["error"]["tokenproxy_request_id"]
-            .as_str()
-            .is_some_and(|request_id| request_id.starts_with("req_"))
-    );
+        .await;
 
-    let compact = app(state.clone())
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/responses/compact")
-                .header("authorization", "Bearer client-key")
-                .header("connection", "upgrade")
-                .header("upgrade", "websocket")
-                .body(Body::empty())
-                .unwrap(),
+        let AccountHealth::Throttled { next_retry_at_ms } =
+            state.account_health_cell("primary").unwrap().load()
+        else {
+            panic!("expected throttled health");
+        };
+        assert!(next_retry_at_ms >= now_unix_ms() + 119_000);
+    }
+
+    #[tokio::test]
+    async fn should_record_usage_limited_reset_in_account_health_cell() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts[0].clone();
+        let reset_at_ms = now_unix_ms() + 60_000;
+
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::TOO_MANY_REQUESTS,
+            &HeaderMap::new(),
+            Some(AccountHealth::UsageLimited { reset_at_ms }),
         )
-        .await
-        .unwrap();
-    assert_eq!(compact.status(), StatusCode::UPGRADE_REQUIRED);
-    let body = to_bytes(compact.into_body(), 1024 * 1024).await.unwrap();
-    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        body["error"]["message"],
-        "GET /v1/responses/compact does not support WebSocket transport"
-    );
-    assert_eq!(body["error"]["type"], "tokenproxy_error");
-    assert_eq!(body["error"]["code"], "unsupported_method");
-    assert!(body["error"]["param"].is_null());
+        .await;
 
-    let metrics = state.metrics.snapshot();
-    assert_eq!(
-        metrics.request_outcomes,
-        vec![
-            (
-                crate::metrics::RequestMetricKey {
-                    endpoint: "/v1/responses".to_string(),
-                    transport: "http".to_string(),
-                    status_class: "4xx".to_string(),
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "none".to_string(),
-                },
-                1,
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::UsageLimited { reset_at_ms }
+        );
+    }
+
+    #[tokio::test]
+    async fn should_exclude_usage_limited_account_cell_from_selection() {
+        let state = AppState::new(effective_config(vec![
+            account(
+                "first",
+                "http://127.0.0.1:1/v1".to_string(),
+                "first-token",
+                100,
             ),
-            (
-                crate::metrics::RequestMetricKey {
-                    endpoint: "/v1/responses/compact".to_string(),
-                    transport: "http".to_string(),
-                    status_class: "4xx".to_string(),
-                    model_family: "unknown".to_string(),
-                    account_id_hash: "none".to_string(),
-                },
-                1,
+            account(
+                "second",
+                "http://127.0.0.1:2/v1".to_string(),
+                "second-token",
+                90,
             ),
-        ]
-    );
-    assert_eq!(metrics.request_duration_count, 2);
+        ]))
+        .unwrap();
+        state.store_account_health(
+            "first",
+            AccountHealth::UsageLimited {
+                reset_at_ms: now_unix_ms() + 60_000,
+            },
+        );
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let selected = select_next_account(&state, &request, &[]).await.unwrap();
+
+        assert_eq!(selected.config.id, "second");
+    }
+
+    #[tokio::test]
+    async fn should_require_auth_before_route_errors_except_healthz() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let app = app(state);
+
+        let generation_wrong_method = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/chat/completions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(generation_wrong_method.status(), StatusCode::UNAUTHORIZED);
+
+        let models_wrong_method = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(models_wrong_method.status(), StatusCode::UNAUTHORIZED);
+
+        let metrics_wrong_method = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(metrics_wrong_method.status(), StatusCode::UNAUTHORIZED);
+
+        let unsupported_openai_route = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/files")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unsupported_openai_route.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn should_return_426_for_responses_and_compact_get_without_websocket_upgrade() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+
+        // GET /v1/responses without an upgrade exercises the responses_ws
+        // rejection branch; GET /v1/responses/compact has no WebSocket transport
+        // even with upgrade headers present.
+        let responses = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(responses.status(), StatusCode::UPGRADE_REQUIRED);
+        let body = to_bytes(responses.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["error"]["message"],
+            "GET /v1/responses requires WebSocket upgrade"
+        );
+        assert_eq!(body["error"]["type"], "tokenproxy_error");
+        assert_eq!(body["error"]["code"], "unsupported_method");
+        assert!(body["error"]["param"].is_null());
+        assert!(
+            body["error"]["tokenproxy_request_id"]
+                .as_str()
+                .is_some_and(|request_id| request_id.starts_with("req_"))
+        );
+
+        let compact = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/responses/compact")
+                    .header("authorization", "Bearer client-key")
+                    .header("connection", "upgrade")
+                    .header("upgrade", "websocket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(compact.status(), StatusCode::UPGRADE_REQUIRED);
+        let body = to_bytes(compact.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["error"]["message"],
+            "GET /v1/responses/compact does not support WebSocket transport"
+        );
+        assert_eq!(body["error"]["type"], "tokenproxy_error");
+        assert_eq!(body["error"]["code"], "unsupported_method");
+        assert!(body["error"]["param"].is_null());
+
+        let metrics = state.metrics.snapshot();
+        assert_eq!(
+            metrics.request_outcomes,
+            vec![
+                (
+                    crate::metrics::RequestMetricKey {
+                        endpoint: "/v1/responses".to_string(),
+                        transport: "http".to_string(),
+                        status_class: "4xx".to_string(),
+                        model_family: "unknown".to_string(),
+                        account_id_hash: "none".to_string(),
+                    },
+                    1,
+                ),
+                (
+                    crate::metrics::RequestMetricKey {
+                        endpoint: "/v1/responses/compact".to_string(),
+                        transport: "http".to_string(),
+                        status_class: "4xx".to_string(),
+                        model_family: "unknown".to_string(),
+                        account_id_hash: "none".to_string(),
+                    },
+                    1,
+                ),
+            ]
+        );
+        assert_eq!(metrics.request_duration_count, 2);
+    }
 }

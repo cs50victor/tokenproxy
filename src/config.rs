@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -278,15 +276,6 @@ impl FileProvider for StdFileProvider {
     ) -> Result<String, TokenproxyError> {
         read_s3_uri_to_string_blocking(uri.to_string(), timeout)
     }
-}
-
-#[cfg(test)]
-pub fn parse_config(input: &str) -> Result<Config, TokenproxyError> {
-    parse_config_value(input)?
-        .try_into()
-        .map_err(|error: toml::de::Error| {
-            TokenproxyError::invalid_config(format!("failed to parse tokenproxy config: {error}"))
-        })
 }
 
 pub fn parse_config_with_cli_overrides(
@@ -793,15 +782,25 @@ fn env_value(env: &impl EnvProvider, key: &str) -> Result<String, TokenproxyErro
 }
 
 #[cfg(test)]
-impl EnvProvider for BTreeMap<String, String> {
-    fn get_env(&self, key: &str) -> Option<String> {
-        self.get(key).cloned()
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    pub fn parse_config(input: &str) -> Result<Config, TokenproxyError> {
+        parse_config_value(input)?
+            .try_into()
+            .map_err(|error: toml::de::Error| {
+                TokenproxyError::invalid_config(format!(
+                    "failed to parse tokenproxy config: {error}"
+                ))
+            })
+    }
+
+    impl EnvProvider for BTreeMap<String, String> {
+        fn get_env(&self, key: &str) -> Option<String> {
+            self.get(key).cloned()
+        }
+    }
 
     struct MemoryFiles(BTreeMap<PathBuf, String>);
 
