@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use chrono::DateTime;
 use chrono::Datelike;
 use chrono::FixedOffset;
@@ -75,7 +73,7 @@ pub fn retry_after_deadline_ms(value: &str, now_ms: u64) -> Option<u64> {
     }
     // Retry-After uses HTTP-date, including obsolete RFC 850 and asctime forms.
     let deadline = httpdate::parse_http_date(value).ok()?;
-    Some(system_time_unix_ms(deadline))
+    Some(timestamp_ms(DateTime::<Utc>::from(deadline)))
 }
 
 pub fn unix_ms_from_rfc3339(value: &str) -> Option<u64> {
@@ -96,10 +94,6 @@ pub fn unix_seconds_from_rfc3339(value: &str) -> Option<i64> {
 
 pub fn timestamp_ms<Tz: chrono::TimeZone>(value: DateTime<Tz>) -> u64 {
     u64::try_from(value.timestamp_millis()).unwrap_or(0)
-}
-
-pub fn system_time_unix_ms(value: SystemTime) -> u64 {
-    timestamp_ms(DateTime::<Utc>::from(value))
 }
 
 pub fn now_unix_ms() -> u64 {

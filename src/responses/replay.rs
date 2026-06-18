@@ -120,7 +120,13 @@ fn build_full_replay(state: &ReplayState, new_request: Value) -> Result<Value, T
         )
     })?;
 
-    let mut output = object_clone(&new_request)?;
+    let mut output = new_request.as_object().cloned().ok_or_else(|| {
+        TokenproxyError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            ErrorCode::WebSocketUnsupportedMessage,
+            "response.create payload must be a JSON object",
+        )
+    })?;
     output.remove("previous_response_id");
 
     for field in STABLE_TEMPLATE_FIELDS {
@@ -134,22 +140,14 @@ fn build_full_replay(state: &ReplayState, new_request: Value) -> Result<Value, T
     remove_transport_only_fields_from_map(&mut output);
 
     let mut input = Vec::new();
-    extend_array_field(&mut input, template, "input");
+    if let Some(items) = template.get("input").and_then(Value::as_array) {
+        input.extend(items.iter().cloned());
+    }
     input.extend(state.last_completed_output_items.iter().cloned());
     extend_new_input_deduping_tool_outputs(&mut input, &new_request);
     output.insert("input".to_string(), Value::Array(input));
 
     Ok(Value::Object(output))
-}
-
-fn object_clone(value: &Value) -> Result<Map<String, Value>, TokenproxyError> {
-    value.as_object().cloned().ok_or_else(|| {
-        TokenproxyError::new(
-            axum::http::StatusCode::BAD_REQUEST,
-            ErrorCode::WebSocketUnsupportedMessage,
-            "response.create payload must be a JSON object",
-        )
-    })
 }
 
 fn normalize_legacy_service_tier(value: &mut Value) {
@@ -171,12 +169,6 @@ fn normalize_legacy_service_tier(value: &mut Value) {
 fn remove_transport_only_fields_from_map(object: &mut Map<String, Value>) {
     for field in TRANSPORT_ONLY_FIELDS {
         object.remove(*field);
-    }
-}
-
-fn extend_array_field(output: &mut Vec<Value>, value: &Value, field: &str) {
-    if let Some(items) = value.get(field).and_then(Value::as_array) {
-        output.extend(items.iter().cloned());
     }
 }
 

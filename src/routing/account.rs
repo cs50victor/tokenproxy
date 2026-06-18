@@ -28,41 +28,6 @@ pub struct AccountConfig {
     pub supports_anthropic_messages: bool,
 }
 
-impl AccountConfig {
-    pub(crate) fn supports_endpoint(&self, endpoint: Endpoint) -> bool {
-        match endpoint {
-            Endpoint::ChatCompletions => self.supports_chat_completions,
-            Endpoint::Responses => self.supports_responses,
-            Endpoint::ResponsesCompact => self.supports_compact,
-            Endpoint::AnthropicMessages => self.supports_anthropic_messages,
-        }
-    }
-
-    pub(crate) fn supports_model(&self, model: &str) -> bool {
-        let model = model.trim();
-        model.is_empty()
-            || self
-                .models
-                .iter()
-                .any(|candidate| candidate.trim().eq_ignore_ascii_case(model))
-    }
-
-    pub(crate) fn supports_service_tier(&self, service_tier: Option<&str>) -> bool {
-        let Some(service_tier) = service_tier else {
-            return true;
-        };
-        let requested = normalize_service_tier(service_tier);
-
-        requested.is_empty()
-            || requested.eq_ignore_ascii_case("auto")
-            || requested.eq_ignore_ascii_case("default")
-            || self
-                .service_tiers
-                .iter()
-                .any(|candidate| normalize_service_tier(candidate).eq_ignore_ascii_case(requested))
-    }
-}
-
 // Legacy "fast" requests map to the "priority" service tier.
 pub(crate) fn normalize_service_tier(service_tier: &str) -> &str {
     let trimmed = service_tier.trim();
@@ -92,12 +57,4 @@ pub struct RouteRequest {
     pub requires_incremental_previous_response_id: bool,
     pub model_family: String,
     pub stream: bool,
-}
-
-impl RouteRequest {
-    pub(crate) fn normalized_service_tier(&self) -> Option<String> {
-        self.service_tier
-            .as_deref()
-            .map(|service_tier| normalize_service_tier(service_tier).to_string())
-    }
 }

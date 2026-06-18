@@ -58,11 +58,23 @@ pub fn usage_snapshot(
             .map(|account| AccountUsage {
                 account_id_hash: account_id_hash(&account.id, account_hash_key),
                 display_name: account.display_name.clone(),
-                health: account_config_health(
-                    account,
-                    usage_by_account.get(&account.id),
-                    health_by_account.get(&account.id),
-                ),
+                health: if account.enabled {
+                    let usage_health = usage_health_from_windows(
+                        usage_by_account.get(&account.id).map(Vec::as_slice),
+                    );
+                    if matches!(usage_health, AccountHealth::UsageLimited { .. }) {
+                        usage_health
+                    } else {
+                        health_by_account
+                            .get(&account.id)
+                            .cloned()
+                            .unwrap_or(AccountHealth::Open)
+                    }
+                    .as_str()
+                    .to_string()
+                } else {
+                    "disabled".to_string()
+                },
                 usage: usage_by_account
                     .get(&account.id)
                     .cloned()
@@ -181,7 +193,11 @@ fn push_rate_window(
 ) {
     let limit = header_u64(headers, &format!("x-ratelimit-limit-{suffix}"));
     let remaining = header_u64(headers, &format!("x-ratelimit-remaining-{suffix}"));
-    let reset_after = header_string(headers, &format!("x-ratelimit-reset-{suffix}"));
+    let reset_after = headers
+        .get(format!("x-ratelimit-reset-{suffix}"))
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let reset_at = reset_after
         .as_deref()
         .and_then(|reset_after| rfc3339_after_duration(observed_at, reset_after));
@@ -197,36 +213,28 @@ fn push_rate_window(
         limit,
         remaining,
         remaining_percent: remaining_percent(limit, remaining),
-        rate_limit_pressure: rate_limit_pressure(limit, remaining, limited).to_string(),
+        rate_limit_pressure: if limited || remaining == Some(0) {
+            "limited"
+        } else if let Some(percent) = remaining_percent(limit, remaining) {
+            if percent < 5.0 {
+                "high"
+            } else if percent < 20.0 {
+                "medium"
+            } else if percent < 50.0 {
+                "low"
+            } else {
+                "none"
+            }
+        } else {
+            "unknown"
+        }
+        .to_string(),
         reset_after,
         reset_at,
         source: "openai_ratelimit_headers".to_string(),
         observed_at: observed_at.to_string(),
         limited,
     });
-}
-
-fn account_health(
-    windows: Option<&Vec<UsageWindow>>,
-    runtime_health: Option<&AccountHealth>,
-) -> AccountHealth {
-    let usage_health = usage_health_from_windows(windows.map(Vec::as_slice));
-    if matches!(usage_health, AccountHealth::UsageLimited { .. }) {
-        usage_health
-    } else {
-        runtime_health.cloned().unwrap_or(AccountHealth::Open)
-    }
-}
-
-fn account_config_health(
-    account: &AccountConfig,
-    windows: Option<&Vec<UsageWindow>>,
-    runtime_health: Option<&AccountHealth>,
-) -> String {
-    if !account.enabled {
-        return "disabled".to_string();
-    }
-    account_health(windows, runtime_health).as_str().to_string()
 }
 
 fn cooldown_until(
@@ -252,14 +260,6 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
 fn remaining_percent(limit: Option<u64>, remaining: Option<u64>) -> Option<f64> {
     let (Some(limit), Some(remaining)) = (limit, remaining) else {
         return None;
@@ -268,24 +268,6 @@ fn remaining_percent(limit: Option<u64>, remaining: Option<u64>) -> Option<f64> 
         return None;
     }
     Some((remaining as f64 / limit as f64) * 100.0)
-}
-
-fn rate_limit_pressure(limit: Option<u64>, remaining: Option<u64>, limited: bool) -> &'static str {
-    if limited || remaining == Some(0) {
-        return "limited";
-    }
-    let Some(percent) = remaining_percent(limit, remaining) else {
-        return "unknown";
-    };
-    if percent < 5.0 {
-        "high"
-    } else if percent < 20.0 {
-        "medium"
-    } else if percent < 50.0 {
-        "low"
-    } else {
-        "none"
-    }
 }
 
 pub fn account_id_hash(account_id: &str, hash_key: &str) -> String {

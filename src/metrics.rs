@@ -851,7 +851,11 @@ fn append_labeled_histogram(
     sum_ms: u64,
     labels: &[(&str, &str)],
 ) {
-    let labels = metric_labels(labels);
+    let labels = labels
+        .iter()
+        .map(|(key, value)| format!("{key}=\"{}\"", escape_label(value)))
+        .collect::<Vec<_>>()
+        .join(",");
     for (upper_bound, count) in buckets {
         output.push_str(&format!(
             "{name}_bucket{{{labels},le=\"{}\"}} {}\n",
@@ -936,14 +940,6 @@ fn append_usage_metrics(output: &mut String, usage: &UsageSnapshot) {
             }
         }
     }
-}
-
-fn metric_labels(labels: &[(&str, &str)]) -> String {
-    labels
-        .iter()
-        .map(|(key, value)| format!("{key}=\"{}\"", escape_label(value)))
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 fn escape_label(value: &str) -> String {

@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 
-use super::account::{AccountState, Endpoint, RouteRequest, Transport};
+use super::account::{AccountState, Endpoint, RouteRequest, Transport, normalize_service_tier};
 use super::health::AccountHealth;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +45,37 @@ pub fn select_account(accounts: &[AccountState], request: &RouteRequest, now_ms:
     let mut eligible = Vec::new();
 
     for account in accounts {
-        if let Some(reason) = exclusion_reason(account, request, now_ms) {
+        let reason = match account.health {
+            AccountHealth::Open | AccountHealth::Unknown => None,
+            AccountHealth::Throttled { next_retry_at_ms } if now_ms >= next_retry_at_ms => None,
+            AccountHealth::Throttled { .. } => Some(ExclusionReason::ThrottledCooldown),
+            AccountHealth::UsageLimited { reset_at_ms } if now_ms >= reset_at_ms => None,
+            AccountHealth::UsageLimited { .. } => Some(ExclusionReason::UsageLimited),
+            AccountHealth::AuthFailed => Some(ExclusionReason::AuthFailed),
+        }
+        .or_else(|| static_exclusion_reason(account, request));
+
+        if let Some(reason) = reason {
             excluded.push((account.config.id.clone(), reason));
             continue;
         }
 
-        eligible.push((score(account, request), account));
+        eligible.push((
+            AccountScore {
+                health_penalty: match account.health {
+                    AccountHealth::Open => 0,
+                    AccountHealth::Unknown => 20,
+                    AccountHealth::Throttled { .. } | AccountHealth::UsageLimited { .. } => 40,
+                    AccountHealth::AuthFailed => 100,
+                },
+                priority: Reverse(account.config.priority),
+                ewma_connect_ms_bucket: account.ewma_connect_ms_bucket,
+                ewma_first_event_ms_bucket: account.ewma_first_event_ms_bucket,
+                recent_failure_count: account.recent_failure_count,
+                stable_hash: stable_hash(&[&account.config.id, &request.model_family]),
+            },
+            account,
+        ));
     }
 
     eligible.sort_by_key(|(score, _)| *score);
@@ -77,42 +102,46 @@ struct AccountScore {
     stable_hash: u64,
 }
 
-fn exclusion_reason(
-    account: &AccountState,
-    request: &RouteRequest,
-    now_ms: u64,
-) -> Option<ExclusionReason> {
-    match account.health {
-        AccountHealth::Open | AccountHealth::Unknown => {}
-        AccountHealth::Throttled { next_retry_at_ms } if now_ms >= next_retry_at_ms => {}
-        AccountHealth::Throttled { .. } => return Some(ExclusionReason::ThrottledCooldown),
-        AccountHealth::UsageLimited { reset_at_ms } if now_ms >= reset_at_ms => {}
-        AccountHealth::UsageLimited { .. } => return Some(ExclusionReason::UsageLimited),
-        AccountHealth::AuthFailed => return Some(ExclusionReason::AuthFailed),
-    }
-
-    static_exclusion_reason(account, request)
-}
-
 fn static_exclusion_reason(
     account: &AccountState,
     request: &RouteRequest,
 ) -> Option<ExclusionReason> {
-    if !account.config.supports_endpoint(request.endpoint) {
+    let supports_endpoint = match request.endpoint {
+        Endpoint::ChatCompletions => account.config.supports_chat_completions,
+        Endpoint::Responses => account.config.supports_responses,
+        Endpoint::ResponsesCompact => account.config.supports_compact,
+        Endpoint::AnthropicMessages => account.config.supports_anthropic_messages,
+    };
+    if !supports_endpoint {
         return Some(ExclusionReason::EndpointUnsupported);
     }
 
-    if request.endpoint != Endpoint::ResponsesCompact
-        && !account.config.supports_model(&request.model)
-    {
-        return Some(ExclusionReason::ModelUnsupported);
+    if request.endpoint != Endpoint::ResponsesCompact {
+        let model = request.model.trim();
+        if !model.is_empty()
+            && !account
+                .config
+                .models
+                .iter()
+                .any(|candidate| candidate.trim().eq_ignore_ascii_case(model))
+        {
+            return Some(ExclusionReason::ModelUnsupported);
+        }
     }
 
-    if !account
-        .config
-        .supports_service_tier(request.service_tier.as_deref())
-    {
-        return Some(ExclusionReason::ServiceTierUnsupported);
+    if let Some(service_tier) = request.service_tier.as_deref() {
+        let requested = normalize_service_tier(service_tier);
+        if !requested.is_empty()
+            && !requested.eq_ignore_ascii_case("auto")
+            && !requested.eq_ignore_ascii_case("default")
+            && !account
+                .config
+                .service_tiers
+                .iter()
+                .any(|candidate| normalize_service_tier(candidate).eq_ignore_ascii_case(requested))
+        {
+            return Some(ExclusionReason::ServiceTierUnsupported);
+        }
     }
 
     if request.transport == Transport::WebSocket && !account.config.supports_responses_ws {
@@ -133,26 +162,6 @@ fn static_exclusion_reason(
     }
 
     None
-}
-
-fn score(account: &AccountState, request: &RouteRequest) -> AccountScore {
-    AccountScore {
-        health_penalty: health_penalty(&account.health),
-        priority: Reverse(account.config.priority),
-        ewma_connect_ms_bucket: account.ewma_connect_ms_bucket,
-        ewma_first_event_ms_bucket: account.ewma_first_event_ms_bucket,
-        recent_failure_count: account.recent_failure_count,
-        stable_hash: stable_hash(&[&account.config.id, &request.model_family]),
-    }
-}
-
-fn health_penalty(health: &AccountHealth) -> u8 {
-    match health {
-        AccountHealth::Open => 0,
-        AccountHealth::Unknown => 20,
-        AccountHealth::Throttled { .. } | AccountHealth::UsageLimited { .. } => 40,
-        AccountHealth::AuthFailed => 100,
-    }
 }
 
 fn stable_hash(parts: &[&str]) -> u64 {

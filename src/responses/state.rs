@@ -31,10 +31,6 @@ impl ReplayState {
         self.in_flight = false;
     }
 
-    pub fn record_output_item_done(&mut self, item: Value) {
-        self.pending_output_items.push(item);
-    }
-
     pub fn invalidate_previous_response(&mut self) {
         self.last_completed_response_id = None;
     }

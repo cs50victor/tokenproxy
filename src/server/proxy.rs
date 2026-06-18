@@ -859,7 +859,10 @@ async fn relay_single_websocket_create(
         let route_request = if attempted_ids.is_empty() {
             initial_route_request.clone()
         } else {
-            websocket_failover_route_request(&initial_route_request)
+            let mut retry = initial_route_request.clone();
+            retry.pinned_account_id = None;
+            retry.requires_incremental_previous_response_id = false;
+            retry
         };
         let account = match select_next_account(state, &route_request, &attempted_ids).await {
             Ok(account) => account,
@@ -895,7 +898,9 @@ async fn relay_single_websocket_create(
             value.clone(),
             reused_upstream_previous_response,
         )?;
-        if should_count_full_replay_items(replay_state, &normalized) {
+        if !replay_state.last_completed_output_items.is_empty()
+            && normalized.get("previous_response_id").is_none()
+        {
             state.metrics.add_replay_items_for_reason(
                 "websocket",
                 "full_replay",
@@ -1276,13 +1281,6 @@ async fn relay_single_websocket_create(
     }
 }
 
-fn websocket_failover_route_request(route_request: &RouteRequest) -> RouteRequest {
-    let mut retry = route_request.clone();
-    retry.pinned_account_id = None;
-    retry.requires_incremental_previous_response_id = false;
-    retry
-}
-
 fn upstream_send_error(error: impl Display) -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::BAD_GATEWAY,
@@ -1452,11 +1450,6 @@ fn websocket_error_event_type(code: ErrorCode) -> &'static str {
         ErrorCode::WebSocketInFlight => "downstream_create",
         _ => "downstream_parse",
     }
-}
-
-fn should_count_full_replay_items(replay_state: &ReplayState, payload: &Value) -> bool {
-    !replay_state.last_completed_output_items.is_empty()
-        && payload.get("previous_response_id").is_none()
 }
 
 fn replay_input_item_count(payload: &Value) -> u64 {
@@ -1728,7 +1721,7 @@ fn websocket_route_request(
 fn capture_completed_event(state: &mut ReplayState, value: &Value) {
     if value.get("type").and_then(Value::as_str) == Some("response.output_item.done") {
         if let Some(item) = value.get("item").cloned() {
-            state.record_output_item_done(item);
+            state.pending_output_items.push(item);
         }
         return;
     }
@@ -2299,26 +2292,24 @@ fn actual_service_tier_from_sse_frames(frames: &[Bytes]) -> Option<String> {
         let text = std::str::from_utf8(frame).ok()?;
         text.lines()
             .find_map(|line| line.strip_prefix("data:").map(str::trim))
-            .and_then(actual_service_tier_from_sse_data)
+            .and_then(|data| {
+                if data == "[DONE]" {
+                    return None;
+                }
+
+                let value = serde_json::from_str::<Value>(data).ok()?;
+                if value.get("type").and_then(Value::as_str) != Some("response.created") {
+                    return None;
+                }
+
+                value
+                    .pointer("/response/service_tier")
+                    .or_else(|| value.get("service_tier"))
+                    .and_then(Value::as_str)
+                    .filter(|tier| !tier.is_empty())
+                    .map(ToOwned::to_owned)
+            })
     })
-}
-
-fn actual_service_tier_from_sse_data(data: &str) -> Option<String> {
-    if data == "[DONE]" {
-        return None;
-    }
-
-    let value = serde_json::from_str::<Value>(data).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("response.created") {
-        return None;
-    }
-
-    value
-        .pointer("/response/service_tier")
-        .or_else(|| value.get("service_tier"))
-        .and_then(Value::as_str)
-        .filter(|tier| !tier.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn usage_metadata_from_sse_frames(frames: &[Bytes]) -> UsageMetadata {
@@ -2381,10 +2372,18 @@ fn websocket_request_shape(replay_state: &ReplayState, value: &Value) -> Request
         Some(tier) => tier,
         None => "unknown".to_string(),
     };
-    let store = match websocket_bool_field(replay_state, value, "store") {
-        Some(store) => store.to_string(),
-        None => "unset".to_string(),
-    };
+    let store = value
+        .get("store")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            replay_state
+                .last_request_template
+                .as_ref()
+                .and_then(|template| template.get("store"))
+                .and_then(Value::as_bool)
+        })
+        .map(|store| store.to_string())
+        .unwrap_or_else(|| "unset".to_string());
 
     RequestShape {
         service_tier,
@@ -2439,16 +2438,6 @@ fn websocket_nested_string_field(
         .map(ToOwned::to_owned)
 }
 
-fn websocket_bool_field(replay_state: &ReplayState, value: &Value, field: &str) -> Option<bool> {
-    value.get(field).and_then(Value::as_bool).or_else(|| {
-        replay_state
-            .last_request_template
-            .as_ref()
-            .and_then(|template| template.get(field))
-            .and_then(Value::as_bool)
-    })
-}
-
 fn record_websocket_actual_service_tier(replay_state: &mut ReplayState, value: &Value) {
     if value.get("type").and_then(Value::as_str) != Some("response.created") {
         return;
@@ -2485,7 +2474,15 @@ fn record_account_websocket_event_health(
     account: &EffectiveAccount,
     event: &Value,
 ) {
-    if websocket_event_indicates_success(event) {
+    if event
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|event_type| {
+            event_type.starts_with("response.")
+                && !event_type.contains("error")
+                && !event_type.contains("failed")
+        })
+    {
         state.clear_account_health_if_not_auth_failed(&account.config.id);
     }
 }
@@ -2580,15 +2577,6 @@ async fn record_websocket_usage_limit_error_event(
         .lock()
         .await
         .insert(account.config.id.clone(), usage_windows);
-}
-
-fn websocket_event_indicates_success(event: &Value) -> bool {
-    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
-        return false;
-    };
-    event_type.starts_with("response.")
-        && !event_type.contains("error")
-        && !event_type.contains("failed")
 }
 
 async fn maybe_dump_compact_body_hash(
@@ -2896,17 +2884,16 @@ where
                     state.finished = true;
                     state.cancellation.mark_terminal();
                     return Some((
-                        Err(Box::new(sse_idle_timeout_error()) as BoxStreamError),
+                        Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "upstream SSE idle timeout",
+                        )) as BoxStreamError),
                         state,
                     ));
                 }
             }
         }
     })
-}
-
-fn sse_idle_timeout_error() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream SSE idle timeout")
 }
 
 async fn forward_with_precommit_failover(
@@ -2960,7 +2947,10 @@ async fn forward_with_precommit_failover(
         response.extensions_mut().insert(HttpMetricContext {
             model_family: route_request.model_family.clone(),
             stream: route_request.stream,
-            requested_service_tier: route_request.normalized_service_tier(),
+            requested_service_tier: route_request
+                .service_tier
+                .as_deref()
+                .map(|service_tier| normalize_service_tier(service_tier).to_string()),
             reasoning_effort: attempt
                 .request_shape
                 .as_ref()
@@ -3089,7 +3079,16 @@ fn body_with_request_transforms(
     let Some(object) = value.as_object_mut() else {
         return Ok(body.clone());
     };
-    normalize_legacy_service_tier(object);
+    if object
+        .get("service_tier")
+        .and_then(Value::as_str)
+        .is_some_and(|tier| is_legacy_fast_service_tier(Some(tier)))
+    {
+        object.insert(
+            "service_tier".to_string(),
+            Value::String("priority".to_string()),
+        );
+    }
 
     if needs_prompt_cache_key && !object.contains_key("prompt_cache_key") {
         value =
@@ -3105,19 +3104,6 @@ fn body_with_request_transforms(
                 format!("failed to serialize request body with prompt cache key: {error}"),
             )
         })
-}
-
-fn normalize_legacy_service_tier(object: &mut serde_json::Map<String, Value>) {
-    if object
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .is_some_and(|tier| is_legacy_fast_service_tier(Some(tier)))
-    {
-        object.insert(
-            "service_tier".to_string(),
-            Value::String("priority".to_string()),
-        );
-    }
 }
 
 fn is_legacy_fast_service_tier(service_tier: Option<&str>) -> bool {
@@ -3329,26 +3315,16 @@ fn record_account_transient_failure(
     };
     state.store_account_health(
         &account.config.id,
-        transient_failure_health(state, account, headers, now_ms, failure_count),
+        AccountHealth::Throttled {
+            next_retry_at_ms: throttle_deadline_ms(
+                headers,
+                now_ms,
+                &state.effective.config.retry,
+                &account.config.id,
+                failure_count,
+            ),
+        },
     );
-}
-
-fn transient_failure_health(
-    state: &AppState,
-    account: &EffectiveAccount,
-    headers: &HeaderMap,
-    now_ms: u64,
-    failure_count: u32,
-) -> AccountHealth {
-    AccountHealth::Throttled {
-        next_retry_at_ms: throttle_deadline_ms(
-            headers,
-            now_ms,
-            &state.effective.config.retry,
-            &account.config.id,
-            failure_count,
-        ),
-    }
 }
 
 fn retry_after_deadline_ms(headers: &HeaderMap, now_ms: u64) -> Option<u64> {
@@ -3459,8 +3435,16 @@ async fn select_next_account(
             event: "route_selection",
             timestamp_local: &timestamps.local,
             timestamp_utc: &timestamps.utc,
-            endpoint: endpoint_name(route_request.endpoint),
-            transport: transport_name(route_request.transport),
+            endpoint: match route_request.endpoint {
+                Endpoint::ChatCompletions => "/v1/chat/completions",
+                Endpoint::Responses => "/v1/responses",
+                Endpoint::ResponsesCompact => "/v1/responses/compact",
+                Endpoint::AnthropicMessages => "/v1/messages",
+            },
+            transport: match route_request.transport {
+                Transport::Http => "http",
+                Transport::WebSocket => "websocket",
+            },
             model_family: &route_request.model_family,
             selected_account_id_hash: &selected_account_id_hash,
             excluded_account_id_hash: &excluded_account_id_hash,
@@ -3479,22 +3463,6 @@ async fn select_next_account(
                 "selected account is missing from effective config",
             )
         })
-}
-
-fn endpoint_name(endpoint: Endpoint) -> &'static str {
-    match endpoint {
-        Endpoint::ChatCompletions => "/v1/chat/completions",
-        Endpoint::Responses => "/v1/responses",
-        Endpoint::ResponsesCompact => "/v1/responses/compact",
-        Endpoint::AnthropicMessages => "/v1/messages",
-    }
-}
-
-fn transport_name(transport: Transport) -> &'static str {
-    match transport {
-        Transport::Http => "http",
-        Transport::WebSocket => "websocket",
-    }
 }
 
 fn should_retry_precommit(status: StatusCode) -> bool {
