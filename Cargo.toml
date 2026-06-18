@@ -18,6 +18,7 @@ futures-util = "0.3"
 http = "1"
 httpdate = "1"
 humantime = "2"
+object_store = { version = "0.13", default-features = false, features = ["aws", "tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
