@@ -189,6 +189,23 @@ impl Default for AccountConfig {
     }
 }
 
+impl AccountConfig {
+    fn supports_any_route(&self) -> bool {
+        self.supports_chat_completions
+            || self.supports_responses
+            || self.supports_responses_ws
+            || self.supports_compact
+            || self.supports_anthropic_messages
+    }
+
+    fn requires_model_allowlist(&self) -> bool {
+        self.supports_chat_completions
+            || self.supports_responses
+            || self.supports_responses_ws
+            || self.supports_anthropic_messages
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub enum AccountKind {
     #[serde(rename = "openai_api_key")]
@@ -683,7 +700,7 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
     }
 
     for account in &config.accounts {
-        if account.enabled && !account_supports_any_route(account) {
+        if account.enabled && !account.supports_any_route() {
             return Err(TokenproxyError::invalid_config(format!(
                 "enabled account {} must support at least one tokenproxy route",
                 account.id
@@ -719,8 +736,7 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
                 account.id
             )));
         }
-        if account.enabled && account_requires_model_allowlist(account) && account.models.is_empty()
-        {
+        if account.enabled && account.requires_model_allowlist() && account.models.is_empty() {
             return Err(TokenproxyError::invalid_config(format!(
                 "enabled account {} must set models for routed generation endpoints",
                 account.id
@@ -730,21 +746,6 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
     }
 
     Ok(())
-}
-
-fn account_supports_any_route(account: &AccountConfig) -> bool {
-    account.supports_chat_completions
-        || account.supports_responses
-        || account.supports_responses_ws
-        || account.supports_compact
-        || account.supports_anthropic_messages
-}
-
-fn account_requires_model_allowlist(account: &AccountConfig) -> bool {
-    account.supports_chat_completions
-        || account.supports_responses
-        || account.supports_responses_ws
-        || account.supports_anthropic_messages
 }
 
 fn validate_base_url(config: &Config, account: &AccountConfig) -> Result<(), TokenproxyError> {

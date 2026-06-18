@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::error::{ErrorCode, TokenproxyError};
 use crate::model::model_family_label;
-use crate::routing::select::normalize_service_tier;
+use crate::routing::account::normalize_service_tier;
 use crate::routing::{Endpoint, RouteRequest, Transport};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,23 +143,23 @@ fn bool_field(value: &Value, field: &str) -> Option<bool> {
 }
 
 fn request_shape(value: &Value) -> RequestShape {
+    let service_tier = match string_field(value, "service_tier") {
+        Some(tier) => normalize_service_tier(&tier).to_string(),
+        None => "unknown".to_string(),
+    };
+    let store = match bool_field(value, "store") {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unset",
+    };
+
     RequestShape {
-        service_tier: string_field(value, "service_tier")
-            .map(|tier| normalize_service_tier(&tier).to_string())
-            .unwrap_or_else(|| "unknown".to_string()),
+        service_tier,
         reasoning_effort: nested_string_field(value, "reasoning", "effort")
             .unwrap_or_else(|| "unset".to_string()),
         verbosity: nested_string_field(value, "text", "verbosity")
             .unwrap_or_else(|| "unset".to_string()),
-        store: optional_bool_label(value, "store").to_string(),
-    }
-}
-
-fn optional_bool_label(value: &Value, field: &str) -> &'static str {
-    match value.get(field).and_then(Value::as_bool) {
-        Some(true) => "true",
-        Some(false) => "false",
-        None => "unset",
+        store: store.to_string(),
     }
 }
 

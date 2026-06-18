@@ -48,6 +48,7 @@ use crate::responses::replay::{
 };
 use crate::responses::state::ReplayState;
 use crate::responses::websocket::{WebSocketAction, classify_downstream_message};
+use crate::routing::account::normalize_service_tier;
 use crate::routing::{
     AccountConfig as RoutingAccountConfig, AccountHealth, AccountState, Endpoint, RouteRequest,
     Transport, account_static_compatible, select_account,
@@ -287,7 +288,7 @@ async fn models(
     Ok(Json(model_list(accounts)))
 }
 
-async fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
+fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::NOT_FOUND,
         ErrorCode::UnsupportedRoute,
@@ -295,7 +296,7 @@ async fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
     )
 }
 
-async fn method_not_allowed(method: Method, uri: Uri) -> TokenproxyError {
+fn method_not_allowed(method: Method, uri: Uri) -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::METHOD_NOT_ALLOWED,
         ErrorCode::UnsupportedMethod,
@@ -314,7 +315,7 @@ async fn authenticated_method_not_allowed(
             let started = Instant::now();
             let method_name = method.as_str().to_string();
             let path = uri.path().to_string();
-            let error = method_not_allowed(method, uri).await;
+            let error = method_not_allowed(method, uri);
             local_error_response(&state, &method_name, &path, &path, error, started)
         }
         Err(error) => error.into_response(),
@@ -335,7 +336,7 @@ async fn authenticated_openai_unsupported_route(
     let started = Instant::now();
     let method_name = method.as_str().to_string();
     let path = uri.path().to_string();
-    let error = unsupported_route(method, uri).await;
+    let error = unsupported_route(method, uri);
     // Unmatched paths get a fixed metric label so attacker-chosen paths cannot
     // grow metric label cardinality without bound; the log keeps the real path.
     local_error_response(&state, &method_name, &path, "unmatched", error, started)
@@ -926,7 +927,7 @@ async fn relay_single_websocket_create(
         {
             if !reuse_retry_available {
                 let error = upstream_send_error(error);
-                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                record_account_transient_failure(state, &account, &HeaderMap::new());
                 replay_state.in_flight = false;
                 if attempted_ids.len() < max_attempts {
                     last_retryable_error = Some(error);
@@ -946,7 +947,7 @@ async fn relay_single_websocket_create(
             )
             .await
             {
-                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                record_account_transient_failure(state, &account, &HeaderMap::new());
                 replay_state.in_flight = false;
                 if attempted_ids.len() < max_attempts {
                     last_retryable_error = Some(error);
@@ -983,7 +984,7 @@ async fn relay_single_websocket_create(
                                     _ => upstream_closed_before_completed_error(),
                                 };
                                 if !first_event_seen {
-                                    record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                                    record_account_transient_failure(state, &account, &HeaderMap::new());
                                     replay_state.in_flight = false;
                                     if attempted_ids.len() < max_attempts {
                                         last_retryable_error = Some(error);
@@ -1114,7 +1115,7 @@ async fn relay_single_websocket_create(
                                 }
                                 let error = upstream_closed_before_completed_error();
                                 if !first_event_seen {
-                                    record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                                    record_account_transient_failure(state, &account, &HeaderMap::new());
                                     replay_state.in_flight = false;
                                     if attempted_ids.len() < max_attempts {
                                         last_retryable_error = Some(error);
@@ -1208,7 +1209,7 @@ async fn relay_single_websocket_create(
                             "upstream WebSocket idle timeout",
                         );
                         if !first_event_seen {
-                            record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                            record_account_transient_failure(state, &account, &HeaderMap::new());
                             replay_state.in_flight = false;
                             if attempted_ids.len() < max_attempts {
                                 last_retryable_error = Some(error);
@@ -1256,7 +1257,7 @@ async fn relay_single_websocket_create(
             )
             .await
             {
-                record_account_transient_failure(state, &account, &HeaderMap::new()).await;
+                record_account_transient_failure(state, &account, &HeaderMap::new());
                 replay_state.in_flight = false;
                 if attempted_ids.len() < max_attempts {
                     last_retryable_error = Some(error);
@@ -1459,11 +1460,10 @@ fn should_count_full_replay_items(replay_state: &ReplayState, payload: &Value) -
 }
 
 fn replay_input_item_count(payload: &Value) -> u64 {
-    payload
-        .get("input")
-        .and_then(Value::as_array)
-        .map(|items| u64::try_from(items.len()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+    match payload.get("input").and_then(Value::as_array) {
+        Some(items) => u64::try_from(items.len()).unwrap_or(u64::MAX),
+        None => 0,
+    }
 }
 
 async fn ensure_upstream_session(
@@ -1553,7 +1553,7 @@ async fn ensure_upstream_session(
     let (socket, _) = match connect_result {
         Ok(Ok(socket)) => socket,
         Ok(Err(error)) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             return Err(TokenproxyError::new(
                 StatusCode::BAD_GATEWAY,
                 ErrorCode::UpstreamFailure,
@@ -1561,7 +1561,7 @@ async fn ensure_upstream_session(
             ));
         }
         Err(_) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             return Err(TokenproxyError::new(
                 StatusCode::GATEWAY_TIMEOUT,
                 ErrorCode::UpstreamFailure,
@@ -1957,7 +1957,7 @@ async fn forward_to_upstream(
     {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             let connect_duration_ms =
                 u64::try_from(upstream_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             record_account_connect_duration(state, account, connect_duration_ms);
@@ -1981,7 +1981,7 @@ async fn forward_to_upstream(
             ));
         }
         Err(_) => {
-            record_account_transient_failure(state, account, &HeaderMap::new()).await;
+            record_account_transient_failure(state, account, &HeaderMap::new());
             let connect_duration_ms =
                 u64::try_from(upstream_started.elapsed().as_millis()).unwrap_or(u64::MAX);
             record_account_connect_duration(state, account, connect_duration_ms);
@@ -2361,7 +2361,7 @@ fn record_websocket_request_shape(
     shape: &RequestShape,
 ) {
     replay_state.requested_service_tier =
-        normalized_requested_service_tier(Some(shape.service_tier.clone()));
+        Some(normalize_service_tier(&shape.service_tier).to_string());
     replay_state.reasoning_effort = Some(shape.reasoning_effort.clone());
     replay_state.verbosity = Some(shape.verbosity.clone());
     replay_state.store = Some(shape.store.clone());
@@ -2375,28 +2375,24 @@ fn record_websocket_request_shape(
     );
 }
 
-fn normalized_requested_service_tier(service_tier: Option<String>) -> Option<String> {
-    service_tier.map(|tier| {
-        if is_legacy_fast_service_tier(Some(&tier)) {
-            "priority".to_string()
-        } else {
-            tier
-        }
-    })
-}
-
 fn websocket_request_shape(replay_state: &ReplayState, value: &Value) -> RequestShape {
+    let service_tier = match websocket_string_field(replay_state, value, "service_tier") {
+        Some(tier) if is_legacy_fast_service_tier(Some(&tier)) => "priority".to_string(),
+        Some(tier) => tier,
+        None => "unknown".to_string(),
+    };
+    let store = match websocket_bool_field(replay_state, value, "store") {
+        Some(store) => store.to_string(),
+        None => "unset".to_string(),
+    };
+
     RequestShape {
-        service_tier: websocket_string_field(replay_state, value, "service_tier")
-            .and_then(|tier| normalized_requested_service_tier(Some(tier)))
-            .unwrap_or_else(|| "unknown".to_string()),
+        service_tier,
         reasoning_effort: websocket_nested_string_field(replay_state, value, "reasoning", "effort")
             .unwrap_or_else(|| "unset".to_string()),
         verbosity: websocket_nested_string_field(replay_state, value, "text", "verbosity")
             .unwrap_or_else(|| "unset".to_string()),
-        store: websocket_bool_field(replay_state, value, "store")
-            .map(|store| store.to_string())
-            .unwrap_or_else(|| "unset".to_string()),
+        store,
     }
 }
 
@@ -2964,9 +2960,7 @@ async fn forward_with_precommit_failover(
         response.extensions_mut().insert(HttpMetricContext {
             model_family: route_request.model_family.clone(),
             stream: route_request.stream,
-            requested_service_tier: normalized_requested_service_tier(
-                route_request.service_tier.clone(),
-            ),
+            requested_service_tier: route_request.normalized_service_tier(),
             reasoning_effort: attempt
                 .request_shape
                 .as_ref()
@@ -3056,10 +3050,10 @@ fn account_selection_health(
     account: &EffectiveAccount,
     usage_windows: Option<&[UsageWindow]>,
 ) -> AccountHealth {
-    let runtime_health = state
-        .account_health_cell(&account.config.id)
-        .map(|cell| cell.load())
-        .unwrap_or(AccountHealth::Open);
+    let runtime_health = match state.account_health_cell(&account.config.id) {
+        Some(cell) => cell.load(),
+        None => AccountHealth::Open,
+    };
     if matches!(runtime_health, AccountHealth::UsageLimited { .. }) {
         return runtime_health;
     }
@@ -3273,7 +3267,7 @@ async fn record_account_http_status(
             | StatusCode::INTERNAL_SERVER_ERROR
             | StatusCode::SERVICE_UNAVAILABLE
     ) {
-        record_account_transient_failure(state, account, headers).await;
+        record_account_transient_failure(state, account, headers);
         return;
     } else if status.is_success() {
         None
@@ -3323,16 +3317,16 @@ fn record_account_first_event_duration(
     }
 }
 
-async fn record_account_transient_failure(
+fn record_account_transient_failure(
     state: &AppState,
     account: &EffectiveAccount,
     headers: &HeaderMap,
 ) {
     let now_ms = now_unix_ms();
-    let failure_count = state
-        .account_health_cell(&account.config.id)
-        .map(|cell| cell.increment_transient_failure_count_at(now_ms))
-        .unwrap_or(1);
+    let failure_count = match state.account_health_cell(&account.config.id) {
+        Some(cell) => cell.increment_transient_failure_count_at(now_ms),
+        None => 1,
+    };
     state.store_account_health(
         &account.config.id,
         transient_failure_health(state, account, headers, now_ms, failure_count),
@@ -3419,24 +3413,23 @@ async fn select_next_account(
         .iter()
         .filter(|account| !attempted_ids.contains(&account.config.id))
         .map(|account| {
-            let recent_failure_count = state
-                .account_health_cell(&account.config.id)
-                .map(|cell| cell.transient_failure_count())
-                .unwrap_or(0);
+            let recent_failure_count = match state.account_health_cell(&account.config.id) {
+                Some(cell) => cell.transient_failure_count(),
+                None => 0,
+            };
             let health = account_selection_health(
                 state,
                 account,
                 usage_windows.get(&account.config.id).map(Vec::as_slice),
             );
-            let (connect_bucket, first_event_bucket) = state
-                .account_health_cell(&account.config.id)
-                .map(|cell| {
-                    (
+            let (connect_bucket, first_event_bucket) =
+                match state.account_health_cell(&account.config.id) {
+                    Some(cell) => (
                         cell.connect_latency_bucket(),
                         cell.first_event_latency_bucket(),
-                    )
-                })
-                .unwrap_or((0, 0));
+                    ),
+                    None => (0, 0),
+                };
             routing_account_state(
                 account,
                 health,
@@ -4598,8 +4591,7 @@ fn should_record_websocket_usage_metadata_and_service_tiers_for_log() {
     let mut replay_state = ReplayState::default();
     let metrics = Metrics::default();
 
-    replay_state.requested_service_tier =
-        normalized_requested_service_tier(Some("fast".to_string()));
+    replay_state.requested_service_tier = Some(normalize_service_tier("fast").to_string());
     record_websocket_actual_service_tier(
         &mut replay_state,
         &ws_event(

@@ -98,15 +98,20 @@ fn static_exclusion_reason(
     account: &AccountState,
     request: &RouteRequest,
 ) -> Option<ExclusionReason> {
-    if !supports_endpoint(account, request.endpoint) {
+    if !account.config.supports_endpoint(request.endpoint) {
         return Some(ExclusionReason::EndpointUnsupported);
     }
 
-    if request.endpoint != Endpoint::ResponsesCompact && !supports_model(account, &request.model) {
+    if request.endpoint != Endpoint::ResponsesCompact
+        && !account.config.supports_model(&request.model)
+    {
         return Some(ExclusionReason::ModelUnsupported);
     }
 
-    if !supports_service_tier(account, request.service_tier.as_deref()) {
+    if !account
+        .config
+        .supports_service_tier(request.service_tier.as_deref())
+    {
         return Some(ExclusionReason::ServiceTierUnsupported);
     }
 
@@ -141,57 +146,12 @@ fn score(account: &AccountState, request: &RouteRequest) -> AccountScore {
     }
 }
 
-fn supports_endpoint(account: &AccountState, endpoint: Endpoint) -> bool {
-    match endpoint {
-        Endpoint::ChatCompletions => account.config.supports_chat_completions,
-        Endpoint::Responses => account.config.supports_responses,
-        Endpoint::ResponsesCompact => account.config.supports_compact,
-        Endpoint::AnthropicMessages => account.config.supports_anthropic_messages,
-    }
-}
-
-fn supports_model(account: &AccountState, model: &str) -> bool {
-    let model = model.trim();
-    model.is_empty()
-        || account
-            .config
-            .models
-            .iter()
-            .any(|candidate| candidate.trim().eq_ignore_ascii_case(model))
-}
-
-fn supports_service_tier(account: &AccountState, service_tier: Option<&str>) -> bool {
-    let Some(service_tier) = service_tier else {
-        return true;
-    };
-    let requested = normalize_service_tier(service_tier);
-
-    requested.is_empty()
-        || requested.eq_ignore_ascii_case("auto")
-        || requested.eq_ignore_ascii_case("default")
-        || account
-            .config
-            .service_tiers
-            .iter()
-            .any(|candidate| normalize_service_tier(candidate).eq_ignore_ascii_case(requested))
-}
-
 fn health_penalty(health: &AccountHealth) -> u8 {
     match health {
         AccountHealth::Open => 0,
         AccountHealth::Unknown => 20,
         AccountHealth::Throttled { .. } | AccountHealth::UsageLimited { .. } => 40,
         AccountHealth::AuthFailed => 100,
-    }
-}
-
-// Legacy "fast" requests map to the "priority" service tier.
-pub(crate) fn normalize_service_tier(service_tier: &str) -> &str {
-    let trimmed = service_tier.trim();
-    if trimmed.eq_ignore_ascii_case("fast") {
-        "priority"
-    } else {
-        trimmed
     }
 }
 
