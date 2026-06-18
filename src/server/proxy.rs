@@ -36,7 +36,7 @@ use crate::http::classify::{RequestShape, classify_request};
 use crate::http::forward::{
     UpstreamAuth, build_upstream_headers, filter_downstream_response_headers,
 };
-use crate::http::models::model_list;
+
 use crate::http::sse_repair::SseRepair;
 use crate::logging::{RequestLog, RouteSelectionLog};
 use crate::metrics::{Metrics, prometheus_text_with_usage};
@@ -277,6 +277,47 @@ async fn usage(
         &account_health,
         &state.effective.account_hash_key,
     )))
+}
+
+use serde::Serialize;
+use std::collections::BTreeSet;
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct ModelList {
+    object: &'static str,
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct ModelEntry {
+    id: String,
+    object: &'static str,
+}
+
+fn model_list(accounts: &[EffectiveAccount]) -> ModelList {
+    let mut ids = BTreeSet::new();
+    for account in accounts {
+        let config = &account.config;
+        let supports_generation_model = config.supports_chat_completions
+            || config.supports_responses
+            || config.supports_responses_ws
+            || config.supports_anthropic_messages;
+        if !config.enabled || !supports_generation_model {
+            continue;
+        }
+        ids.extend(config.models.iter().cloned());
+    }
+
+    ModelList {
+        object: "list",
+        data: ids
+            .into_iter()
+            .map(|id| ModelEntry {
+                id,
+                object: "model",
+            })
+            .collect(),
+    }
 }
 
 async fn models(
@@ -6086,5 +6127,55 @@ data: {"type":"response.custom.future_event"}
             ]
         );
         assert_eq!(metrics.request_duration_count, 2);
+    }
+
+    #[test]
+    fn should_return_sorted_unique_models_from_enabled_generation_capable_accounts() {
+        use crate::config::AccountConfig;
+
+        fn account(id: &str, models: &[&str]) -> EffectiveAccount {
+            EffectiveAccount {
+                config: AccountConfig {
+                    id: id.to_string(),
+                    models: models.iter().map(|model| model.to_string()).collect(),
+                    supports_responses: true,
+                    ..AccountConfig::default()
+                },
+                bearer_token: "token".to_string(),
+                chatgpt_account_id: None,
+                prompt_cache_key_seed: None,
+            }
+        }
+
+        let mut disabled = account("disabled", &["gpt-disabled"]);
+        disabled.config.enabled = false;
+
+        let mut no_generation_capability = account("no-generation", &["gpt-hidden"]);
+        no_generation_capability.config.supports_responses = false;
+
+        let list = model_list(&[
+            account("primary", &["gpt-5.5", "gpt-5.4"]),
+            account("secondary", &["gpt-5.4", "gpt-5.3-codex"]),
+            disabled,
+            no_generation_capability,
+        ]);
+
+        assert_eq!(
+            list.data,
+            vec![
+                ModelEntry {
+                    id: "gpt-5.3-codex".to_string(),
+                    object: "model",
+                },
+                ModelEntry {
+                    id: "gpt-5.4".to_string(),
+                    object: "model",
+                },
+                ModelEntry {
+                    id: "gpt-5.5".to_string(),
+                    object: "model",
+                },
+            ]
+        );
     }
 }
