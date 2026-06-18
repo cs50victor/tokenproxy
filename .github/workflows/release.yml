@@ -212,7 +212,7 @@ jobs:
 
   homebrew:
     name: Update Homebrew Tap
-    needs: publish
+    needs: [verify, publish]
     runs-on: ubuntu-latest
     steps:
       - name: Trigger tap update
