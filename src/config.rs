@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use object_store::ObjectStoreExt;
 use serde::Deserialize;
 use serde::de::Error as SerdeError;
 use toml::Value as TomlValue;
@@ -221,6 +223,16 @@ pub trait EnvProvider {
 pub trait FileProvider {
     fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     fn is_file(&self, path: &Path) -> bool;
+    fn read_s3_uri_to_string(
+        &self,
+        uri: &str,
+        timeout: Duration,
+    ) -> Result<String, TokenproxyError> {
+        let _ = timeout;
+        Err(TokenproxyError::invalid_config(format!(
+            "S3 auth_json_path {uri} cannot be read by this provider"
+        )))
+    }
 }
 
 pub struct ProcessEnv;
@@ -240,6 +252,14 @@ impl FileProvider for StdFileProvider {
 
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
+    }
+
+    fn read_s3_uri_to_string(
+        &self,
+        uri: &str,
+        timeout: Duration,
+    ) -> Result<String, TokenproxyError> {
+        read_s3_uri_to_string_blocking(uri.to_string(), timeout)
     }
 }
 
@@ -366,7 +386,8 @@ pub fn load_effective_config(
     let downstream_token = env_value(env, &config.downstream_auth.token_env)?;
 
     let mut enabled_accounts = Vec::new();
-    let mut auth_json_paths = BTreeSet::new();
+    let mut auth_json_locations = BTreeSet::new();
+    let auth_json_fetch_timeout = Duration::from_millis(config.timeouts.request_header_ms);
 
     for account in config.accounts.iter().filter(|account| account.enabled) {
         let effective = match account.kind {
@@ -392,31 +413,20 @@ pub fn load_effective_config(
                     ))
                 })?;
 
-                if !path.is_absolute() {
-                    return Err(TokenproxyError::invalid_config(format!(
-                        "auth_json_path for {} must be absolute",
-                        account.id
-                    )));
-                }
-                if !auth_json_paths.insert(path.clone()) {
+                let location = auth_json_location(path, &account.id)?;
+                if !auth_json_locations.insert(location.key.clone()) {
                     return Err(TokenproxyError::invalid_config(format!(
                         "auth_json_path reused by enabled account {}",
                         account.id
                     )));
                 }
-                if !files.is_file(path) {
-                    return Err(TokenproxyError::invalid_config(format!(
-                        "auth_json_path for {} is not a readable file",
-                        account.id
-                    )));
-                }
 
-                let raw = files.read_to_string(path).map_err(|error| {
-                    TokenproxyError::invalid_config(format!(
-                        "failed to read auth_json_path for {}: {error}",
-                        account.id
-                    ))
-                })?;
+                let raw = read_auth_json_location(
+                    files,
+                    &location,
+                    &account.id,
+                    auth_json_fetch_timeout,
+                )?;
                 let chatgpt_auth = parse_chatgpt_auth_json(&raw)?;
 
                 EffectiveAccount {
@@ -442,6 +452,146 @@ pub fn load_effective_config(
         config,
         downstream_token,
         accounts: enabled_accounts,
+    })
+}
+
+struct AuthJsonLocation {
+    key: String,
+    source: AuthJsonSource,
+}
+
+enum AuthJsonSource {
+    Local(PathBuf),
+    S3(String),
+}
+
+fn auth_json_location(path: &Path, account_id: &str) -> Result<AuthJsonLocation, TokenproxyError> {
+    let raw = path.to_string_lossy();
+    if raw.starts_with("s3://") {
+        let uri = normalize_s3_auth_json_uri(&raw, account_id)?;
+        return Ok(AuthJsonLocation {
+            key: uri.clone(),
+            source: AuthJsonSource::S3(uri),
+        });
+    }
+
+    if !path.is_absolute() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "auth_json_path for {account_id} must be absolute or use s3://"
+        )));
+    }
+
+    Ok(AuthJsonLocation {
+        key: format!("file:{}", path.display()),
+        source: AuthJsonSource::Local(path.to_path_buf()),
+    })
+}
+
+fn normalize_s3_auth_json_uri(uri: &str, account_id: &str) -> Result<String, TokenproxyError> {
+    let url = reqwest::Url::parse(uri).map_err(|error| {
+        TokenproxyError::invalid_config(format!(
+            "auth_json_path for {account_id} is not a valid s3:// URI: {error}"
+        ))
+    })?;
+    if url.scheme() != "s3" {
+        return Err(TokenproxyError::invalid_config(format!(
+            "auth_json_path for {account_id} must be absolute or use s3://"
+        )));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "auth_json_path for {account_id} must not include query or fragment data"
+        )));
+    }
+    let bucket = url
+        .host_str()
+        .filter(|bucket| !bucket.is_empty())
+        .ok_or_else(|| {
+            TokenproxyError::invalid_config(format!(
+                "auth_json_path for {account_id} must include an S3 bucket"
+            ))
+        })?;
+    let key = url.path().trim_start_matches('/');
+    if key.is_empty() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "auth_json_path for {account_id} must include an S3 object key"
+        )));
+    }
+
+    Ok(format!("s3://{bucket}/{key}"))
+}
+
+fn read_auth_json_location(
+    files: &impl FileProvider,
+    location: &AuthJsonLocation,
+    account_id: &str,
+    timeout: Duration,
+) -> Result<String, TokenproxyError> {
+    match &location.source {
+        AuthJsonSource::Local(path) => {
+            if !files.is_file(path) {
+                return Err(TokenproxyError::invalid_config(format!(
+                    "auth_json_path for {account_id} is not a readable file"
+                )));
+            }
+            files.read_to_string(path).map_err(|error| {
+                TokenproxyError::invalid_config(format!(
+                    "failed to read auth_json_path for {account_id}: {error}"
+                ))
+            })
+        }
+        AuthJsonSource::S3(uri) => files.read_s3_uri_to_string(uri, timeout).map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "failed to read auth_json_path for {account_id}: {}",
+                error.message
+            ))
+        }),
+    }
+}
+
+fn read_s3_uri_to_string_blocking(
+    uri: String,
+    timeout: Duration,
+) -> Result<String, TokenproxyError> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                TokenproxyError::invalid_config(format!(
+                    "failed to initialize S3 auth_json_path runtime: {error}"
+                ))
+            })
+            .and_then(|runtime| runtime.block_on(read_s3_uri_to_string(&uri, timeout)));
+        let _ = sender.send(result);
+    });
+    receiver.recv().map_err(|error| {
+        TokenproxyError::invalid_config(format!("failed to read S3 auth_json_path: {error}"))
+    })?
+}
+
+async fn read_s3_uri_to_string(uri: &str, timeout: Duration) -> Result<String, TokenproxyError> {
+    let url = reqwest::Url::parse(uri).map_err(|error| {
+        TokenproxyError::invalid_config(format!("invalid S3 auth_json_path URI: {error}"))
+    })?;
+    let (store, path) = object_store::parse_url_opts(&url, std::env::vars()).map_err(|error| {
+        TokenproxyError::invalid_config(format!("failed to configure S3 auth_json_path: {error}"))
+    })?;
+    let bytes = tokio::time::timeout(timeout, async {
+        let object = store.get(&path).await?;
+        object.bytes().await
+    })
+    .await
+    .map_err(|_| TokenproxyError::invalid_config("S3 auth_json_path fetch timed out"))?
+    .map_err(|error| {
+        TokenproxyError::invalid_config(format!(
+            "failed to fetch S3 auth_json_path object: {error}"
+        ))
+    })?;
+
+    String::from_utf8(bytes.to_vec()).map_err(|error| {
+        TokenproxyError::invalid_config(format!("S3 auth_json_path object is not UTF-8: {error}"))
     })
 }
 
@@ -678,6 +828,39 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct MemorySources {
+        files: BTreeMap<PathBuf, String>,
+        s3: BTreeMap<String, String>,
+        s3_error: Option<String>,
+    }
+
+    impl FileProvider for MemorySources {
+        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            self.files.get(path).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing test file")
+            })
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.contains_key(path)
+        }
+
+        fn read_s3_uri_to_string(
+            &self,
+            uri: &str,
+            _timeout: Duration,
+        ) -> Result<String, TokenproxyError> {
+            if let Some(error) = &self.s3_error {
+                return Err(TokenproxyError::invalid_config(error.clone()));
+            }
+            self.s3
+                .get(uri)
+                .cloned()
+                .ok_or_else(|| TokenproxyError::invalid_config("missing test S3 auth object"))
+        }
+    }
+
     fn env() -> BTreeMap<String, String> {
         BTreeMap::from([
             ("TOKENPROXY_CLIENT_KEY".to_string(), "client".to_string()),
@@ -714,6 +897,35 @@ mod tests {
             service_tiers: Vec::new(),
             ..AccountConfig::default()
         }
+    }
+
+    fn valid_chatgpt_account(id: &str, auth_json_path: impl Into<PathBuf>) -> AccountConfig {
+        AccountConfig {
+            id: id.to_string(),
+            kind: AccountKind::ChatgptCodexAuthJson,
+            auth_json_path: Some(auth_json_path.into()),
+            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+            models: vec!["gpt-5.3-codex".to_string()],
+            supports_responses: true,
+            supports_responses_ws: true,
+            ..AccountConfig::default()
+        }
+    }
+
+    fn chatgpt_config(auth_json_path: &str) -> Config {
+        parse_config(&format!(
+            r#"
+            [[accounts]]
+            id = "chatgpt"
+            kind = "chatgpt_codex_auth_json"
+            auth_json_path = "{auth_json_path}"
+            base_url = "https://chatgpt.com/backend-api/codex"
+            models = ["gpt-5.3-codex"]
+            supports_responses = true
+            supports_responses_ws = true
+            "#
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -1219,20 +1431,7 @@ mod tests {
     #[test]
     fn should_load_chatgpt_auth_file_from_absolute_path() {
         let path = PathBuf::from("/tmp/tokenproxy-auth.json");
-        let config = parse_config(&format!(
-            r#"
-            [[accounts]]
-            id = "chatgpt"
-            kind = "chatgpt_codex_auth_json"
-            auth_json_path = "{}"
-            base_url = "https://chatgpt.com/backend-api/codex"
-            models = ["gpt-5.3-codex"]
-            supports_responses = true
-            supports_responses_ws = true
-            "#,
-            path.display()
-        ))
-        .unwrap();
+        let config = chatgpt_config(&path.display().to_string());
         let files = MemoryFiles(BTreeMap::from([(
             path,
             r#"{"tokens":{"id_token":"chatgpt-token"}}"#.to_string(),
@@ -1244,18 +1443,32 @@ mod tests {
     }
 
     #[test]
+    fn should_load_chatgpt_auth_json_from_s3_uri() {
+        let uri = "s3://tokenproxy-auth/chatgpt/auth.json";
+        let sources = MemorySources {
+            s3: BTreeMap::from([(
+                uri.to_string(),
+                r#"{"tokens":{"access_token":"chatgpt-access","account_id":"acct_123"}}"#
+                    .to_string(),
+            )]),
+            ..MemorySources::default()
+        };
+
+        let effective = load_effective_config(chatgpt_config(uri), &env(), &sources).unwrap();
+
+        assert_eq!(effective.accounts[0].bearer_token, "chatgpt-access");
+        assert_eq!(
+            effective.accounts[0].chatgpt_account_id.as_deref(),
+            Some("acct_123")
+        );
+    }
+
+    #[test]
     fn should_reject_chatgpt_auth_file_validation_errors() {
         let files = MemoryFiles(BTreeMap::new());
 
-        let missing_path = AccountConfig {
-            id: "chatgpt".to_string(),
-            kind: AccountKind::ChatgptCodexAuthJson,
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            models: vec!["gpt-5.3-codex".to_string()],
-            supports_responses: true,
-            supports_responses_ws: true,
-            ..AccountConfig::default()
-        };
+        let mut missing_path = valid_chatgpt_account("chatgpt", "/tmp/ignored-auth.json");
+        missing_path.auth_json_path = None;
         expect_config_error(
             config_with_account(missing_path),
             &env(),
@@ -1263,34 +1476,16 @@ mod tests {
             "enabled account chatgpt missing auth_json_path",
         );
 
-        let relative_path = AccountConfig {
-            id: "chatgpt".to_string(),
-            kind: AccountKind::ChatgptCodexAuthJson,
-            auth_json_path: Some(PathBuf::from("auth.json")),
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            models: vec!["gpt-5.3-codex".to_string()],
-            supports_responses: true,
-            supports_responses_ws: true,
-            ..AccountConfig::default()
-        };
+        let relative_path = valid_chatgpt_account("chatgpt", "auth.json");
         expect_config_error(
             config_with_account(relative_path),
             &env(),
             &files,
-            "auth_json_path for chatgpt must be absolute",
+            "auth_json_path for chatgpt must be absolute or use s3://",
         );
 
         let unreadable_path = PathBuf::from("/tmp/tokenproxy-unreadable-auth.json");
-        let unreadable = AccountConfig {
-            id: "chatgpt".to_string(),
-            kind: AccountKind::ChatgptCodexAuthJson,
-            auth_json_path: Some(unreadable_path.clone()),
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            models: vec!["gpt-5.3-codex".to_string()],
-            supports_responses: true,
-            supports_responses_ws: true,
-            ..AccountConfig::default()
-        };
+        let unreadable = valid_chatgpt_account("chatgpt", unreadable_path.clone());
         expect_config_error(
             config_with_account(unreadable),
             &env(),
@@ -1301,16 +1496,7 @@ mod tests {
         );
 
         let malformed_path = PathBuf::from("/tmp/tokenproxy-malformed-auth.json");
-        let malformed = AccountConfig {
-            id: "chatgpt".to_string(),
-            kind: AccountKind::ChatgptCodexAuthJson,
-            auth_json_path: Some(malformed_path.clone()),
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            models: vec!["gpt-5.3-codex".to_string()],
-            supports_responses: true,
-            supports_responses_ws: true,
-            ..AccountConfig::default()
-        };
+        let malformed = valid_chatgpt_account("chatgpt", malformed_path.clone());
         expect_config_error(
             config_with_account(malformed),
             &env(),
@@ -1320,30 +1506,45 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_invalid_chatgpt_auth_s3_uris() {
+        expect_config_error(
+            chatgpt_config("s3://tokenproxy-auth"),
+            &env(),
+            &MemorySources::default(),
+            "must include an S3 object key",
+        );
+
+        expect_config_error(
+            chatgpt_config("s3://tokenproxy-auth/auth.json?token=secret"),
+            &env(),
+            &MemorySources::default(),
+            "must not include query or fragment data",
+        );
+    }
+
+    #[test]
+    fn should_surface_chatgpt_auth_s3_fetch_errors() {
+        let sources = MemorySources {
+            s3_error: Some("S3 object not found".to_string()),
+            ..MemorySources::default()
+        };
+
+        expect_config_error(
+            chatgpt_config("s3://tokenproxy-auth/missing.json"),
+            &env(),
+            &sources,
+            "failed to read auth_json_path for chatgpt: S3 object not found",
+        );
+    }
+
+    #[test]
     fn should_reject_duplicate_enabled_chatgpt_auth_paths() {
         let path = PathBuf::from("/tmp/tokenproxy-shared-auth.json");
-        let account_one = AccountConfig {
-            id: "chatgpt-one".to_string(),
-            kind: AccountKind::ChatgptCodexAuthJson,
-            auth_json_path: Some(path.clone()),
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            models: vec!["gpt-5.3-codex".to_string()],
-            supports_responses: true,
-            supports_responses_ws: true,
-            ..AccountConfig::default()
-        };
-        let account_two = AccountConfig {
-            id: "chatgpt-two".to_string(),
-            kind: AccountKind::ChatgptCodexAuthJson,
-            auth_json_path: Some(path.clone()),
-            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
-            models: vec!["gpt-5.3-codex".to_string()],
-            supports_responses: true,
-            supports_responses_ws: true,
-            ..AccountConfig::default()
-        };
         let config = Config {
-            accounts: vec![account_one, account_two],
+            accounts: vec![
+                valid_chatgpt_account("chatgpt-one", path.clone()),
+                valid_chatgpt_account("chatgpt-two", path.clone()),
+            ],
             ..Config::default()
         };
 
@@ -1354,6 +1555,31 @@ mod tests {
                 path,
                 r#"{"tokens":{"id_token":"chatgpt-token"}}"#.to_string(),
             )])),
+            "auth_json_path reused by enabled account chatgpt-two",
+        );
+    }
+
+    #[test]
+    fn should_reject_duplicate_enabled_chatgpt_auth_s3_uris() {
+        let uri = "s3://tokenproxy-auth/shared/auth.json";
+        let config = Config {
+            accounts: vec![
+                valid_chatgpt_account("chatgpt-one", uri),
+                valid_chatgpt_account("chatgpt-two", uri),
+            ],
+            ..Config::default()
+        };
+
+        expect_config_error(
+            config,
+            &env(),
+            &MemorySources {
+                s3: BTreeMap::from([(
+                    uri.to_string(),
+                    r#"{"tokens":{"id_token":"chatgpt-token"}}"#.to_string(),
+                )]),
+                ..MemorySources::default()
+            },
             "auth_json_path reused by enabled account chatgpt-two",
         );
     }
