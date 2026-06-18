@@ -314,3 +314,13 @@ fn build_upstream_http_client(
             )
         })
 }
+
+#[cfg(test)]
+#[test]
+fn should_reset_transient_failure_count_after_quiet_window() {
+    let cell = AccountHealthCell::new();
+
+    assert_eq!(cell.increment_transient_failure_count_at(1_000), 1);
+    assert_eq!(cell.increment_transient_failure_count_at(2_000), 2);
+    assert_eq!(cell.increment_transient_failure_count_at(302_000), 1);
+}
