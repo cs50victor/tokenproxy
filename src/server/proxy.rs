@@ -2623,10 +2623,11 @@ async fn maybe_dump_compact_body_hash(
 }
 
 type BoxStreamError = Box<dyn Error + Send + Sync>;
+type BoxedSseEventStream<S> = Pin<Box<EventStream<PendingLimitedSseStream<S>>>>;
 const MAX_PENDING_SSE_BYTES: usize = 16 * 1024 * 1024;
 
 struct SseStreamState<S> {
-    stream: Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
+    stream: BoxedSseEventStream<S>,
     repair: SseRepair,
     pending: VecDeque<Bytes>,
     finished: bool,
@@ -2655,12 +2656,7 @@ struct PendingLimitedSseStream<S> {
     pending_bytes: Arc<AtomicUsize>,
 }
 
-fn bounded_eventsource_stream<S, E>(
-    stream: S,
-) -> (
-    Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
-    Arc<AtomicUsize>,
-)
+fn bounded_eventsource_stream<S, E>(stream: S) -> (BoxedSseEventStream<S>, Arc<AtomicUsize>)
 where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Error + Send + Sync + 'static,
@@ -2769,94 +2765,71 @@ where
     let (mut stream, pending_bytes) = bounded_eventsource_stream(args.stream);
     let mut repair = SseRepair::default();
 
-    loop {
-        match tokio::time::timeout(args.idle_timeout, stream.as_mut().next()).await {
-            Ok(Some(Ok(event))) => {
-                pending_bytes.store(0, Ordering::Relaxed);
-                let frames = vec![repair.observe_event(event)?];
+    match tokio::time::timeout(args.idle_timeout, stream.as_mut().next()).await {
+        Ok(Some(Ok(event))) => {
+            pending_bytes.store(0, Ordering::Relaxed);
+            let frames = vec![repair.observe_event(event)?];
 
-                let first_event_duration_ms =
-                    u64::try_from(args.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                args.metrics.record_first_event_duration_labeled(
-                    args.endpoint,
-                    "sse",
-                    args.model_family,
-                    first_event_duration_ms,
-                );
-                record_sse_response_event_metrics_labeled(
-                    args.metrics,
-                    &frames,
-                    args.model_family,
-                    args.account_id_hash,
-                );
-                let metadata = StreamResponseMetadata {
-                    actual_service_tier: actual_service_tier_from_sse_frames(&frames),
-                    usage: usage_metadata_from_sse_frames(&frames),
-                    first_event_duration_ms: Some(first_event_duration_ms),
-                };
-                let body = Body::from_stream(repair_sse_stream_from_state(
-                    stream,
-                    repair,
-                    VecDeque::from(frames),
-                    false,
-                    args.idle_timeout,
+            let first_event_duration_ms =
+                u64::try_from(args.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            args.metrics.record_first_event_duration_labeled(
+                args.endpoint,
+                "sse",
+                args.model_family,
+                first_event_duration_ms,
+            );
+            record_sse_response_event_metrics_labeled(
+                args.metrics,
+                &frames,
+                args.model_family,
+                args.account_id_hash,
+            );
+            let metadata = StreamResponseMetadata {
+                actual_service_tier: actual_service_tier_from_sse_frames(&frames),
+                usage: usage_metadata_from_sse_frames(&frames),
+                first_event_duration_ms: Some(first_event_duration_ms),
+            };
+            let body = Body::from_stream(repair_sse_stream_from_state(SseStreamState {
+                stream,
+                repair,
+                pending: VecDeque::from(frames),
+                finished: false,
+                idle_timeout: args.idle_timeout,
+                cancellation: SseClientCancellation::new(
                     Some(args.metrics.clone()),
                     SseMetricContext::new(args.model_family, args.account_id_hash),
-                    pending_bytes,
-                ));
-                let mut response = response_with_headers(args.status, args.headers, body)?;
-                response.extensions_mut().insert(SseFirstFrameObserved);
-                return Ok((response, metadata));
-            }
-            Ok(Some(Err(error))) => {
-                return Err(TokenproxyError::new(
-                    StatusCode::BAD_GATEWAY,
-                    ErrorCode::UpstreamFailure,
-                    format!("failed to read first upstream SSE event: {error}"),
-                ));
-            }
-            Ok(None) => {
-                return Err(TokenproxyError::new(
-                    StatusCode::BAD_GATEWAY,
-                    ErrorCode::UpstreamFailure,
-                    "upstream SSE ended before first event",
-                ));
-            }
-            Err(_) => {
-                return Err(TokenproxyError::new(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    ErrorCode::UpstreamFailure,
-                    "upstream SSE idle timeout before first event",
-                ));
-            }
+                ),
+                pending_bytes,
+            }));
+            let mut response = response_with_headers(args.status, args.headers, body)?;
+            response.extensions_mut().insert(SseFirstFrameObserved);
+            Ok((response, metadata))
         }
+        Ok(Some(Err(error))) => Err(TokenproxyError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::UpstreamFailure,
+            format!("failed to read first upstream SSE event: {error}"),
+        )),
+        Ok(None) => Err(TokenproxyError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::UpstreamFailure,
+            "upstream SSE ended before first event",
+        )),
+        Err(_) => Err(TokenproxyError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            ErrorCode::UpstreamFailure,
+            "upstream SSE idle timeout before first event",
+        )),
     }
 }
 
 fn repair_sse_stream_from_state<S, E>(
-    stream: Pin<Box<EventStream<PendingLimitedSseStream<S>>>>,
-    repair: SseRepair,
-    pending: VecDeque<Bytes>,
-    finished: bool,
-    idle_timeout: Duration,
-    metrics: Option<Metrics>,
-    metric_context: SseMetricContext,
-    pending_bytes: Arc<AtomicUsize>,
+    state: SseStreamState<S>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, BoxStreamError>>
 where
     S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Error + Send + Sync + 'static,
 {
-    let state = SseStreamState {
-        stream,
-        repair,
-        pending,
-        finished,
-        idle_timeout,
-        cancellation: SseClientCancellation::new(metrics, metric_context),
-        pending_bytes,
-    };
-
     futures_util::stream::unfold(state, |mut state| async move {
         if let Some(bytes) = state.pending.pop_front() {
             return Some((Ok(bytes), state));
@@ -4923,16 +4896,15 @@ where
     E: Error + Send + Sync + 'static,
 {
     let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    repair_sse_stream_from_state(
+    repair_sse_stream_from_state(SseStreamState {
         stream,
-        SseRepair::default(),
-        VecDeque::new(),
-        false,
+        repair: SseRepair::default(),
+        pending: VecDeque::new(),
+        finished: false,
         idle_timeout,
-        None,
-        SseMetricContext::unknown(),
+        cancellation: SseClientCancellation::new(None, SseMetricContext::unknown()),
         pending_bytes,
-    )
+    })
 }
 
 #[cfg(test)]
@@ -5073,16 +5045,18 @@ async fn should_record_sse_client_cancellation_when_repaired_body_is_dropped() {
     let metrics = Metrics::default();
     let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
     let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    let mut repaired = Box::pin(repair_sse_stream_from_state(
+    let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
         stream,
-        SseRepair::default(),
-        VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
-        false,
-        Duration::from_secs(300),
-        Some(metrics.clone()),
-        SseMetricContext::new("gpt-5", "acct_primary"),
+        repair: SseRepair::default(),
+        pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
+        finished: false,
+        idle_timeout: Duration::from_secs(300),
+        cancellation: SseClientCancellation::new(
+            Some(metrics.clone()),
+            SseMetricContext::new("gpt-5", "acct_primary"),
+        ),
         pending_bytes,
-    ));
+    }));
 
     assert_eq!(
         repaired.as_mut().next().await.unwrap().unwrap(),
@@ -5112,16 +5086,18 @@ async fn should_record_sse_upstream_error_after_commit_with_route_labels() {
         "upstream reset",
     ))]);
     let (stream, pending_bytes) = bounded_eventsource_stream(stream);
-    let mut repaired = Box::pin(repair_sse_stream_from_state(
+    let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
         stream,
-        SseRepair::default(),
-        VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
-        false,
-        Duration::from_secs(300),
-        Some(metrics.clone()),
-        SseMetricContext::new("gpt-5", "acct_primary"),
+        repair: SseRepair::default(),
+        pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
+        finished: false,
+        idle_timeout: Duration::from_secs(300),
+        cancellation: SseClientCancellation::new(
+            Some(metrics.clone()),
+            SseMetricContext::new("gpt-5", "acct_primary"),
+        ),
         pending_bytes,
-    ));
+    }));
 
     assert_eq!(
         repaired.as_mut().next().await.unwrap().unwrap(),
@@ -6153,7 +6129,13 @@ async fn should_return_426_for_responses_and_compact_get_without_websocket_upgra
     assert_eq!(responses.status(), StatusCode::UPGRADE_REQUIRED);
     let body = to_bytes(responses.into_body(), 1024 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "GET /v1/responses requires WebSocket upgrade"
+    );
+    assert_eq!(body["error"]["type"], "tokenproxy_error");
     assert_eq!(body["error"]["code"], "unsupported_method");
+    assert!(body["error"]["param"].is_null());
     assert!(
         body["error"]["tokenproxy_request_id"]
             .as_str()
@@ -6176,7 +6158,13 @@ async fn should_return_426_for_responses_and_compact_get_without_websocket_upgra
     assert_eq!(compact.status(), StatusCode::UPGRADE_REQUIRED);
     let body = to_bytes(compact.into_body(), 1024 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["error"]["message"],
+        "GET /v1/responses/compact does not support WebSocket transport"
+    );
+    assert_eq!(body["error"]["type"], "tokenproxy_error");
     assert_eq!(body["error"]["code"], "unsupported_method");
+    assert!(body["error"]["param"].is_null());
 
     let metrics = state.metrics.snapshot();
     assert_eq!(

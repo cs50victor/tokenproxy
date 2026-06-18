@@ -13,3 +13,4 @@
 /quiche/
 /ripgrep/
 rustc-*.txt
+.DS_Store

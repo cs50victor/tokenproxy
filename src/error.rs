@@ -93,3 +93,63 @@ impl IntoResponse for TokenproxyError {
         (self.status, Json(body)).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[test]
+    fn should_render_error_codes_as_stable_strings() {
+        let cases = [
+            (ErrorCode::UnsupportedRoute, "unsupported_route"),
+            (ErrorCode::UnsupportedMethod, "unsupported_method"),
+            (ErrorCode::InvalidJson, "invalid_json"),
+            (ErrorCode::BodyTooLarge, "body_too_large"),
+            (ErrorCode::NoEligibleAccount, "no_eligible_account"),
+            (ErrorCode::Unauthorized, "unauthorized"),
+            (ErrorCode::UnsupportedMediaType, "unsupported_media_type"),
+            (ErrorCode::InvalidConfig, "invalid_config"),
+            (ErrorCode::UpstreamFailure, "upstream_failure"),
+            (ErrorCode::WebSocketInFlight, "websocket_in_flight"),
+            (
+                ErrorCode::WebSocketUnsupportedMessage,
+                "websocket_unsupported_message",
+            ),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn should_display_code_and_message() {
+        let error = TokenproxyError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::UpstreamFailure,
+            "upstream closed",
+        );
+
+        assert_eq!(error.to_string(), "upstream_failure: upstream closed");
+    }
+
+    #[tokio::test]
+    async fn should_render_openai_style_error_envelope() {
+        let response = TokenproxyError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthorized,
+            "missing token",
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "missing token");
+        assert_eq!(body["error"]["type"], "tokenproxy_error");
+        assert_eq!(body["error"]["code"], "unauthorized");
+        assert!(body["error"]["param"].is_null());
+    }
+}

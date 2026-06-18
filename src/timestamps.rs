@@ -2,7 +2,6 @@ use chrono::DateTime;
 use chrono::FixedOffset;
 use chrono::Local;
 use chrono::Offset;
-use chrono::SecondsFormat;
 use chrono::Utc;
 
 use crate::time_parse::format_rfc3339;
@@ -20,13 +19,13 @@ pub fn now_timestamp_pair() -> TimestampPair {
 }
 
 pub fn now_rfc3339() -> String {
-    now_timestamp_pair().utc
+    format_rfc3339(Utc::now()).expect("UTC timestamp formats as RFC3339")
 }
 
 pub fn timestamp_pair_at(utc: DateTime<Utc>, local_offset: FixedOffset) -> TimestampPair {
     let local = format_rfc3339(utc.with_timezone(&local_offset))
         .expect("local timestamp formats as RFC3339");
-    let utc = utc.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    let utc = format_rfc3339(utc).expect("UTC timestamp formats as RFC3339");
     TimestampPair { local, utc }
 }
 
@@ -54,6 +53,13 @@ mod tests {
 
         DateTime::parse_from_rfc3339(&pair.local).expect("local timestamp parses as RFC3339");
         DateTime::parse_from_rfc3339(&pair.utc).expect("UTC timestamp parses as RFC3339");
+    }
+
+    #[test]
+    fn should_format_current_utc_timestamp_as_rfc3339() {
+        let timestamp = now_rfc3339();
+
+        DateTime::parse_from_rfc3339(&timestamp).expect("UTC timestamp parses as RFC3339");
     }
 
     #[test]
