@@ -7,6 +7,7 @@ use tokenproxy::config::{
     EffectiveConfig, ProcessEnv, StdFileProvider, load_effective_config,
     parse_config_with_cli_overrides,
 };
+use tokenproxy::error::TokenproxyError;
 use tokenproxy::logging::{
     LogFormat, StartupConfigSummary, StartupLogLine, shutdown_forced_log_line, startup_log_line,
 };
@@ -39,9 +40,16 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let cli = Cli::parse();
 
+    if let Err(error) = run(cli).await {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> Result<(), CliError> {
     let config_path = cli
         .config
         .or_else(|| std::env::var_os("TOKENPROXY_CONFIG").map(PathBuf::from))
@@ -54,10 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-    let raw_config = config_path
-        .as_ref()
-        .map(std::fs::read_to_string)
-        .transpose()?;
+    let raw_config = read_config_file(config_path.as_deref())?;
     let mut config = parse_config_with_cli_overrides(raw_config.as_deref(), &cli.config_overrides)?;
     if let Some(bind) = cli.bind {
         config.server.bind = bind;
@@ -108,7 +113,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let state =
         AppState::new_with_log_format_and_shutdown(effective, log_format, shutdown_tx.clone())?;
-    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .map_err(|source| CliError::Io {
+            context: format!("failed to bind tokenproxy listener on {bind}"),
+            source,
+        })?;
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             let _ = shutdown_tx.send(true);
@@ -118,7 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = axum::serve(listener, app(state))
         .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()));
     tokio::select! {
-        result = server => result?,
+        result = server => result.map_err(|source| CliError::Io {
+            context: "tokenproxy server stopped with an I/O error".to_string(),
+            source,
+        })?,
         () = force_shutdown_after(shutdown_rx, shutdown_grace) => {
             let timestamps = now_timestamp_pair();
             eprintln!(
@@ -133,6 +146,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn read_config_file(path: Option<&std::path::Path>) -> Result<Option<String>, CliError> {
+    path.map(|path| {
+        std::fs::read_to_string(path).map_err(|source| CliError::Io {
+            context: format!("failed to read config file {}", path.display()),
+            source,
+        })
+    })
+    .transpose()
+}
+
+#[derive(Debug)]
+enum CliError {
+    Tokenproxy(TokenproxyError),
+    Io {
+        context: String,
+        source: std::io::Error,
+    },
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::Tokenproxy(error) => write!(formatter, "{error}"),
+            CliError::Io { context, source } => write!(formatter, "{context}: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CliError::Tokenproxy(error) => Some(error),
+            CliError::Io { source, .. } => Some(source),
+        }
+    }
+}
+
+impl From<TokenproxyError> for CliError {
+    fn from(error: TokenproxyError) -> Self {
+        Self::Tokenproxy(error)
+    }
 }
 
 fn startup_config_summary(effective: &EffectiveConfig) -> StartupConfigSummary {
@@ -216,6 +272,17 @@ mod tests {
                 "server.id=from-cli".to_string(),
                 "server.max_body_bytes=2048".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn should_render_missing_config_path_readably() {
+        let missing = PathBuf::from("/tmp/tokenproxy-missing-config-for-test.toml");
+        let error = read_config_file(Some(&missing)).expect_err("missing config rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "failed to read config file /tmp/tokenproxy-missing-config-for-test.toml: No such file or directory (os error 2)"
         );
     }
 
