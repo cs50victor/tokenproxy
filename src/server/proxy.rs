@@ -76,6 +76,7 @@ struct HttpProxyAttempt {
     request_id: String,
     method: Method,
     path: String,
+    path_and_query: String,
     inbound_headers: HeaderMap,
     body: Bytes,
     request_shape: Option<RequestShape>,
@@ -86,6 +87,7 @@ struct UpstreamForward<'a> {
     request_id: &'a str,
     method: Method,
     path: &'a str,
+    path_and_query: &'a str,
     inbound_headers: HeaderMap,
     body: Bytes,
     model_family: &'a str,
@@ -200,17 +202,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/v1/chat/completions",
-            post(proxy_http).fallback(authenticated_openai_unsupported_route),
+            post(proxy_http).fallback(proxy_passthrough),
         )
-        .route(
-            "/v1/messages",
-            post(proxy_http).fallback(authenticated_openai_unsupported_route),
-        )
+        .route("/v1/messages", post(proxy_http).fallback(proxy_passthrough))
         .route(
             "/v1/responses",
             post(proxy_http)
                 .get(responses_ws)
-                .fallback(authenticated_openai_unsupported_route),
+                .fallback(proxy_passthrough),
         )
         .route(
             "/v1/responses/compact",
@@ -218,7 +217,7 @@ pub fn app(state: AppState) -> Router {
                 .get(responses_compact_get)
                 .fallback(authenticated_method_not_allowed),
         )
-        .fallback(authenticated_openai_unsupported_route)
+        .fallback(proxy_passthrough)
         .with_state(state)
 }
 
@@ -329,14 +328,6 @@ async fn models(
     Ok(Json(model_list(accounts)))
 }
 
-fn unsupported_route(method: Method, uri: Uri) -> TokenproxyError {
-    TokenproxyError::new(
-        StatusCode::NOT_FOUND,
-        ErrorCode::UnsupportedRoute,
-        format!("unsupported route: {method} {}", uri.path()),
-    )
-}
-
 fn method_not_allowed(method: Method, uri: Uri) -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::METHOD_NOT_ALLOWED,
@@ -361,26 +352,6 @@ async fn authenticated_method_not_allowed(
         }
         Err(error) => error.into_response(),
     }
-}
-
-async fn authenticated_openai_unsupported_route(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    method: Method,
-    uri: Uri,
-) -> Response {
-    if uri.path().starts_with("/v1/")
-        && let Err(error) = require_auth(&state, &headers)
-    {
-        return error.into_response();
-    }
-    let started = Instant::now();
-    let method_name = method.as_str().to_string();
-    let path = uri.path().to_string();
-    let error = unsupported_route(method, uri);
-    // Unmatched paths get a fixed metric label so attacker-chosen paths cannot
-    // grow metric label cardinality without bound; the log keeps the real path.
-    local_error_response(&state, &method_name, &path, "unmatched", error, started)
 }
 
 async fn proxy_http(State(state): State<AppState>, request: Request<Body>) -> Response {
@@ -525,10 +496,119 @@ async fn proxy_http_inner(
             request_id,
             method: parts.method,
             path: parts.uri.path().to_string(),
+            path_and_query: path_and_query(&parts.uri),
             inbound_headers: parts.headers,
             body: classified.body,
             request_shape,
             compact_request_body,
+        },
+    )
+    .await
+}
+
+async fn proxy_passthrough(State(state): State<AppState>, request: Request<Body>) -> Response {
+    let started = Instant::now();
+    let method = request.method().as_str().to_string();
+    let path = request.uri().path().to_string();
+    let request_id = state.next_request_id();
+    let result = proxy_passthrough_inner(&state, request, request_id.clone()).await;
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (status, error_code, log_context) = match result.as_ref() {
+        Ok(response) => (
+            response.status(),
+            None,
+            response.extensions().get::<HttpLogContext>(),
+        ),
+        Err(error) => (error.status, Some(error.code.as_str()), None),
+    };
+    let account_metric_label = log_context
+        .map(|context| context.account_id_hash.as_str())
+        .unwrap_or("none");
+    state.metrics.record_request_duration_labeled(
+        &path,
+        "http",
+        "passthrough",
+        "unknown",
+        duration_ms,
+    );
+    state.metrics.increment_request_outcome(
+        &path,
+        "http",
+        status_class(status),
+        "passthrough",
+        account_metric_label,
+    );
+    let timestamps = now_timestamp_pair();
+    state.emit_request_log(&RequestLog {
+        event: "request",
+        timestamp_local: &timestamps.local,
+        timestamp_utc: &timestamps.utc,
+        tokenproxy_request_id: &request_id,
+        method: &method,
+        endpoint: &path,
+        transport: "http",
+        status: status.as_u16(),
+        duration_ms,
+        account_id_hash: log_context.map(|context| context.account_id_hash.as_str()),
+        upstream_request_id: log_context.and_then(|context| context.upstream_request_id.as_deref()),
+        cloudflare_ray: log_context.and_then(|context| context.cloudflare_ray.as_deref()),
+        requested_service_tier: None,
+        reasoning_effort: None,
+        verbosity: None,
+        store: None,
+        actual_service_tier: log_context.and_then(|context| context.actual_service_tier.as_deref()),
+        cached_input_tokens: log_context.and_then(|context| context.cached_input_tokens),
+        reasoning_tokens: log_context.and_then(|context| context.reasoning_tokens),
+        error_code,
+    });
+
+    match result {
+        Ok(response) => response,
+        Err(error) => error_response_with_request_id(error, &request_id),
+    }
+}
+
+async fn proxy_passthrough_inner(
+    state: &AppState,
+    request: Request<Body>,
+    request_id: String,
+) -> Result<Response, TokenproxyError> {
+    let (parts, body) = request.into_parts();
+    require_auth(state, &parts.headers)?;
+    state.metrics.increment_requests();
+    reject_compressed_body(&parts.headers)?;
+
+    let body = to_bytes(body, state.effective.config.server.max_body_bytes)
+        .await
+        .map_err(|error| {
+            TokenproxyError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                ErrorCode::BodyTooLarge,
+                format!("failed to read request body: {error}"),
+            )
+        })?;
+    let path = parts.uri.path().to_string();
+    maybe_dump_request_body(
+        state,
+        &request_id,
+        parts.method.as_str(),
+        &path,
+        &parts.headers,
+        &body,
+    )
+    .await?;
+
+    forward_passthrough_with_precommit_failover(
+        state,
+        HttpProxyAttempt {
+            request_id,
+            method: parts.method,
+            path,
+            path_and_query: path_and_query(&parts.uri),
+            inbound_headers: parts.headers,
+            body,
+            request_shape: None,
+            compact_request_body: None,
         },
     )
     .await
@@ -1862,9 +1942,15 @@ fn websocket_upstream_url_for_account(account: &EffectiveAccount) -> Result<Url,
     Ok(url)
 }
 
+fn path_and_query(uri: &Uri) -> String {
+    uri.path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string())
+}
+
 fn upstream_url_for_path(
     account: &EffectiveAccount,
-    public_path: &str,
+    public_path_and_query: &str,
 ) -> Result<Url, TokenproxyError> {
     let base_url = Url::parse(&account.config.base_url).map_err(|error| {
         TokenproxyError::new(
@@ -1873,24 +1959,10 @@ fn upstream_url_for_path(
             format!("invalid account base_url: {error}"),
         )
     })?;
+    let (public_path, public_query) = split_path_and_query(public_path_and_query);
 
     match account.config.kind {
-        AccountKind::OpenAiApiKey => match public_path {
-            "/v1/chat/completions" | "/v1/responses" | "/v1/responses/compact" => base_url
-                .join(public_path.trim_start_matches('/'))
-                .map_err(|error| {
-                    TokenproxyError::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        ErrorCode::InvalidConfig,
-                        format!("failed to build upstream URL: {error}"),
-                    )
-                }),
-            _ => Err(TokenproxyError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::InvalidConfig,
-                format!("OpenAI account cannot serve upstream path {public_path}"),
-            )),
-        },
+        AccountKind::OpenAiApiKey => append_path_and_query(base_url, public_path, public_query),
         AccountKind::AnthropicApiKey => {
             if public_path != "/v1/messages" {
                 return Err(TokenproxyError::new(
@@ -1910,30 +1982,57 @@ fn upstream_url_for_path(
                 format!("{base_path}/v1/messages")
             };
             url.set_path(&upstream_path);
+            url.set_query(public_query);
             Ok(url)
         }
-        AccountKind::ChatgptCodexAuthJson => chatgpt_codex_upstream_url(base_url, public_path),
+        AccountKind::ChatgptCodexAuthJson => {
+            chatgpt_codex_upstream_url(base_url, public_path, public_query)
+        }
     }
 }
 
 fn chatgpt_codex_upstream_url(
     mut base_url: Url,
     public_path: &str,
+    public_query: Option<&str>,
 ) -> Result<Url, TokenproxyError> {
-    let upstream_suffix = match public_path {
-        "/v1/responses" => "responses",
-        "/v1/responses/compact" => "responses/compact",
-        _ => {
-            return Err(TokenproxyError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::InvalidConfig,
-                format!("ChatGPT/Codex account cannot serve upstream path {public_path}"),
-            ));
-        }
-    };
     let base_path = base_url.path().trim_end_matches('/');
-    base_url.set_path(&format!("{base_path}/{upstream_suffix}"));
+    let backend_base_path = base_path.strip_suffix("/codex").unwrap_or(base_path);
+    let upstream_path = match public_path {
+        "/v1/responses" => format!("{base_path}/responses"),
+        "/v1/responses/compact" => format!("{base_path}/responses/compact"),
+        path if path.starts_with("/v1/") => {
+            format!("{base_path}/{}", path.trim_start_matches("/v1/"))
+        }
+        path if path.starts_with("/backend-api/") || path.starts_with("/api/") => path.to_string(),
+        path => format!("{backend_base_path}{path}"),
+    };
+    base_url.set_path(&upstream_path);
+    base_url.set_query(public_query);
     Ok(base_url)
+}
+
+fn append_path_and_query(
+    mut base_url: Url,
+    public_path: &str,
+    public_query: Option<&str>,
+) -> Result<Url, TokenproxyError> {
+    let base_path = base_url.path().trim_end_matches('/');
+    let upstream_path =
+        if public_path.starts_with("/v1/") && (base_path == "/v1" || base_path.ends_with("/v1")) {
+            format!("{base_path}/{}", public_path.trim_start_matches("/v1/"))
+        } else {
+            format!("{base_path}{}", public_path)
+        };
+    base_url.set_path(&upstream_path);
+    base_url.set_query(public_query);
+    Ok(base_url)
+}
+
+fn split_path_and_query(path_and_query: &str) -> (&str, Option<&str>) {
+    path_and_query
+        .split_once('?')
+        .map_or((path_and_query, None), |(path, query)| (path, Some(query)))
 }
 
 fn websocket_origin(base_url: &str) -> String {
@@ -1960,7 +2059,7 @@ async fn forward_to_upstream(
 ) -> Result<Response, TokenproxyError> {
     let account_id_hash = account_id_hash(&account.config.id, &state.effective.account_hash_key);
     let method_name = forward.method.as_str().to_string();
-    let upstream_url = upstream_url_for_path(account, forward.path)?;
+    let upstream_url = upstream_url_for_path(account, forward.path_and_query)?;
     let origin = url_origin(&upstream_url);
     let upstream_host = upstream_url.host_str().ok_or_else(|| {
         TokenproxyError::new(
@@ -2973,6 +3072,7 @@ async fn forward_with_precommit_failover(
                 request_id: &attempt.request_id,
                 method: attempt.method.clone(),
                 path: &attempt.path,
+                path_and_query: &attempt.path_and_query,
                 inbound_headers: attempt.inbound_headers.clone(),
                 body: body_with_request_transforms(&attempt.body, route_request, &selected)?,
                 model_family: &route_request.model_family,
@@ -3030,6 +3130,68 @@ async fn forward_with_precommit_failover(
         StatusCode::BAD_GATEWAY,
         ErrorCode::UpstreamFailure,
         "all pre-commit upstream attempts failed",
+    ))
+}
+
+async fn forward_passthrough_with_precommit_failover(
+    state: &AppState,
+    attempt: HttpProxyAttempt,
+) -> Result<Response, TokenproxyError> {
+    let mut attempted_ids = Vec::new();
+    let mut last_retryable_error = None;
+    let max_attempts = usize::from(state.effective.config.retry.max_precommit_retries) + 1;
+
+    for _ in 0..max_attempts {
+        let retry_phase = if attempted_ids.is_empty() {
+            "initial"
+        } else {
+            "retry"
+        };
+        let selected =
+            match select_next_passthrough_account(state, &attempt.path, &attempted_ids).await {
+                Ok(selected) => selected,
+                Err(error) => return Err(last_retryable_error.unwrap_or(error)),
+            };
+        attempted_ids.push(selected.config.id.clone());
+
+        let response_result = forward_to_upstream(
+            state,
+            &selected,
+            UpstreamForward {
+                request_id: &attempt.request_id,
+                method: attempt.method.clone(),
+                path: &attempt.path,
+                path_and_query: &attempt.path_and_query,
+                inbound_headers: attempt.inbound_headers.clone(),
+                body: attempt.body.clone(),
+                model_family: "passthrough",
+                retry_phase,
+                compact_request_body: None,
+            },
+        )
+        .await;
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error)
+                if should_retry_precommit_error(&error) && attempted_ids.len() < max_attempts =>
+            {
+                last_retryable_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        if should_retry_precommit_response(&response) && attempted_ids.len() < max_attempts {
+            continue;
+        }
+
+        return Ok(response);
+    }
+
+    Err(TokenproxyError::new(
+        StatusCode::BAD_GATEWAY,
+        ErrorCode::UpstreamFailure,
+        "all pre-commit upstream passthrough attempts failed",
     ))
 }
 
@@ -3278,6 +3440,46 @@ async fn append_observability_record(
             format!("failed to finish request body dump: {error}"),
         )
     })
+}
+
+async fn select_next_passthrough_account(
+    state: &AppState,
+    path: &str,
+    attempted_ids: &[String],
+) -> Result<EffectiveAccount, TokenproxyError> {
+    let usage_windows = state.usage_windows.lock().await;
+    state
+        .routing_accounts()
+        .iter()
+        .filter(|account| !attempted_ids.contains(&account.config.id))
+        .filter(|account| passthrough_account_matches_path(account, path))
+        .filter(|account| {
+            matches!(
+                account_selection_health(
+                    state,
+                    account,
+                    usage_windows.get(&account.config.id).map(Vec::as_slice),
+                ),
+                AccountHealth::Open | AccountHealth::Unknown
+            )
+        })
+        .max_by_key(|account| account.config.priority)
+        .cloned()
+        .ok_or_else(|| {
+            TokenproxyError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorCode::NoEligibleAccount,
+                "no eligible upstream account for passthrough request",
+            )
+        })
+}
+
+fn passthrough_account_matches_path(account: &EffectiveAccount, path: &str) -> bool {
+    match account.config.kind {
+        AccountKind::OpenAiApiKey => path.starts_with("/v1/"),
+        AccountKind::AnthropicApiKey => path == "/v1/messages",
+        AccountKind::ChatgptCodexAuthJson => true,
+    }
 }
 
 async fn record_account_http_status(
@@ -3671,7 +3873,7 @@ mod tests {
     use crate::config::{AccountConfig, Config, EffectiveConfig};
     use futures_util::TryStreamExt;
     use std::{net::SocketAddr, sync::Mutex as StdMutex};
-    use tokio::{net::TcpListener, time::sleep};
+    use tokio::{io::AsyncReadExt, net::TcpListener, time::sleep};
     use tokio_tungstenite::{accept_async, accept_hdr_async};
     use tower::ServiceExt;
 
@@ -3724,6 +3926,34 @@ mod tests {
                     if let Ok(mut socket) = accept_hdr_async(stream, callback).await {
                         while socket.next().await.is_some() {}
                     }
+                });
+            }
+        });
+        address
+    }
+
+    async fn fake_http_upstream(captured_requests: Arc<StdMutex<Vec<String>>>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let captured_requests = Arc::clone(&captured_requests);
+                tokio::spawn(async move {
+                    let mut buffer = [0; 4096];
+                    let Ok(size) = stream.read(&mut buffer).await else {
+                        return;
+                    };
+                    captured_requests
+                        .lock()
+                        .expect("request capture lock is not poisoned")
+                        .push(String::from_utf8_lossy(&buffer[..size]).to_string());
+                    let body = br#"{"object":"list","data":[]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
                 });
             }
         });
@@ -4431,6 +4661,81 @@ mod tests {
     }
 
     #[test]
+    fn should_passthrough_codex_provider_paths_to_chatgpt_codex_base() {
+        let mut chatgpt = account(
+            "chatgpt",
+            "https://chatgpt.com/backend-api/codex".to_string(),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+
+        let search = upstream_url_for_path(&chatgpt, "/v1/alpha/search?scope=GLOBAL").unwrap();
+
+        assert_eq!(
+            search.as_str(),
+            "https://chatgpt.com/backend-api/codex/alpha/search?scope=GLOBAL"
+        );
+    }
+
+    #[test]
+    fn should_passthrough_chatgpt_backend_paths_to_backend_api_parent() {
+        let mut chatgpt = account(
+            "chatgpt",
+            "https://chatgpt.com/backend-api/codex".to_string(),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+
+        let plugins = upstream_url_for_path(&chatgpt, "/ps/plugins/list?scope=GLOBAL").unwrap();
+
+        assert_eq!(
+            plugins.as_str(),
+            "https://chatgpt.com/backend-api/ps/plugins/list?scope=GLOBAL"
+        );
+    }
+
+    #[test]
+    fn should_passthrough_unknown_future_chatgpt_paths_to_backend_api_parent() {
+        let mut chatgpt = account(
+            "chatgpt",
+            "https://chatgpt.com/backend-api/codex".to_string(),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+
+        let future =
+            upstream_url_for_path(&chatgpt, "/new-service/future_endpoint?cursor=next").unwrap();
+
+        assert_eq!(
+            future.as_str(),
+            "https://chatgpt.com/backend-api/new-service/future_endpoint?cursor=next"
+        );
+    }
+
+    #[test]
+    fn should_passthrough_chatgpt_api_paths_to_origin() {
+        let mut chatgpt = account(
+            "chatgpt",
+            "https://chatgpt.com/backend-api/codex".to_string(),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+
+        let nudge =
+            upstream_url_for_path(&chatgpt, "/api/codex/accounts/send_add_credits_nudge_email")
+                .unwrap();
+
+        assert_eq!(
+            nudge.as_str(),
+            "https://chatgpt.com/api/codex/accounts/send_add_credits_nudge_email"
+        );
+    }
+
+    #[test]
     fn should_keep_openai_api_key_upstream_paths_under_v1() {
         let openai = account(
             "openai",
@@ -4441,6 +4746,8 @@ mod tests {
 
         let responses = upstream_url_for_path(&openai, "/v1/responses").unwrap();
         let compact = upstream_url_for_path(&openai, "/v1/responses/compact").unwrap();
+        let embeddings =
+            upstream_url_for_path(&openai, "/v1/embeddings?encoding_format=float").unwrap();
         let websocket = websocket_upstream_url_for_account(&openai).unwrap();
 
         assert_eq!(responses.as_str(), "https://api.openai.com/v1/responses");
@@ -4448,8 +4755,11 @@ mod tests {
             compact.as_str(),
             "https://api.openai.com/v1/responses/compact"
         );
+        assert_eq!(
+            embeddings.as_str(),
+            "https://api.openai.com/v1/embeddings?encoding_format=float"
+        );
         assert_eq!(websocket.as_str(), "wss://api.openai.com/v1/responses");
-        assert!(upstream_url_for_path(&openai, "/v1/messages").is_err());
     }
 
     #[test]
@@ -6040,6 +6350,44 @@ data: {"type":"response.custom.future_event"}
             .await
             .unwrap();
         assert_eq!(unsupported_openai_route.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn should_passthrough_unmatched_openai_route_to_upstream() {
+        let captured_requests = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_http_upstream(Arc::clone(&captured_requests)).await;
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/embeddings?encoding_format=float")
+                    .header("authorization", "Bearer client-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = captured_requests
+            .lock()
+            .expect("request capture lock is not poisoned")
+            .first()
+            .cloned()
+            .expect("upstream request should be captured");
+        assert!(
+            request.starts_with("GET /v1/embeddings?encoding_format=float HTTP/1.1"),
+            "{request}"
+        );
+        assert!(request.contains("authorization: Bearer upstream-token"));
     }
 
     #[tokio::test]
