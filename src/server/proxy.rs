@@ -3882,7 +3882,11 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
     let bearer_authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|actual| constant_time_eq(actual.as_bytes(), expected.as_bytes()));
+        .is_some_and(|actual| {
+            constant_time_eq(actual.as_bytes(), expected.as_bytes())
+                // SECURITY: Remove this fallback or route only to the matching account if flagged.
+                || chatgpt_bearer_authorized(state, actual)
+        });
     let api_key_authorized = headers
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
@@ -3902,6 +3906,16 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
             "missing or invalid downstream credential",
         ))
     }
+}
+
+fn chatgpt_bearer_authorized(state: &AppState, actual: &str) -> bool {
+    state.effective.accounts.iter().any(|account| {
+        if !matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+            return false;
+        }
+        let expected = format!("Bearer {}", account.bearer_token);
+        constant_time_eq(actual.as_bytes(), expected.as_bytes())
+    })
 }
 
 fn reject_compressed_body(headers: &HeaderMap) -> Result<(), TokenproxyError> {
@@ -4095,6 +4109,18 @@ mod tests {
             chatgpt_account_id: None,
             prompt_cache_key_seed: None,
         }
+    }
+
+    fn chatgpt_account(
+        id: &str,
+        base_url: String,
+        bearer_token: &str,
+        priority: i32,
+    ) -> EffectiveAccount {
+        let mut account = account(id, base_url, bearer_token, priority);
+        account.config.kind = AccountKind::ChatgptCodexAuthJson;
+        account.chatgpt_account_id = Some(format!("chatgpt-{id}"));
+        account
     }
 
     fn anthropic_account(
@@ -5835,6 +5861,57 @@ data: {"type":"response.custom.future_event"}
             b"Bearer client-key-extra",
             b"Bearer client-key"
         ));
+    }
+
+    #[test]
+    fn should_accept_chatgpt_account_bearer_as_downstream_auth() {
+        let state = AppState::new(effective_config(vec![chatgpt_account(
+            "chatgpt",
+            "http://127.0.0.1:1/v1".to_string(),
+            "chatgpt-token",
+            100,
+        )]))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer chatgpt-token".parse().unwrap());
+
+        assert!(require_auth(&state, &headers).is_ok());
+    }
+
+    #[test]
+    fn should_reject_openai_account_bearer_as_downstream_auth() {
+        let state = AppState::new(effective_config(vec![account(
+            "openai",
+            "http://127.0.0.1:1/v1".to_string(),
+            "openai-token",
+            100,
+        )]))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer openai-token".parse().unwrap());
+
+        assert_eq!(
+            require_auth(&state, &headers).unwrap_err().status,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[test]
+    fn should_not_accept_chatgpt_token_as_x_api_key() {
+        let state = AppState::new(effective_config(vec![chatgpt_account(
+            "chatgpt",
+            "http://127.0.0.1:1/v1".to_string(),
+            "chatgpt-token",
+            100,
+        )]))
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", "chatgpt-token".parse().unwrap());
+
+        assert_eq!(
+            require_auth(&state, &headers).unwrap_err().status,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
