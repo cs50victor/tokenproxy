@@ -6,6 +6,9 @@ use axum::http::{HeaderMap, StatusCode};
 use crate::error::{ErrorCode, TokenproxyError};
 
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+const DEFAULT_CODEX_USER_AGENT: &str = "codex-cli";
+const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
+const DEFAULT_CODEX_OPENAI_BETA: &str = "responses_websockets=2026-02-06";
 
 const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -66,12 +69,7 @@ pub fn build_upstream_headers(
             authorization.set_sensitive(true);
             output.insert(AUTHORIZATION, authorization);
             if matches!(auth, UpstreamAuth::ChatGptBearer) {
-                output
-                    .entry(USER_AGENT)
-                    .or_insert(HeaderValue::from_static("codex-cli"));
-                output
-                    .entry(HeaderName::from_static("originator"))
-                    .or_insert(HeaderValue::from_static("codex_cli_rs"));
+                apply_chatgpt_codex_default_headers(&mut output, tokenproxy_request_id);
                 // ChatGPT Codex auth pairs the OAuth access-token bearer with the
                 // workspace id header; see codex-rs model-provider BearerAuthProvider.
                 if let Some(account_id) = chatgpt_account_id {
@@ -103,6 +101,23 @@ pub fn build_upstream_headers(
     );
 
     Ok(output)
+}
+
+fn apply_chatgpt_codex_default_headers(headers: &mut HeaderMap, tokenproxy_request_id: &str) {
+    headers
+        .entry(USER_AGENT)
+        .or_insert(HeaderValue::from_static(DEFAULT_CODEX_USER_AGENT));
+    headers
+        .entry(HeaderName::from_static("originator"))
+        .or_insert(HeaderValue::from_static(DEFAULT_CODEX_ORIGINATOR));
+    headers
+        .entry(HeaderName::from_static("openai-beta"))
+        .or_insert(HeaderValue::from_static(DEFAULT_CODEX_OPENAI_BETA));
+    if let Ok(request_id) = HeaderValue::from_str(tokenproxy_request_id) {
+        headers
+            .entry(HeaderName::from_static("x-client-request-id"))
+            .or_insert(request_id);
+    }
 }
 
 pub fn filter_downstream_response_headers(upstream: &HeaderMap) -> HeaderMap {
@@ -168,6 +183,9 @@ mod tests {
         assert!(headers["authorization"].is_sensitive());
         assert_eq!(headers["chatgpt-account-id"], "acct_123");
         assert_eq!(headers["user-agent"], "codex-cli");
+        assert_eq!(headers["originator"], "codex_cli_rs");
+        assert_eq!(headers["openai-beta"], "responses_websockets=2026-02-06");
+        assert_eq!(headers["x-client-request-id"], "req_1");
         assert_eq!(headers["host"], "api.openai.com");
         assert_eq!(headers["x-tokenproxy-request-id"], "req_1");
         assert!(!headers.contains_key("connection"));
@@ -230,6 +248,27 @@ mod tests {
         assert_eq!(headers["chatgpt-account-id"], "acct_123");
         assert!(!headers.contains_key("openai-organization"));
         assert!(!headers.contains_key("openai-project"));
+    }
+
+    #[test]
+    fn should_add_codex_defaults_for_non_codex_chatgpt_clients() {
+        let inbound = HeaderMap::new();
+
+        let headers = build_upstream_headers(
+            &inbound,
+            "chatgpt.com",
+            "upstream",
+            Some("acct_123"),
+            "req_non_codex",
+            UpstreamAuth::ChatGptBearer,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(headers["user-agent"], DEFAULT_CODEX_USER_AGENT);
+        assert_eq!(headers["originator"], DEFAULT_CODEX_ORIGINATOR);
+        assert_eq!(headers["openai-beta"], DEFAULT_CODEX_OPENAI_BETA);
+        assert_eq!(headers["x-client-request-id"], "req_non_codex");
     }
 
     #[test]

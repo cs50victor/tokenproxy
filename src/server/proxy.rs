@@ -1653,14 +1653,7 @@ async fn ensure_upstream_session(
             .insert("chatgpt-account-id", header_value_from_str(account_id)?);
     }
     if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
-        request
-            .headers_mut()
-            .entry("user-agent")
-            .or_insert(HeaderValue::from_static("codex-cli"));
-        request
-            .headers_mut()
-            .entry("originator")
-            .or_insert(HeaderValue::from_static("codex_cli_rs"));
+        apply_chatgpt_codex_default_websocket_headers(request.headers_mut(), request_id);
     }
     request.headers_mut().insert(
         "x-tokenproxy-request-id",
@@ -1739,6 +1732,9 @@ const CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
+const DEFAULT_CODEX_USER_AGENT: &str = "codex-cli";
+const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
+const DEFAULT_CODEX_OPENAI_BETA: &str = "responses_websockets=2026-02-06";
 
 fn codex_upstream_websocket_headers(inbound: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -1767,6 +1763,21 @@ fn should_skip_codex_upstream_header(name: &str) -> bool {
         || name == "openai-project"
         || name.starts_with("sec-websocket-")
         || CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS.contains(&name)
+}
+
+fn apply_chatgpt_codex_default_websocket_headers(headers: &mut HeaderMap, request_id: &str) {
+    headers
+        .entry("user-agent")
+        .or_insert(HeaderValue::from_static(DEFAULT_CODEX_USER_AGENT));
+    headers
+        .entry("originator")
+        .or_insert(HeaderValue::from_static(DEFAULT_CODEX_ORIGINATOR));
+    headers
+        .entry("openai-beta")
+        .or_insert(HeaderValue::from_static(DEFAULT_CODEX_OPENAI_BETA));
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        headers.entry("x-client-request-id").or_insert(value);
+    }
 }
 
 fn header_value_from_str(value: &str) -> Result<HeaderValue, TokenproxyError> {
@@ -4750,6 +4761,45 @@ mod tests {
         assert_eq!(headers[0]["chatgpt-account-id"], "acct_123");
         assert!(!headers[0].contains_key("openai-organization"));
         assert_ne!(headers[0]["sec-websocket-key"], "client-key");
+    }
+
+    #[tokio::test]
+    async fn should_add_codex_defaults_for_non_codex_websocket_clients() {
+        let captured_headers = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_header_capture_websocket_upstream(Arc::clone(&captured_headers)).await;
+        let mut chatgpt = account(
+            "primary",
+            format!("http://{upstream}/backend-api/codex"),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+        chatgpt.chatgpt_account_id = Some("acct_123".to_string());
+        let state = AppState::new(effective_config(vec![chatgpt])).unwrap();
+        let selected = state.effective.accounts.first().unwrap().clone();
+        let mut session = None;
+
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_non_codex_ws",
+        )
+        .await
+        .unwrap();
+        sleep(Duration::from_millis(25)).await;
+
+        let headers = captured_headers
+            .lock()
+            .expect("header capture lock is not poisoned");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0]["user-agent"], DEFAULT_CODEX_USER_AGENT);
+        assert_eq!(headers[0]["originator"], DEFAULT_CODEX_ORIGINATOR);
+        assert_eq!(headers[0]["openai-beta"], DEFAULT_CODEX_OPENAI_BETA);
+        assert_eq!(headers[0]["x-client-request-id"], "req_non_codex_ws");
+        assert_eq!(headers[0]["chatgpt-account-id"], "acct_123");
     }
 
     #[tokio::test]
