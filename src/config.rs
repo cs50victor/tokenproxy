@@ -607,6 +607,7 @@ fn model_discovery_url(account: &EffectiveAccount) -> Result<reqwest::Url, Token
     };
     url.set_path(&format!("{model_base_path}/models"));
     if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+        // Matches Codex's preview API query param: https://github.com/openai/codex/blob/main/codex-rs/core/tests/suite/client.rs#L3051
         url.query_pairs_mut()
             .append_pair("api-version", "2025-04-01-preview");
     }
