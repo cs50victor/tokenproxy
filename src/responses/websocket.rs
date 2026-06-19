@@ -8,6 +8,7 @@ use crate::responses::state::ReplayState;
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebSocketAction {
     Create(Value),
+    ForwardText(String),
     // Pings are auto-ponged by axum; surfaced only so the relay can count them.
     Ping,
     // Unsolicited Pongs are a legal heartbeat (RFC 6455 section 5.5.3); drop them.
@@ -26,35 +27,25 @@ pub fn classify_downstream_message(
 ) -> Result<WebSocketAction, TokenproxyError> {
     match message {
         Message::Text(text) => {
-            if state.in_flight {
-                return Err(TokenproxyError::new(
-                    StatusCode::CONFLICT,
-                    ErrorCode::WebSocketInFlight,
-                    "one response is already in flight on this WebSocket",
-                ));
+            if let Ok(value) = serde_json::from_str::<Value>(text.as_str())
+                && value.is_object()
+                && value.get("type").and_then(Value::as_str) == Some("response.create")
+            {
+                if state.in_flight {
+                    return Err(TokenproxyError::new(
+                        StatusCode::CONFLICT,
+                        ErrorCode::WebSocketInFlight,
+                        "one response is already in flight on this WebSocket",
+                    ));
+                }
+                return Ok(WebSocketAction::Create(value));
             }
-            let value: Value = serde_json::from_str(&text).map_err(|error| {
-                TokenproxyError::new(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::WebSocketUnsupportedMessage,
-                    format!("invalid WebSocket JSON text frame: {error}"),
-                )
-            })?;
-            if !value.is_object() {
-                return Err(TokenproxyError::new(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::WebSocketUnsupportedMessage,
-                    "WebSocket text frame must be a JSON object",
-                ));
-            }
-            if value.get("type").and_then(Value::as_str) != Some("response.create") {
-                return Err(TokenproxyError::new(
-                    StatusCode::BAD_REQUEST,
-                    ErrorCode::WebSocketUnsupportedMessage,
-                    "unsupported WebSocket message type",
-                ));
-            }
-            Ok(WebSocketAction::Create(value))
+
+            // Tokenproxy is a WebSocket proxy after the initial routable
+            // response.create. Codex may send additional protocol text frames
+            // that regular upstream accepts, so non-create text must be
+            // forwarded instead of rejected here.
+            Ok(WebSocketAction::ForwardText(text.to_string()))
         }
         Message::Ping(_) => Ok(WebSocketAction::Ping),
         Message::Pong(_) => Ok(WebSocketAction::Ignore),
@@ -112,28 +103,78 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_non_object_json_text_frame() {
-        let error = classify_downstream_message(
+    fn should_forward_non_create_text_frames() {
+        let action = classify_downstream_message(
             Message::Text(r#"["response.create"]"#.into()),
             &ReplayState::default(),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(error.code, ErrorCode::WebSocketUnsupportedMessage);
-        assert_eq!(error.message, "WebSocket text frame must be a JSON object");
+        assert_eq!(
+            action,
+            WebSocketAction::ForwardText(r#"["response.create"]"#.to_string())
+        );
     }
 
     #[test]
-    fn should_reject_response_append_json_object() {
-        let error = classify_downstream_message(
+    fn should_forward_response_append_json_object() {
+        let action = classify_downstream_message(
             Message::Text(r#"{"type":"response.append","input":[]}"#.into()),
             &ReplayState::default(),
         )
+        .unwrap();
+
+        assert_eq!(
+            action,
+            WebSocketAction::ForwardText(r#"{"type":"response.append","input":[]}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn should_forward_json_object_without_type() {
+        let action = classify_downstream_message(
+            Message::Text(r#"{"model":"gpt-5.5"}"#.into()),
+            &ReplayState::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            action,
+            WebSocketAction::ForwardText(r#"{"model":"gpt-5.5"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn should_reject_second_response_create_while_in_flight() {
+        let state = ReplayState {
+            in_flight: true,
+            ..ReplayState::default()
+        };
+        let error = classify_downstream_message(
+            Message::Text(r#"{"type":"response.create","model":"gpt-5.5"}"#.into()),
+            &state,
+        )
         .unwrap_err();
 
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
-        assert_eq!(error.code, ErrorCode::WebSocketUnsupportedMessage);
-        assert_eq!(error.message, "unsupported WebSocket message type");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, ErrorCode::WebSocketInFlight);
+    }
+
+    #[test]
+    fn should_forward_non_create_text_while_in_flight() {
+        let state = ReplayState {
+            in_flight: true,
+            ..ReplayState::default()
+        };
+        let action = classify_downstream_message(
+            Message::Text(r#"{"type":"response.cancel"}"#.into()),
+            &state,
+        )
+        .unwrap();
+
+        assert_eq!(
+            action,
+            WebSocketAction::ForwardText(r#"{"type":"response.cancel"}"#.to_string())
+        );
     }
 }

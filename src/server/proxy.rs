@@ -1,5 +1,6 @@
 use std::fmt::Display;
 use std::future::Future;
+use std::io::{Cursor, Read};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -451,7 +452,7 @@ async fn proxy_http_inner(
     let (parts, body) = request.into_parts();
     require_auth(state, &parts.headers)?;
     state.metrics.increment_requests();
-    reject_compressed_body(&parts.headers)?;
+    let mut inbound_headers = parts.headers;
 
     let body = to_bytes(body, state.effective.config.server.max_body_bytes)
         .await
@@ -462,13 +463,18 @@ async fn proxy_http_inner(
                 format!("failed to read request body: {error}"),
             )
         })?;
+    let body = decode_request_body(
+        &mut inbound_headers,
+        body,
+        state.effective.config.server.max_body_bytes,
+    )?;
     if parts.uri.path() != "/v1/responses/compact" {
         maybe_dump_request_body(
             state,
             &request_id,
             parts.method.as_str(),
             parts.uri.path(),
-            &parts.headers,
+            &inbound_headers,
             &body,
         )
         .await?;
@@ -499,7 +505,7 @@ async fn proxy_http_inner(
             method: parts.method,
             path: parts.uri.path().to_string(),
             path_and_query: path_and_query(&parts.uri),
-            inbound_headers: parts.headers,
+            inbound_headers,
             body: classified.body,
             request_shape,
             compact_request_body,
@@ -578,7 +584,6 @@ async fn proxy_passthrough_inner(
     let (parts, body) = request.into_parts();
     require_auth(state, &parts.headers)?;
     state.metrics.increment_requests();
-    reject_compressed_body(&parts.headers)?;
 
     let body = to_bytes(body, state.effective.config.server.max_body_bytes)
         .await
@@ -866,6 +871,43 @@ async fn relay_websocket_session(
                     .await;
                     replay_state.in_flight = false;
                     close_idle_upstream_session(&state.metrics, &mut upstream_session).await;
+                }
+            }
+            Ok(WebSocketAction::ForwardText(text)) => {
+                let result = match upstream_session.as_mut() {
+                    Some(upstream_session) => upstream_session
+                        .socket
+                        .send(UpstreamMessage::Text(text.into()))
+                        .await
+                        .map_err(upstream_send_error)
+                        .inspect(|_| {
+                            state
+                                .metrics
+                                .increment_websocket_event_outcome("downstream_text_forward", true);
+                        }),
+                    None => {
+                        state
+                            .metrics
+                            .increment_websocket_event_outcome("downstream_text_forward", false);
+                        Err(TokenproxyError::new(
+                            StatusCode::BAD_REQUEST,
+                            ErrorCode::WebSocketUnsupportedMessage,
+                            "first WebSocket text frame must be response.create",
+                        ))
+                    }
+                };
+                if let Err(error) = result {
+                    status = error.status;
+                    error_code = Some(error.code.as_str());
+                    let _ = send_ws_error(
+                        &state.metrics,
+                        &mut downstream,
+                        &request_id,
+                        error.code.as_str(),
+                        &error.message,
+                        downstream_send_timeout,
+                    )
+                    .await;
                 }
             }
             Ok(WebSocketAction::Ping) => {
@@ -1285,6 +1327,15 @@ async fn relay_single_websocket_create(
                             break 'relay;
                         };
                         match action {
+                            Ok(WebSocketAction::ForwardText(text)) => {
+                                upstream
+                                    .send(UpstreamMessage::Text(text.into()))
+                                    .await
+                                    .map_err(upstream_send_error)?;
+                                state
+                                    .metrics
+                                    .increment_websocket_event_outcome("downstream_text_forward", true);
+                            }
                             Ok(WebSocketAction::Ping) => {
                                 state
                                     .metrics
@@ -1539,11 +1590,16 @@ fn classify_downstream_session_event(
         DownstreamSessionEvent::Message(message) => {
             Some(classify_downstream_message(message, replay_state))
         }
-        DownstreamSessionEvent::ReceiveError(error) => Some(Err(TokenproxyError::new(
-            StatusCode::BAD_GATEWAY,
-            ErrorCode::WebSocketUnsupportedMessage,
-            format!("downstream WebSocket receive failed: {error}"),
-        ))),
+        DownstreamSessionEvent::ReceiveError(error) => {
+            if !replay_state.in_flight {
+                return None;
+            }
+            Some(Err(TokenproxyError::new(
+                StatusCode::BAD_GATEWAY,
+                ErrorCode::WebSocketUnsupportedMessage,
+                format!("downstream WebSocket receive failed: {error}"),
+            )))
+        }
         DownstreamSessionEvent::Closed => None,
     }
 }
@@ -3355,15 +3411,17 @@ fn body_with_request_transforms(
         route_request.endpoint == Endpoint::Responses && account.prompt_cache_key_seed.is_some();
     let needs_service_tier_normalization =
         is_legacy_fast_service_tier(route_request.service_tier.as_deref());
+    let needs_chat_stream_usage =
+        route_request.endpoint == Endpoint::ChatCompletions && route_request.stream;
 
-    if !needs_prompt_cache_key && !needs_service_tier_normalization {
+    if !needs_prompt_cache_key && !needs_service_tier_normalization && !needs_chat_stream_usage {
         return Ok(body.clone());
     }
     let mut value = serde_json::from_slice::<Value>(body).map_err(|error| {
         TokenproxyError::new(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidJson,
-            format!("failed to parse request body for prompt cache key: {error}"),
+            format!("failed to parse request body for upstream transforms: {error}"),
         )
     })?;
     let Some(object) = value.as_object_mut() else {
@@ -3383,6 +3441,17 @@ fn body_with_request_transforms(
     if needs_prompt_cache_key && !object.contains_key("prompt_cache_key") {
         value =
             value_with_prompt_cache_key(value, account, "downstream", &route_request.model_family);
+    }
+    if needs_chat_stream_usage && let Some(object) = value.as_object_mut() {
+        let stream_options = object
+            .entry("stream_options")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !stream_options.is_object() {
+            *stream_options = Value::Object(serde_json::Map::new());
+        }
+        if let Some(stream_options) = stream_options.as_object_mut() {
+            stream_options.insert("include_usage".to_string(), Value::Bool(true));
+        }
     }
 
     serde_json::to_vec(&value)
@@ -3918,27 +3987,100 @@ fn chatgpt_bearer_authorized(state: &AppState, actual: &str) -> bool {
     })
 }
 
-fn reject_compressed_body(headers: &HeaderMap) -> Result<(), TokenproxyError> {
+fn decode_request_body(
+    headers: &mut HeaderMap,
+    body: Bytes,
+    max_body_bytes: usize,
+) -> Result<Bytes, TokenproxyError> {
+    let encodings = request_content_encodings(headers)?;
+    if encodings.is_empty() {
+        return Ok(body);
+    }
+
+    let mut decoded = body;
+    let mut changed = false;
+    for encoding in encodings.iter().rev() {
+        match encoding {
+            RequestContentEncoding::Identity => {}
+            RequestContentEncoding::Zstd => {
+                let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(decoded.as_ref()))
+                    .map_err(zstd_decode_error)?;
+                let read_limit = u64::try_from(max_body_bytes)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1);
+                let mut zstd_decoded = Vec::new();
+                decoder
+                    .by_ref()
+                    .take(read_limit)
+                    .read_to_end(&mut zstd_decoded)
+                    .map_err(zstd_decode_error)?;
+                if zstd_decoded.len() > max_body_bytes {
+                    return Err(TokenproxyError::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        ErrorCode::BodyTooLarge,
+                        format!(
+                            "decompressed request body exceeds max_body_bytes={max_body_bytes}"
+                        ),
+                    ));
+                }
+                decoded = Bytes::from(zstd_decoded);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        headers.remove("content-encoding");
+        headers.remove("content-length");
+    }
+
+    Ok(decoded)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestContentEncoding {
+    Identity,
+    Zstd,
+}
+
+fn request_content_encodings(
+    headers: &HeaderMap,
+) -> Result<Vec<RequestContentEncoding>, TokenproxyError> {
+    let mut encodings = Vec::new();
     for value in headers.get_all("content-encoding") {
         let Ok(value) = value.to_str() else {
             return Err(unsupported_content_encoding());
         };
         for encoding in value.split(',') {
             let encoding = encoding.trim();
-            if !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity") {
+            if encoding.is_empty() {
+                continue;
+            }
+            if encoding.eq_ignore_ascii_case("identity") {
+                encodings.push(RequestContentEncoding::Identity);
+            } else if encoding.eq_ignore_ascii_case("zstd") {
+                encodings.push(RequestContentEncoding::Zstd);
+            } else {
                 return Err(unsupported_content_encoding());
             }
         }
     }
-
-    Ok(())
+    Ok(encodings)
 }
 
 fn unsupported_content_encoding() -> TokenproxyError {
     TokenproxyError::new(
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         ErrorCode::UnsupportedMediaType,
-        "compressed request bodies are unsupported in stage two",
+        "unsupported request content encoding; supported encodings are identity and zstd",
+    )
+}
+
+fn zstd_decode_error(error: std::io::Error) -> TokenproxyError {
+    TokenproxyError::new(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ErrorCode::UnsupportedMediaType,
+        format!("failed to decode zstd request body: {error}"),
     )
 }
 
@@ -5298,6 +5440,43 @@ data: {"type":"response.created","response":{"id":"resp_1","service_tier":"defau
     }
 
     #[test]
+    fn should_treat_downstream_receive_error_after_completion_as_close() {
+        let replay_state = ReplayState {
+            in_flight: false,
+            ..ReplayState::default()
+        };
+
+        let action = classify_downstream_session_event(
+            DownstreamSessionEvent::ReceiveError(
+                "WebSocket protocol error: Connection reset without closing handshake".to_string(),
+            ),
+            &replay_state,
+        );
+
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn should_reject_downstream_receive_error_while_in_flight() {
+        let replay_state = ReplayState {
+            in_flight: true,
+            ..ReplayState::default()
+        };
+
+        let error = classify_downstream_session_event(
+            DownstreamSessionEvent::ReceiveError(
+                "WebSocket protocol error: Connection reset without closing handshake".to_string(),
+            ),
+            &replay_state,
+        )
+        .expect("receive error while in flight should be surfaced")
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.code, ErrorCode::WebSocketUnsupportedMessage);
+    }
+
+    #[test]
     fn should_record_bounded_upstream_websocket_response_event_metrics() {
         let metrics = Metrics::default();
 
@@ -5808,6 +5987,64 @@ data: {"type":"response.custom.future_event"}
     }
 
     #[test]
+    fn should_request_usage_for_streaming_chat_completions_before_http_upstream_forwarding() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let request = RouteRequest {
+            endpoint: Endpoint::ChatCompletions,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: true,
+        };
+
+        let body = body_with_request_transforms(
+            &Bytes::from_static(br#"{"model":"gpt-5.5","stream":true}"#),
+            &request,
+            &account,
+        )
+        .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            body["stream_options"]["include_usage"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn should_not_request_usage_for_non_streaming_chat_completions() {
+        let account = account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+        let request = RouteRequest {
+            endpoint: Endpoint::ChatCompletions,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+        let original = Bytes::from_static(br#"{"model":"gpt-5.5"}"#);
+
+        let body = body_with_request_transforms(&original, &request, &account).unwrap();
+
+        assert_eq!(body, original);
+    }
+
+    #[test]
     fn should_identify_only_precommit_retry_statuses() {
         assert!(should_retry_precommit(StatusCode::INTERNAL_SERVER_ERROR));
         assert!(should_retry_precommit(StatusCode::SERVICE_UNAVAILABLE));
@@ -5827,23 +6064,85 @@ data: {"type":"response.custom.future_event"}
     }
 
     #[test]
-    fn should_reject_only_compressed_request_content_encoding() {
+    fn should_decode_supported_request_content_encoding() {
         let mut identity = HeaderMap::new();
         identity.insert("content-encoding", "identity".parse().unwrap());
-        assert!(reject_compressed_body(&identity).is_ok());
+        let identity_body = Bytes::from_static(br#"{"model":"gpt-5.5","input":[]}"#);
+        assert_eq!(
+            decode_request_body(&mut identity, identity_body.clone(), 1024).unwrap(),
+            identity_body
+        );
+
+        let json = br#"{"model":"gpt-5.5","input":[]}"#;
+        let compressed = zstd::stream::encode_all(Cursor::new(json), 0).unwrap();
+        let mut zstd_headers = HeaderMap::new();
+        zstd_headers.insert("content-encoding", "zstd".parse().unwrap());
+        zstd_headers.insert(
+            "content-length",
+            compressed.len().to_string().parse().unwrap(),
+        );
+        let decoded =
+            decode_request_body(&mut zstd_headers, Bytes::from(compressed), 1024).unwrap();
+
+        assert_eq!(decoded, Bytes::from_static(json));
+        assert!(!zstd_headers.contains_key("content-encoding"));
+        assert!(!zstd_headers.contains_key("content-length"));
+        for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            assert!(classify_request(path, decoded.clone()).is_ok());
+        }
+    }
+
+    #[test]
+    fn should_decode_layered_supported_request_content_encoding() {
+        let json = br#"{"model":"gpt-5.5","input":[]}"#;
+        let compressed_once = zstd::stream::encode_all(Cursor::new(json), 0).unwrap();
+        let compressed_twice =
+            zstd::stream::encode_all(Cursor::new(compressed_once.as_slice()), 0).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "zstd, zstd".parse().unwrap());
+
+        let decoded =
+            decode_request_body(&mut headers, Bytes::from(compressed_twice), 1024).unwrap();
+
+        assert_eq!(decoded, Bytes::from_static(json));
+    }
+
+    #[test]
+    fn should_reject_unsupported_request_content_encoding() {
+        let mut identity = HeaderMap::new();
+        identity.insert("content-encoding", "identity".parse().unwrap());
+        assert_eq!(
+            request_content_encodings(&identity).unwrap(),
+            vec![RequestContentEncoding::Identity]
+        );
 
         let mut compressed = HeaderMap::new();
         compressed.insert("content-encoding", "gzip".parse().unwrap());
-        let error = reject_compressed_body(&compressed).unwrap_err();
+        let error = decode_request_body(&mut compressed, Bytes::new(), 1024).unwrap_err();
         assert_eq!(error.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(error.code, ErrorCode::UnsupportedMediaType);
 
         let mut layered = HeaderMap::new();
         layered.insert("content-encoding", "identity, br".parse().unwrap());
         assert_eq!(
-            reject_compressed_body(&layered).unwrap_err().code,
+            decode_request_body(&mut layered, Bytes::new(), 1024)
+                .unwrap_err()
+                .code,
             ErrorCode::UnsupportedMediaType
         );
+    }
+
+    #[test]
+    fn should_reject_zstd_body_when_decoded_body_exceeds_limit() {
+        let json = br#"{"model":"gpt-5.5","input":[{"role":"user","content":"hello"}]}"#;
+        let compressed = zstd::stream::encode_all(Cursor::new(json), 0).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", "zstd".parse().unwrap());
+
+        let error = decode_request_body(&mut headers, Bytes::from(compressed), 8).unwrap_err();
+
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(error.code, ErrorCode::BodyTooLarge);
     }
 
     #[test]
