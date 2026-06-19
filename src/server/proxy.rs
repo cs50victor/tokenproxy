@@ -713,8 +713,9 @@ async fn responses_ws(
         }
     };
     let request_id = state.next_request_id();
+    let upstream_headers = codex_upstream_websocket_headers(&headers);
     ws.on_upgrade(move |socket| async move {
-        relay_websocket_session(state, socket, request_id).await;
+        relay_websocket_session(state, socket, request_id, upstream_headers).await;
     })
     .into_response()
 }
@@ -743,7 +744,12 @@ async fn responses_compact_get(
     )
 }
 
-async fn relay_websocket_session(state: AppState, socket: WebSocket, request_id: String) {
+async fn relay_websocket_session(
+    state: AppState,
+    socket: WebSocket,
+    request_id: String,
+    upstream_headers: HeaderMap,
+) {
     let _active_session = ActiveWebSocketSessionGuard::new(&state.metrics);
     let started = Instant::now();
     let mut replay_state = ReplayState::default();
@@ -837,6 +843,7 @@ async fn relay_websocket_session(state: AppState, socket: WebSocket, request_id:
                         downstream_events: &mut events_rx,
                         overflow_rx: &mut overflow_rx,
                         upstream_session: &mut upstream_session,
+                        upstream_headers: &upstream_headers,
                         shutdown_rx: &mut shutdown_rx,
                     },
                 )
@@ -947,6 +954,7 @@ struct WebSocketRelayIo<'a> {
     downstream_events: &'a mut mpsc::Receiver<DownstreamSessionEvent>,
     overflow_rx: &'a mut watch::Receiver<bool>,
     upstream_session: &'a mut Option<UpstreamSession>,
+    upstream_headers: &'a HeaderMap,
     shutdown_rx: &'a mut watch::Receiver<bool>,
 }
 
@@ -962,6 +970,7 @@ async fn relay_single_websocket_create(
         downstream_events,
         overflow_rx,
         upstream_session,
+        upstream_headers,
         shutdown_rx,
     } = relay_io;
     let route_context = websocket_route_context(replay_state, &value)?;
@@ -998,6 +1007,7 @@ async fn relay_single_websocket_create(
             state,
             &account,
             upstream_session,
+            upstream_headers,
             &route_request.model_family,
             request_id,
         )
@@ -1069,6 +1079,7 @@ async fn relay_single_websocket_create(
                 state,
                 &account,
                 upstream_session,
+                upstream_headers,
                 &route_context.model_family,
                 request_id,
                 &normalized,
@@ -1379,6 +1390,7 @@ async fn relay_single_websocket_create(
                 state,
                 &account,
                 upstream_session,
+                upstream_headers,
                 &route_context.model_family,
                 request_id,
                 &normalized,
@@ -1416,6 +1428,7 @@ async fn redial_and_resend(
     state: &AppState,
     account: &EffectiveAccount,
     upstream_session: &mut Option<UpstreamSession>,
+    upstream_headers: &HeaderMap,
     model_family: &str,
     request_id: &str,
     payload: &Value,
@@ -1426,7 +1439,15 @@ async fn redial_and_resend(
     state
         .metrics
         .increment_websocket_event_outcome("upstream_redial", true);
-    ensure_upstream_session(state, account, upstream_session, model_family, request_id).await?;
+    ensure_upstream_session(
+        state,
+        account,
+        upstream_session,
+        upstream_headers,
+        model_family,
+        request_id,
+    )
+    .await?;
     upstream_session
         .as_mut()
         .expect("ensure_upstream_session creates session")
@@ -1586,6 +1607,7 @@ async fn ensure_upstream_session(
     state: &AppState,
     account: &EffectiveAccount,
     upstream_session: &mut Option<UpstreamSession>,
+    upstream_headers: &HeaderMap,
     model_family: &str,
     request_id: &str,
 ) -> Result<bool, TokenproxyError> {
@@ -1624,6 +1646,7 @@ async fn ensure_upstream_session(
         "authorization",
         upstream_authorization_header(&account.bearer_token)?,
     );
+    copy_codex_upstream_headers(request.headers_mut(), upstream_headers);
     if let Some(account_id) = account.chatgpt_account_id.as_deref() {
         request
             .headers_mut()
@@ -1632,7 +1655,12 @@ async fn ensure_upstream_session(
     if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
         request
             .headers_mut()
-            .insert("user-agent", HeaderValue::from_static("codex-cli"));
+            .entry("user-agent")
+            .or_insert(HeaderValue::from_static("codex-cli"));
+        request
+            .headers_mut()
+            .entry("originator")
+            .or_insert(HeaderValue::from_static("codex_cli_rs"));
     }
     request.headers_mut().insert(
         "x-tokenproxy-request-id",
@@ -1699,6 +1727,46 @@ async fn ensure_upstream_session(
         close_upstream_socket(&state.metrics, &mut old_session.socket).await;
     }
     Ok(false)
+}
+
+const CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+fn codex_upstream_websocket_headers(inbound: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    copy_codex_upstream_headers(&mut headers, inbound);
+    headers
+}
+
+fn copy_codex_upstream_headers(target: &mut HeaderMap, source: &HeaderMap) {
+    for (name, value) in source {
+        if should_skip_codex_upstream_header(name.as_str()) {
+            continue;
+        }
+        target.append(name.clone(), value.clone());
+    }
+}
+
+fn should_skip_codex_upstream_header(name: &str) -> bool {
+    name == "authorization"
+        || name == "host"
+        || name == "content-length"
+        || name == "accept-encoding"
+        || name == "cookie"
+        || name == "x-api-key"
+        || name == "api-key"
+        || name == "openai-organization"
+        || name == "openai-project"
+        || name.starts_with("sec-websocket-")
+        || CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS.contains(&name)
 }
 
 fn header_value_from_str(value: &str) -> Result<HeaderValue, TokenproxyError> {
@@ -3923,26 +3991,21 @@ mod tests {
 
     #[allow(clippy::result_large_err)]
     async fn fake_header_capture_websocket_upstream(
-        request_ids: Arc<StdMutex<Vec<Option<String>>>>,
+        captured_headers: Arc<StdMutex<Vec<HeaderMap>>>,
     ) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let request_ids = Arc::clone(&request_ids);
+                let captured_headers = Arc::clone(&captured_headers);
                 tokio::spawn(async move {
                     let callback =
                         |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
                          response| {
-                            let request_id = request
-                                .headers()
-                                .get("x-tokenproxy-request-id")
-                                .and_then(|value| value.to_str().ok())
-                                .map(ToOwned::to_owned);
-                            request_ids
+                            captured_headers
                                 .lock()
-                                .expect("request id capture lock is not poisoned")
-                                .push(request_id);
+                                .expect("header capture lock is not poisoned")
+                                .push(request.headers().clone());
                             Ok(response)
                         };
                     if let Ok(mut socket) = accept_hdr_async(stream, callback).await {
@@ -4521,12 +4584,26 @@ mod tests {
         let selected = state.effective.accounts.first().unwrap().clone();
         let mut session = None;
 
-        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_reuse")
-            .await
-            .unwrap();
-        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_reuse")
-            .await
-            .unwrap();
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_ws_reuse",
+        )
+        .await
+        .unwrap();
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_ws_reuse",
+        )
+        .await
+        .unwrap();
         sleep(Duration::from_millis(25)).await;
 
         assert_eq!(accepted_count.load(Ordering::Relaxed), 1);
@@ -4546,13 +4623,27 @@ mod tests {
         let selected = state.effective.accounts.first().unwrap().clone();
         let mut session = None;
 
-        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_expired_1")
-            .await
-            .unwrap();
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_ws_expired_1",
+        )
+        .await
+        .unwrap();
         session.as_mut().unwrap().opened_at = Instant::now() - UPSTREAM_WS_MAX_SESSION_AGE;
-        ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_expired_2")
-            .await
-            .unwrap();
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_ws_expired_2",
+        )
+        .await
+        .unwrap();
         sleep(Duration::from_millis(25)).await;
 
         assert_eq!(accepted_count.load(Ordering::Relaxed), 2);
@@ -4560,8 +4651,8 @@ mod tests {
 
     #[tokio::test]
     async fn should_forward_generated_request_id_on_upstream_websocket_handshake() {
-        let request_ids = Arc::new(StdMutex::new(Vec::new()));
-        let upstream = fake_header_capture_websocket_upstream(Arc::clone(&request_ids)).await;
+        let captured_headers = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_header_capture_websocket_upstream(Arc::clone(&captured_headers)).await;
         let state = AppState::new(effective_config(vec![account(
             "primary",
             format!("http://{upstream}/v1"),
@@ -4576,6 +4667,7 @@ mod tests {
             &state,
             &selected,
             &mut session,
+            &HeaderMap::new(),
             "gpt",
             "req_0000000000000042",
         )
@@ -4583,13 +4675,81 @@ mod tests {
         .unwrap();
         sleep(Duration::from_millis(25)).await;
 
+        let headers = captured_headers
+            .lock()
+            .expect("header capture lock is not poisoned");
+        assert_eq!(headers.len(), 1);
         assert_eq!(
-            request_ids
-                .lock()
-                .expect("request id capture lock is not poisoned")
-                .as_slice(),
-            &[Some("req_0000000000000042".to_string())]
+            headers[0]["x-tokenproxy-request-id"],
+            "req_0000000000000042"
         );
+    }
+
+    #[tokio::test]
+    async fn should_forward_codex_websocket_handshake_headers_upstream() {
+        let captured_headers = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_header_capture_websocket_upstream(Arc::clone(&captured_headers)).await;
+        let mut chatgpt = account(
+            "primary",
+            format!("http://{upstream}/backend-api/codex"),
+            "upstream-token",
+            100,
+        );
+        chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
+        chatgpt.chatgpt_account_id = Some("acct_123".to_string());
+        let state = AppState::new(effective_config(vec![chatgpt])).unwrap();
+        let selected = state.effective.accounts.first().unwrap().clone();
+        assert_eq!(selected.chatgpt_account_id.as_deref(), Some("acct_123"));
+        let mut session = None;
+        let mut upstream_headers = HeaderMap::new();
+        upstream_headers.insert("user-agent", "codex_exec/0.141.0 test".parse().unwrap());
+        upstream_headers.insert("originator", "codex_exec".parse().unwrap());
+        upstream_headers.insert(
+            "openai-beta",
+            "responses_websockets=2026-02-06".parse().unwrap(),
+        );
+        upstream_headers.insert("x-client-request-id", "thread-1".parse().unwrap());
+        upstream_headers.insert("session-id", "session-1".parse().unwrap());
+        upstream_headers.insert("thread-id", "thread-1".parse().unwrap());
+        upstream_headers.insert("x-codex-window-id", "thread-1:0".parse().unwrap());
+        upstream_headers.insert("x-new-codex-feature", "forward-me".parse().unwrap());
+        upstream_headers.insert("authorization", "Bearer downstream".parse().unwrap());
+        upstream_headers.insert("openai-organization", "org_client".parse().unwrap());
+        upstream_headers.insert("connection", "upgrade".parse().unwrap());
+        upstream_headers.insert("sec-websocket-key", "client-key".parse().unwrap());
+
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &upstream_headers,
+            "gpt",
+            "req_0000000000000043",
+        )
+        .await
+        .unwrap();
+        sleep(Duration::from_millis(25)).await;
+
+        let headers = captured_headers
+            .lock()
+            .expect("header capture lock is not poisoned");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0]["user-agent"], "codex_exec/0.141.0 test");
+        assert_eq!(headers[0]["originator"], "codex_exec");
+        assert_eq!(headers[0]["openai-beta"], "responses_websockets=2026-02-06");
+        assert_eq!(headers[0]["x-client-request-id"], "thread-1");
+        assert_eq!(headers[0]["session-id"], "session-1");
+        assert_eq!(headers[0]["thread-id"], "thread-1");
+        assert_eq!(headers[0]["x-codex-window-id"], "thread-1:0");
+        assert_eq!(headers[0]["x-new-codex-feature"], "forward-me");
+        assert_eq!(
+            headers[0]["x-tokenproxy-request-id"],
+            "req_0000000000000043"
+        );
+        assert_eq!(headers[0]["authorization"], "Bearer upstream-token");
+        assert_eq!(headers[0]["chatgpt-account-id"], "acct_123");
+        assert!(!headers[0].contains_key("openai-organization"));
+        assert_ne!(headers[0]["sec-websocket-key"], "client-key");
     }
 
     #[tokio::test]
@@ -4604,10 +4764,16 @@ mod tests {
         let selected = state.effective.accounts[0].clone();
         let mut session = None;
 
-        let error =
-            ensure_upstream_session(&state, &selected, &mut session, "gpt", "req_ws_failed")
-                .await
-                .expect_err("closed local port should fail websocket connect");
+        let error = ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_ws_failed",
+        )
+        .await
+        .expect_err("closed local port should fail websocket connect");
 
         assert_eq!(error.status, StatusCode::BAD_GATEWAY);
         let AccountHealth::Throttled { next_retry_at_ms } =

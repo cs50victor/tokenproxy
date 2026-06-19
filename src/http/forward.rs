@@ -40,6 +40,8 @@ pub fn build_upstream_headers(
         let lower = name.as_str();
         let forward_openai_header =
             allow_openai_headers && matches!(lower, "openai-organization" | "openai-project");
+        let forward_codex_openai_beta =
+            matches!(auth, UpstreamAuth::ChatGptBearer) && lower == "openai-beta";
         if lower == AUTHORIZATION.as_str()
             || lower == HOST.as_str()
             || lower == CONTENT_LENGTH.as_str()
@@ -49,7 +51,7 @@ pub fn build_upstream_headers(
             // reqwest is built without decompression features and tokenproxy strips
             // Content-Encoding from responses, so force identity upstream encoding.
             || lower == "accept-encoding"
-            || (lower.starts_with("openai-") && !forward_openai_header)
+            || (lower.starts_with("openai-") && !forward_openai_header && !forward_codex_openai_beta)
         {
             continue;
         }
@@ -64,7 +66,12 @@ pub fn build_upstream_headers(
             authorization.set_sensitive(true);
             output.insert(AUTHORIZATION, authorization);
             if matches!(auth, UpstreamAuth::ChatGptBearer) {
-                output.insert(USER_AGENT, HeaderValue::from_static("codex-cli"));
+                output
+                    .entry(USER_AGENT)
+                    .or_insert(HeaderValue::from_static("codex-cli"));
+                output
+                    .entry(HeaderName::from_static("originator"))
+                    .or_insert(HeaderValue::from_static("codex_cli_rs"));
                 // ChatGPT Codex auth pairs the OAuth access-token bearer with the
                 // workspace id header; see codex-rs model-provider BearerAuthProvider.
                 if let Some(account_id) = chatgpt_account_id {
@@ -190,6 +197,39 @@ mod tests {
         assert_eq!(headers["openai-project"], "proj_client");
         assert!(!headers.contains_key("openai-unknown"));
         assert!(!headers.contains_key("user-agent"));
+    }
+
+    #[test]
+    fn should_preserve_codex_headers_for_chatgpt_bearer() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert("user-agent", "codex_exec/0.141.0 test".parse().unwrap());
+        inbound.insert("originator", "codex_exec".parse().unwrap());
+        inbound.insert(
+            "openai-beta",
+            "responses_websockets=2026-02-06".parse().unwrap(),
+        );
+        inbound.insert("x-client-request-id", "client-req".parse().unwrap());
+        inbound.insert("openai-organization", "org_client".parse().unwrap());
+        inbound.insert("openai-project", "proj_client".parse().unwrap());
+
+        let headers = build_upstream_headers(
+            &inbound,
+            "chatgpt.com",
+            "upstream",
+            Some("acct_123"),
+            "req_1",
+            UpstreamAuth::ChatGptBearer,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(headers["user-agent"], "codex_exec/0.141.0 test");
+        assert_eq!(headers["originator"], "codex_exec");
+        assert_eq!(headers["openai-beta"], "responses_websockets=2026-02-06");
+        assert_eq!(headers["x-client-request-id"], "client-req");
+        assert_eq!(headers["chatgpt-account-id"], "acct_123");
+        assert!(!headers.contains_key("openai-organization"));
+        assert!(!headers.contains_key("openai-project"));
     }
 
     #[test]
