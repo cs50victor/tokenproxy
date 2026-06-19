@@ -201,6 +201,7 @@ impl AccountConfig {
 
     fn should_discover_models(&self) -> bool {
         self.enabled
+            && self.models.is_empty()
             && matches!(
                 self.kind,
                 AccountKind::OpenAiApiKey | AccountKind::ChatgptCodexAuthJson
@@ -480,12 +481,16 @@ pub fn load_effective_config(
 
 #[derive(Debug, Deserialize)]
 struct UpstreamModelList {
+    #[serde(default)]
     data: Vec<UpstreamModel>,
+    #[serde(default)]
+    models: Vec<UpstreamModel>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpstreamModel {
-    id: String,
+    id: Option<String>,
+    slug: Option<String>,
 }
 
 pub async fn discover_account_models(
@@ -514,7 +519,7 @@ pub async fn discover_account_models(
             continue;
         }
         let discovered = fetch_account_models(&client, account, timeout).await?;
-        account.config.models = filter_discovered_models(discovered, &account.config.models);
+        account.config.models = discovered;
     }
 
     Ok(effective)
@@ -527,6 +532,9 @@ async fn fetch_account_models(
 ) -> Result<Vec<String>, TokenproxyError> {
     let url = model_discovery_url(account)?;
     let mut request = client.get(url).bearer_auth(&account.bearer_token);
+    if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+        request = request.header(reqwest::header::USER_AGENT, "codex-cli");
+    }
     if let Some(account_id) = account.chatgpt_account_id.as_deref() {
         request = request.header("chatgpt-account-id", account_id);
     }
@@ -566,7 +574,9 @@ async fn fetch_account_models(
     let models = list
         .data
         .into_iter()
-        .map(|model| model.id.trim().to_string())
+        .chain(list.models.into_iter())
+        .filter_map(|model| model.id.or(model.slug))
+        .map(|model| model.trim().to_string())
         .filter(|id| !id.is_empty())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -582,32 +592,6 @@ async fn fetch_account_models(
     Ok(models)
 }
 
-fn filter_discovered_models(discovered: Vec<String>, configured: &[String]) -> Vec<String> {
-    if configured.is_empty() {
-        return discovered;
-    }
-
-    let allowlist = configured
-        .iter()
-        .map(|model| model.trim().to_ascii_lowercase())
-        .filter(|model| !model.is_empty())
-        .collect::<BTreeSet<_>>();
-    if allowlist.is_empty() {
-        return discovered;
-    }
-
-    let filtered = discovered
-        .iter()
-        .filter(|model| allowlist.contains(&model.to_ascii_lowercase()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if filtered.is_empty() {
-        discovered
-    } else {
-        filtered
-    }
-}
-
 fn model_discovery_url(account: &EffectiveAccount) -> Result<reqwest::Url, TokenproxyError> {
     let mut url = reqwest::Url::parse(&account.config.base_url).map_err(|error| {
         TokenproxyError::invalid_config(format!(
@@ -616,7 +600,17 @@ fn model_discovery_url(account: &EffectiveAccount) -> Result<reqwest::Url, Token
         ))
     })?;
     let base_path = url.path().trim_end_matches('/');
-    url.set_path(&format!("{base_path}/models"));
+    let model_base_path = if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+        base_path.strip_suffix("/codex").unwrap_or(base_path)
+    } else {
+        base_path
+    };
+    url.set_path(&format!("{model_base_path}/models"));
+    if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+        // Matches Codex's preview API query param: https://github.com/openai/codex/blob/main/codex-rs/core/tests/suite/client.rs#L3051
+        url.query_pairs_mut()
+            .append_pair("api-version", "2025-04-01-preview");
+    }
     Ok(url)
 }
 
@@ -1172,6 +1166,7 @@ mod tests {
         expected_path: &'static str,
         expected_auth: &'static str,
         expected_chatgpt_account_id: Option<&'static str>,
+        body: &'static str,
     ) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1190,9 +1185,8 @@ mod tests {
                     request.contains(&format!("chatgpt-account-id: {account_id}")),
                     "{request}"
                 );
+                assert!(request.contains("user-agent: codex-cli"), "{request}");
             }
-            let body =
-                r#"{"object":"list","data":[{"id":"gpt-5.5"},{"id":"gpt-5.5"},{"id":"gpt-5.4"}]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
                 body.len()
@@ -1266,9 +1260,10 @@ mod tests {
     async fn should_discover_chatgpt_models_when_models_are_omitted() {
         let base_url = model_fixture_base_url(
             "/backend-api/codex",
-            "/backend-api/codex/models",
+            "/backend-api/models?api-version=2025-04-01-preview",
             "authorization: Bearer chatgpt-access",
             Some("acct_123"),
+            r#"{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.5"},{"slug":"gpt-5.4"}]}"#,
         )
         .await;
         let path = PathBuf::from("/tmp/tokenproxy-chatgpt-discover-auth.json");
@@ -1292,13 +1287,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_filter_discovered_openai_models_by_valid_configured_models() {
-        let base_url =
-            model_fixture_base_url("/v1", "/v1/models", "authorization: Bearer upstream", None)
-                .await;
+    async fn should_discover_openai_models_when_models_are_omitted() {
+        let base_url = model_fixture_base_url(
+            "/v1",
+            "/v1/models",
+            "authorization: Bearer upstream",
+            None,
+            r#"{"object":"list","data":[{"id":"gpt-5.5"},{"id":"gpt-5.5"},{"id":"gpt-5.4"}]}"#,
+        )
+        .await;
         let mut config = config_with_account(AccountConfig {
             base_url,
-            models: vec!["gpt-5.5".to_string(), "missing-model".to_string()],
+            models: Vec::new(),
             ..valid_openai_account()
         });
         config.server.allow_insecure_upstream = true;
@@ -1307,17 +1307,26 @@ mod tests {
             load_effective_config(config, &env(), &MemoryFiles(BTreeMap::new())).unwrap();
         let effective = discover_account_models(effective).await.unwrap();
 
-        assert_eq!(effective.accounts[0].config.models, vec!["gpt-5.5"]);
+        assert_eq!(
+            effective.accounts[0].config.models,
+            vec!["gpt-5.4", "gpt-5.5"]
+        );
     }
 
-    #[test]
-    fn should_ignore_configured_openai_models_when_none_are_valid() {
+    #[tokio::test]
+    async fn should_use_configured_openai_models_without_discovery() {
+        let config = config_with_account(AccountConfig {
+            models: vec!["gpt-5.5".to_string(), "missing-model".to_string()],
+            ..valid_openai_account()
+        });
+
+        let effective =
+            load_effective_config(config, &env(), &MemoryFiles(BTreeMap::new())).unwrap();
+        let effective = discover_account_models(effective).await.unwrap();
+
         assert_eq!(
-            filter_discovered_models(
-                vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
-                &["missing-model".to_string()],
-            ),
-            vec!["gpt-5.4", "gpt-5.5"]
+            effective.accounts[0].config.models,
+            vec!["gpt-5.5", "missing-model"]
         );
     }
 
