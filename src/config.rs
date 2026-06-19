@@ -196,10 +196,18 @@ impl AccountConfig {
     }
 
     fn requires_model_allowlist(&self) -> bool {
-        self.supports_chat_completions
-            || self.supports_responses
-            || self.supports_responses_ws
-            || self.supports_anthropic_messages
+        matches!(self.kind, AccountKind::AnthropicApiKey) && self.supports_anthropic_messages
+    }
+
+    fn should_discover_models(&self) -> bool {
+        self.enabled
+            && matches!(
+                self.kind,
+                AccountKind::OpenAiApiKey | AccountKind::ChatgptCodexAuthJson
+            )
+            && (self.supports_chat_completions
+                || self.supports_responses
+                || self.supports_responses_ws)
     }
 }
 
@@ -392,6 +400,7 @@ pub fn load_effective_config(
     env: &impl EnvProvider,
     files: &impl FileProvider,
 ) -> Result<EffectiveConfig, TokenproxyError> {
+    let config = expand_config_paths(config, env)?;
     validate_static_config(&config)?;
     let downstream_token = env_value(env, &config.downstream_auth.token_env)?;
 
@@ -423,7 +432,8 @@ pub fn load_effective_config(
                     ))
                 })?;
 
-                let location = auth_json_location(path, &account.id)?;
+                let expanded_path = expand_user_path(path, &account.id, env)?;
+                let location = auth_json_location(&expanded_path, &account.id)?;
                 if !auth_json_locations.insert(location.key.clone()) {
                     return Err(TokenproxyError::invalid_config(format!(
                         "auth_json_path reused by enabled account {}",
@@ -440,7 +450,10 @@ pub fn load_effective_config(
                 let chatgpt_auth = parse_chatgpt_auth_json(&raw)?;
 
                 EffectiveAccount {
-                    config: account.clone(),
+                    config: AccountConfig {
+                        auth_json_path: Some(expanded_path),
+                        ..account.clone()
+                    },
                     bearer_token: chatgpt_auth.bearer_token,
                     chatgpt_account_id: chatgpt_auth.account_id,
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
@@ -465,6 +478,148 @@ pub fn load_effective_config(
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct UpstreamModelList {
+    data: Vec<UpstreamModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamModel {
+    id: String,
+}
+
+pub async fn discover_account_models(
+    mut effective: EffectiveConfig,
+) -> Result<EffectiveConfig, TokenproxyError> {
+    if !effective
+        .accounts
+        .iter()
+        .any(|account| account.config.should_discover_models())
+    {
+        return Ok(effective);
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
+        .build()
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "failed to build model discovery HTTP client: {error}"
+            ))
+        })?;
+    let timeout = Duration::from_millis(effective.config.timeouts.request_header_ms);
+
+    for account in &mut effective.accounts {
+        if !account.config.should_discover_models() {
+            continue;
+        }
+        let discovered = fetch_account_models(&client, account, timeout).await?;
+        account.config.models = filter_discovered_models(discovered, &account.config.models);
+    }
+
+    Ok(effective)
+}
+
+async fn fetch_account_models(
+    client: &reqwest::Client,
+    account: &EffectiveAccount,
+    timeout: Duration,
+) -> Result<Vec<String>, TokenproxyError> {
+    let url = model_discovery_url(account)?;
+    let mut request = client.get(url).bearer_auth(&account.bearer_token);
+    if let Some(account_id) = account.chatgpt_account_id.as_deref() {
+        request = request.header("chatgpt-account-id", account_id);
+    }
+
+    let response = tokio::time::timeout(timeout, request.send())
+        .await
+        .map_err(|_| {
+            TokenproxyError::invalid_config(format!(
+                "model discovery for account {} timed out",
+                account.config.id
+            ))
+        })?
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "model discovery for account {} failed: {error}",
+                account.config.id
+            ))
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "model discovery for account {} failed with HTTP {status}",
+            account.config.id
+        )));
+    }
+
+    let list = response
+        .json::<UpstreamModelList>()
+        .await
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "model discovery for account {} returned invalid JSON: {error}",
+                account.config.id
+            ))
+        })?;
+    let models = list
+        .data
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    if models.is_empty() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "model discovery for account {} returned no models",
+            account.config.id
+        )));
+    }
+
+    Ok(models)
+}
+
+fn filter_discovered_models(discovered: Vec<String>, configured: &[String]) -> Vec<String> {
+    if configured.is_empty() {
+        return discovered;
+    }
+
+    let allowlist = configured
+        .iter()
+        .map(|model| model.trim().to_ascii_lowercase())
+        .filter(|model| !model.is_empty())
+        .collect::<BTreeSet<_>>();
+    if allowlist.is_empty() {
+        return discovered;
+    }
+
+    let filtered = discovered
+        .iter()
+        .filter(|model| allowlist.contains(&model.to_ascii_lowercase()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        discovered
+    } else {
+        filtered
+    }
+}
+
+fn model_discovery_url(account: &EffectiveAccount) -> Result<reqwest::Url, TokenproxyError> {
+    let mut url = reqwest::Url::parse(&account.config.base_url).map_err(|error| {
+        TokenproxyError::invalid_config(format!(
+            "base_url for {} is invalid: {error}",
+            account.config.id
+        ))
+    })?;
+    let base_path = url.path().trim_end_matches('/');
+    url.set_path(&format!("{base_path}/models"));
+    Ok(url)
+}
+
 struct AuthJsonLocation {
     key: String,
     source: AuthJsonSource,
@@ -473,6 +628,51 @@ struct AuthJsonLocation {
 enum AuthJsonSource {
     Local(PathBuf),
     S3(String),
+}
+
+fn expand_user_path(
+    path: &Path,
+    account_id: &str,
+    env: &impl EnvProvider,
+) -> Result<PathBuf, TokenproxyError> {
+    let raw = path.to_string_lossy();
+    let expanded = expand_user_path_value(
+        raw.as_ref(),
+        &format!("auth_json_path for {account_id}"),
+        env,
+    )?;
+    Ok(PathBuf::from(expanded))
+}
+
+fn expand_config_paths(
+    mut config: Config,
+    env: &impl EnvProvider,
+) -> Result<Config, TokenproxyError> {
+    config.observability.dump_dir = expand_user_path_value(
+        &config.observability.dump_dir,
+        "observability.dump_dir",
+        env,
+    )?;
+    Ok(config)
+}
+
+fn expand_user_path_value(
+    raw: &str,
+    field: &str,
+    env: &impl EnvProvider,
+) -> Result<String, TokenproxyError> {
+    let home = env.get_env("HOME").filter(|value| !value.trim().is_empty());
+    if home.is_none() && uses_home_shortcut(raw) {
+        return Err(TokenproxyError::invalid_config(format!(
+            "{field} uses ~ but HOME is not set"
+        )));
+    }
+
+    Ok(shellexpand::tilde_with_context(raw, || home.as_deref()).into_owned())
+}
+
+fn uses_home_shortcut(path: &str) -> bool {
+    path == "~" || path.starts_with("~/")
 }
 
 fn auth_json_location(path: &Path, account_id: &str) -> Result<AuthJsonLocation, TokenproxyError> {
@@ -784,6 +984,7 @@ fn env_value(env: &impl EnvProvider, key: &str) -> Result<String, TokenproxyErro
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     pub fn parse_config(input: &str) -> Result<Config, TokenproxyError> {
         parse_config_value(input)?
@@ -966,6 +1167,41 @@ mod tests {
         );
     }
 
+    async fn model_fixture_base_url(
+        base_path: &'static str,
+        expected_path: &'static str,
+        expected_auth: &'static str,
+        expected_chatgpt_account_id: Option<&'static str>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request.starts_with(&format!("GET {expected_path} HTTP/1.1")),
+                "{request}"
+            );
+            assert!(request.contains(expected_auth), "{request}");
+            if let Some(account_id) = expected_chatgpt_account_id {
+                assert!(
+                    request.contains(&format!("chatgpt-account-id: {account_id}")),
+                    "{request}"
+                );
+            }
+            let body =
+                r#"{"object":"list","data":[{"id":"gpt-5.5"},{"id":"gpt-5.5"},{"id":"gpt-5.4"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://localhost:{port}{base_path}")
+    }
+
     #[test]
     fn should_load_valid_openai_config() {
         let config = parse_config(
@@ -995,6 +1231,94 @@ mod tests {
         assert_eq!(effective.downstream_token, "client");
         assert_eq!(effective.accounts[0].bearer_token, "upstream");
         assert!(effective.config.server.allow_openai_request_headers);
+    }
+
+    #[test]
+    fn should_allow_chatgpt_account_without_static_models() {
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-model-discovery-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.models.clear();
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config_with_account(account), &env(), &files)
+            .expect("ChatGPT models can be discovered after config loading");
+
+        assert!(effective.accounts[0].config.models.is_empty());
+    }
+
+    #[test]
+    fn should_still_reject_anthropic_account_without_model_allowlist() {
+        let mut account = valid_anthropic_account();
+        account.models.clear();
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "must set models for routed generation endpoints",
+        );
+    }
+
+    #[tokio::test]
+    async fn should_discover_chatgpt_models_when_models_are_omitted() {
+        let base_url = model_fixture_base_url(
+            "/backend-api/codex",
+            "/backend-api/codex/models",
+            "authorization: Bearer chatgpt-access",
+            Some("acct_123"),
+        )
+        .await;
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-discover-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.base_url = base_url;
+        account.models.clear();
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access","account_id":"acct_123"}}"#.to_string(),
+        )]));
+        let mut config = config_with_account(account);
+        config.server.allow_insecure_upstream = true;
+
+        let effective = load_effective_config(config, &env(), &files).unwrap();
+        let effective = discover_account_models(effective).await.unwrap();
+
+        assert_eq!(
+            effective.accounts[0].config.models,
+            vec!["gpt-5.4", "gpt-5.5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_filter_discovered_openai_models_by_valid_configured_models() {
+        let base_url =
+            model_fixture_base_url("/v1", "/v1/models", "authorization: Bearer upstream", None)
+                .await;
+        let mut config = config_with_account(AccountConfig {
+            base_url,
+            models: vec!["gpt-5.5".to_string(), "missing-model".to_string()],
+            ..valid_openai_account()
+        });
+        config.server.allow_insecure_upstream = true;
+
+        let effective =
+            load_effective_config(config, &env(), &MemoryFiles(BTreeMap::new())).unwrap();
+        let effective = discover_account_models(effective).await.unwrap();
+
+        assert_eq!(effective.accounts[0].config.models, vec!["gpt-5.5"]);
+    }
+
+    #[test]
+    fn should_ignore_configured_openai_models_when_none_are_valid() {
+        assert_eq!(
+            filter_discovered_models(
+                vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
+                &["missing-model".to_string()],
+            ),
+            vec!["gpt-5.4", "gpt-5.5"]
+        );
     }
 
     #[test]
@@ -1143,16 +1467,16 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_model_routed_account_without_model_allowlist() {
+    fn should_allow_openai_model_routed_account_without_model_allowlist() {
         let mut account = valid_openai_account();
         account.models.clear();
 
-        expect_config_error(
+        load_effective_config(
             config_with_account(account),
             &env(),
             &MemoryFiles(BTreeMap::new()),
-            "must set models for routed generation endpoints",
-        );
+        )
+        .expect("OpenAI accounts can discover models after config loading");
     }
 
     #[test]
@@ -1373,6 +1697,27 @@ mod tests {
             "observability.dump_dir must be set",
         );
 
+        let mut dumps_with_home_dir = config_with_account(valid_openai_account());
+        dumps_with_home_dir.observability.request_body_dumps = true;
+        dumps_with_home_dir.observability.dump_dir = "~/.cache/tokenproxy/dumps".to_string();
+        let mut env_with_home = env();
+        env_with_home.insert("HOME".to_string(), "/Users/tokenproxy".to_string());
+        let effective = load_effective_config(dumps_with_home_dir, &env_with_home, &files).unwrap();
+        assert_eq!(
+            effective.config.observability.dump_dir,
+            "/Users/tokenproxy/.cache/tokenproxy/dumps"
+        );
+
+        let mut dumps_with_missing_home = config_with_account(valid_openai_account());
+        dumps_with_missing_home.observability.request_body_dumps = true;
+        dumps_with_missing_home.observability.dump_dir = "~/.cache/tokenproxy/dumps".to_string();
+        expect_config_error(
+            dumps_with_missing_home,
+            &env(),
+            &files,
+            "observability.dump_dir uses ~ but HOME is not set",
+        );
+
         let mut invalid_redaction = config_with_account(valid_openai_account());
         invalid_redaction
             .observability
@@ -1470,6 +1815,26 @@ mod tests {
     }
 
     #[test]
+    fn should_expand_home_relative_chatgpt_auth_path() {
+        let expanded = PathBuf::from("/Users/tokenproxy/.config/tokenproxy/auth.json");
+        let config = chatgpt_config("~/.config/tokenproxy/auth.json");
+        let mut env = env();
+        env.insert("HOME".to_string(), "/Users/tokenproxy".to_string());
+        let files = MemoryFiles(BTreeMap::from([(
+            expanded.clone(),
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config, &env, &files).unwrap();
+
+        assert_eq!(effective.accounts[0].bearer_token, "chatgpt-access");
+        assert_eq!(
+            effective.accounts[0].config.auth_json_path.as_deref(),
+            Some(expanded.as_path())
+        );
+    }
+
+    #[test]
     fn should_load_chatgpt_auth_json_from_s3_uri() {
         let uri = "s3://tokenproxy-auth/chatgpt/auth.json";
         let sources = MemorySources {
@@ -1509,6 +1874,13 @@ mod tests {
             &env(),
             &files,
             "auth_json_path for chatgpt must be absolute or use s3://",
+        );
+
+        expect_config_error(
+            chatgpt_config("~/missing-auth.json"),
+            &env(),
+            &files,
+            "auth_json_path for chatgpt uses ~ but HOME is not set",
         );
 
         let unreadable_path = PathBuf::from("/tmp/tokenproxy-unreadable-auth.json");

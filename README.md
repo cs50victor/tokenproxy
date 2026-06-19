@@ -27,13 +27,12 @@ Start it with inline config; no config file needed:
   id = "a",
   kind = "openai_api_key",
   token_env = "OPENAI_API_KEY",
-  models = ["gpt-5.5"],
   supports_responses = true,
   supports_responses_ws = true
 }]'
 ```
 
-Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `server.bind` and `server.allow_non_loopback = true`. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
+Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `server.bind` and `server.allow_non_loopback = true`. OpenAI and ChatGPT accounts discover their available models at startup; an optional `models = [...]` list acts as an allowlist over discovered models, with unknown IDs ignored. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
 
 ## Load balancing
 

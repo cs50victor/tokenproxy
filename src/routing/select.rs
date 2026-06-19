@@ -112,7 +112,7 @@ fn static_exclusion_reason(
         return Some(ExclusionReason::EndpointUnsupported);
     }
 
-    if request.endpoint != Endpoint::ResponsesCompact {
+    if request.endpoint != Endpoint::ResponsesCompact && !account.config.models.is_empty() {
         let model = request.model.trim();
         if !model.is_empty()
             && !account
@@ -392,6 +392,19 @@ mod tests {
         let selection = select_account(&[account("compact")], &compact, 1_000);
 
         assert_eq!(selection.selected.unwrap(), "compact");
+        assert!(selection.excluded.is_empty());
+    }
+
+    #[test]
+    fn should_not_model_filter_accounts_without_static_models() {
+        let mut discovered_later = account("discovered-later");
+        discovered_later.config.models.clear();
+        let mut req = request();
+        req.model = "gpt-5.4".to_string();
+
+        let selection = select_account(&[discovered_later], &req, 1_000);
+
+        assert_eq!(selection.selected.unwrap(), "discovered-later");
         assert!(selection.excluded.is_empty());
     }
 
