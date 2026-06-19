@@ -113,6 +113,8 @@ struct UpstreamSession {
     socket: UpstreamWebSocket,
 }
 
+const PASSTHROUGH_METRIC_ENDPOINT: &str = "/v1/passthrough";
+
 #[derive(Debug)]
 enum DownstreamSessionEvent {
     Message(DownstreamMessage),
@@ -525,14 +527,14 @@ async fn proxy_passthrough(State(state): State<AppState>, request: Request<Body>
         .map(|context| context.account_id_hash.as_str())
         .unwrap_or("none");
     state.metrics.record_request_duration_labeled(
-        &path,
+        PASSTHROUGH_METRIC_ENDPOINT,
         "http",
         "passthrough",
         "unknown",
         duration_ms,
     );
     state.metrics.increment_request_outcome(
-        &path,
+        PASSTHROUGH_METRIC_ENDPOINT,
         "http",
         status_class(status),
         "passthrough",
@@ -3476,10 +3478,30 @@ async fn select_next_passthrough_account(
 
 fn passthrough_account_matches_path(account: &EffectiveAccount, path: &str) -> bool {
     match account.config.kind {
-        AccountKind::OpenAiApiKey => path.starts_with("/v1/"),
+        AccountKind::OpenAiApiKey => openai_api_key_passthrough_matches_path(account, path),
         AccountKind::AnthropicApiKey => path == "/v1/messages",
         AccountKind::ChatgptCodexAuthJson => true,
     }
+}
+
+fn openai_api_key_passthrough_matches_path(account: &EffectiveAccount, path: &str) -> bool {
+    if path == "/v1/chat/completions" {
+        return account.config.supports_chat_completions;
+    }
+    if path == "/v1/responses" {
+        return account.config.supports_responses;
+    }
+    if path == "/v1/responses/compact" {
+        return account.config.supports_compact;
+    }
+    if path == "/v1/messages" {
+        return false;
+    }
+    path.starts_with("/v1/")
+        && account.config.supports_chat_completions
+        && account.config.supports_responses
+        && account.config.supports_responses_ws
+        && account.config.supports_compact
 }
 
 async fn record_account_http_status(
@@ -6364,7 +6386,7 @@ data: {"type":"response.custom.future_event"}
         )]))
         .unwrap();
 
-        let response = app(state)
+        let response = app(state.clone())
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -6388,6 +6410,82 @@ data: {"type":"response.custom.future_event"}
             "{request}"
         );
         assert!(request.contains("authorization: Bearer upstream-token"));
+
+        let metrics = state.metrics.snapshot();
+        assert_eq!(
+            metrics.request_outcomes[0].0.endpoint,
+            PASSTHROUGH_METRIC_ENDPOINT
+        );
+    }
+
+    #[tokio::test]
+    async fn should_not_passthrough_unmatched_openai_route_through_narrow_account() {
+        let captured_requests = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_http_upstream(Arc::clone(&captured_requests)).await;
+        let mut narrow = account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        );
+        narrow.config.supports_chat_completions = false;
+        narrow.config.supports_responses = true;
+        narrow.config.supports_responses_ws = false;
+        narrow.config.supports_compact = false;
+        let state = AppState::new(effective_config(vec![narrow])).unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/files")
+                    .header("authorization", "Bearer client-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            captured_requests
+                .lock()
+                .expect("request capture lock is not poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn should_bound_unmatched_fallback_metric_endpoint_label() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/caller-controlled/metric/label")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let metrics = state.metrics.snapshot();
+        assert_eq!(
+            metrics.request_outcomes[0].0.endpoint,
+            PASSTHROUGH_METRIC_ENDPOINT
+        );
+        assert_eq!(
+            metrics.request_duration_labels[0].0.endpoint,
+            PASSTHROUGH_METRIC_ENDPOINT
+        );
     }
 
     #[tokio::test]
