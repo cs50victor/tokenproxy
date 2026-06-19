@@ -1031,8 +1031,6 @@ mod tests {
         assert!(!text.contains("tokenproxy_account_usage_reset_timestamp_seconds"));
     }
 
-    use super::*;
-
     #[test]
     fn should_render_counter_metrics_without_usage_snapshot() {
         let snapshot = MetricsSnapshot {

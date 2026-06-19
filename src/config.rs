@@ -196,10 +196,18 @@ impl AccountConfig {
     }
 
     fn requires_model_allowlist(&self) -> bool {
-        self.supports_chat_completions
-            || self.supports_responses
-            || self.supports_responses_ws
-            || self.supports_anthropic_messages
+        matches!(self.kind, AccountKind::AnthropicApiKey) && self.supports_anthropic_messages
+    }
+
+    fn should_discover_models(&self) -> bool {
+        self.enabled
+            && matches!(
+                self.kind,
+                AccountKind::OpenAiApiKey | AccountKind::ChatgptCodexAuthJson
+            )
+            && (self.supports_chat_completions
+                || self.supports_responses
+                || self.supports_responses_ws)
     }
 }
 
@@ -463,6 +471,148 @@ pub fn load_effective_config(
         downstream_token,
         accounts: enabled_accounts,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamModelList {
+    data: Vec<UpstreamModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpstreamModel {
+    id: String,
+}
+
+pub async fn discover_account_models(
+    mut effective: EffectiveConfig,
+) -> Result<EffectiveConfig, TokenproxyError> {
+    if !effective
+        .accounts
+        .iter()
+        .any(|account| account.config.should_discover_models())
+    {
+        return Ok(effective);
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
+        .build()
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "failed to build model discovery HTTP client: {error}"
+            ))
+        })?;
+    let timeout = Duration::from_millis(effective.config.timeouts.request_header_ms);
+
+    for account in &mut effective.accounts {
+        if !account.config.should_discover_models() {
+            continue;
+        }
+        let discovered = fetch_account_models(&client, account, timeout).await?;
+        account.config.models = filter_discovered_models(discovered, &account.config.models);
+    }
+
+    Ok(effective)
+}
+
+async fn fetch_account_models(
+    client: &reqwest::Client,
+    account: &EffectiveAccount,
+    timeout: Duration,
+) -> Result<Vec<String>, TokenproxyError> {
+    let url = model_discovery_url(account)?;
+    let mut request = client.get(url).bearer_auth(&account.bearer_token);
+    if let Some(account_id) = account.chatgpt_account_id.as_deref() {
+        request = request.header("chatgpt-account-id", account_id);
+    }
+
+    let response = tokio::time::timeout(timeout, request.send())
+        .await
+        .map_err(|_| {
+            TokenproxyError::invalid_config(format!(
+                "model discovery for account {} timed out",
+                account.config.id
+            ))
+        })?
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "model discovery for account {} failed: {error}",
+                account.config.id
+            ))
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "model discovery for account {} failed with HTTP {status}",
+            account.config.id
+        )));
+    }
+
+    let list = response
+        .json::<UpstreamModelList>()
+        .await
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "model discovery for account {} returned invalid JSON: {error}",
+                account.config.id
+            ))
+        })?;
+    let models = list
+        .data
+        .into_iter()
+        .map(|model| model.id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    if models.is_empty() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "model discovery for account {} returned no models",
+            account.config.id
+        )));
+    }
+
+    Ok(models)
+}
+
+fn filter_discovered_models(discovered: Vec<String>, configured: &[String]) -> Vec<String> {
+    if configured.is_empty() {
+        return discovered;
+    }
+
+    let allowlist = configured
+        .iter()
+        .map(|model| model.trim().to_ascii_lowercase())
+        .filter(|model| !model.is_empty())
+        .collect::<BTreeSet<_>>();
+    if allowlist.is_empty() {
+        return discovered;
+    }
+
+    let filtered = discovered
+        .iter()
+        .filter(|model| allowlist.contains(&model.to_ascii_lowercase()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered.is_empty() {
+        discovered
+    } else {
+        filtered
+    }
+}
+
+fn model_discovery_url(account: &EffectiveAccount) -> Result<reqwest::Url, TokenproxyError> {
+    let mut url = reqwest::Url::parse(&account.config.base_url).map_err(|error| {
+        TokenproxyError::invalid_config(format!(
+            "base_url for {} is invalid: {error}",
+            account.config.id
+        ))
+    })?;
+    let base_path = url.path().trim_end_matches('/');
+    url.set_path(&format!("{base_path}/models"));
+    Ok(url)
 }
 
 struct AuthJsonLocation {
@@ -784,6 +934,7 @@ fn env_value(env: &impl EnvProvider, key: &str) -> Result<String, TokenproxyErro
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     pub fn parse_config(input: &str) -> Result<Config, TokenproxyError> {
         parse_config_value(input)?
@@ -966,6 +1117,41 @@ mod tests {
         );
     }
 
+    async fn model_fixture_base_url(
+        base_path: &'static str,
+        expected_path: &'static str,
+        expected_auth: &'static str,
+        expected_chatgpt_account_id: Option<&'static str>,
+    ) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request.starts_with(&format!("GET {expected_path} HTTP/1.1")),
+                "{request}"
+            );
+            assert!(request.contains(expected_auth), "{request}");
+            if let Some(account_id) = expected_chatgpt_account_id {
+                assert!(
+                    request.contains(&format!("chatgpt-account-id: {account_id}")),
+                    "{request}"
+                );
+            }
+            let body =
+                r#"{"object":"list","data":[{"id":"gpt-5.5"},{"id":"gpt-5.5"},{"id":"gpt-5.4"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://localhost:{port}{base_path}")
+    }
+
     #[test]
     fn should_load_valid_openai_config() {
         let config = parse_config(
@@ -995,6 +1181,94 @@ mod tests {
         assert_eq!(effective.downstream_token, "client");
         assert_eq!(effective.accounts[0].bearer_token, "upstream");
         assert!(effective.config.server.allow_openai_request_headers);
+    }
+
+    #[test]
+    fn should_allow_chatgpt_account_without_static_models() {
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-model-discovery-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.models.clear();
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config_with_account(account), &env(), &files)
+            .expect("ChatGPT models can be discovered after config loading");
+
+        assert!(effective.accounts[0].config.models.is_empty());
+    }
+
+    #[test]
+    fn should_still_reject_anthropic_account_without_model_allowlist() {
+        let mut account = valid_anthropic_account();
+        account.models.clear();
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "must set models for routed generation endpoints",
+        );
+    }
+
+    #[tokio::test]
+    async fn should_discover_chatgpt_models_when_models_are_omitted() {
+        let base_url = model_fixture_base_url(
+            "/backend-api/codex",
+            "/backend-api/codex/models",
+            "authorization: Bearer chatgpt-access",
+            Some("acct_123"),
+        )
+        .await;
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-discover-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.base_url = base_url;
+        account.models.clear();
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access","account_id":"acct_123"}}"#.to_string(),
+        )]));
+        let mut config = config_with_account(account);
+        config.server.allow_insecure_upstream = true;
+
+        let effective = load_effective_config(config, &env(), &files).unwrap();
+        let effective = discover_account_models(effective).await.unwrap();
+
+        assert_eq!(
+            effective.accounts[0].config.models,
+            vec!["gpt-5.4", "gpt-5.5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_filter_discovered_openai_models_by_valid_configured_models() {
+        let base_url =
+            model_fixture_base_url("/v1", "/v1/models", "authorization: Bearer upstream", None)
+                .await;
+        let mut config = config_with_account(AccountConfig {
+            base_url,
+            models: vec!["gpt-5.5".to_string(), "missing-model".to_string()],
+            ..valid_openai_account()
+        });
+        config.server.allow_insecure_upstream = true;
+
+        let effective =
+            load_effective_config(config, &env(), &MemoryFiles(BTreeMap::new())).unwrap();
+        let effective = discover_account_models(effective).await.unwrap();
+
+        assert_eq!(effective.accounts[0].config.models, vec!["gpt-5.5"]);
+    }
+
+    #[test]
+    fn should_ignore_configured_openai_models_when_none_are_valid() {
+        assert_eq!(
+            filter_discovered_models(
+                vec!["gpt-5.4".to_string(), "gpt-5.5".to_string()],
+                &["missing-model".to_string()],
+            ),
+            vec!["gpt-5.4", "gpt-5.5"]
+        );
     }
 
     #[test]
@@ -1143,16 +1417,16 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_model_routed_account_without_model_allowlist() {
+    fn should_allow_openai_model_routed_account_without_model_allowlist() {
         let mut account = valid_openai_account();
         account.models.clear();
 
-        expect_config_error(
+        load_effective_config(
             config_with_account(account),
             &env(),
             &MemoryFiles(BTreeMap::new()),
-            "must set models for routed generation endpoints",
-        );
+        )
+        .expect("OpenAI accounts can discover models after config loading");
     }
 
     #[test]

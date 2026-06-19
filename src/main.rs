@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use clap::{ArgAction, Parser};
 use tokenproxy::config::{
-    EffectiveConfig, ProcessEnv, StdFileProvider, load_effective_config,
+    EffectiveConfig, ProcessEnv, StdFileProvider, discover_account_models, load_effective_config,
     parse_config_with_cli_overrides,
 };
 use tokenproxy::error::TokenproxyError;
@@ -69,6 +69,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     }
     let bind = config.server.bind;
     let effective = load_effective_config(config, &ProcessEnv, &StdFileProvider)?;
+    let effective = discover_account_models(effective).await?;
     let log_format = if cli.log_json {
         LogFormat::Json
     } else {
