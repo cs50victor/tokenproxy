@@ -2008,17 +2008,21 @@ pub fn parse_chatgpt_auth_json(input: &str) -> Result<ChatGptAuth, TokenproxyErr
 
     let tokens = value.get("tokens").unwrap_or(&Value::Null);
     // Codex sends the OAuth access_token as the upstream bearer; the OIDC
-    // id_token is an identity assertion, not an API credential.
+    // id_token is an identity assertion, not an API credential. CLIProxyAPI
+    // stores the same token fields at the top level.
     let bearer_token = string_field(tokens, "access_token")
+        .or_else(|| string_field(&value, "access_token"))
         .or_else(|| string_field(&value, "OPENAI_API_KEY"))
         .or_else(|| string_field(tokens, "id_token"))
+        .or_else(|| string_field(&value, "id_token"))
         .ok_or_else(|| {
             TokenproxyError::invalid_config("auth_json_path lacks ChatGPT token data")
         })?;
 
     Ok(ChatGptAuth {
         bearer_token,
-        account_id: string_field(tokens, "account_id"),
+        account_id: string_field(tokens, "account_id")
+            .or_else(|| string_field(&value, "account_id")),
     })
 }
 
@@ -2038,6 +2042,17 @@ mod auth_tests {
     fn should_use_access_token_as_upstream_bearer_for_codex_auth_json() {
         let auth = parse_chatgpt_auth_json(
             r#"{"auth_mode":"chatgpt","last_refresh":"2026-05-27T11:24:18Z","tokens":{"id_token":"id","access_token":"access","refresh_token":"refresh","account_id":"acct"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(auth.bearer_token, "access");
+        assert_eq!(auth.account_id.as_deref(), Some("acct"));
+    }
+
+    #[test]
+    fn should_use_top_level_access_token_for_cli_proxy_codex_auth_json() {
+        let auth = parse_chatgpt_auth_json(
+            r#"{"type":"codex","email":"user@example.com","last_refresh":"2026-05-27T11:24:18Z","access_token":"access","id_token":"id","refresh_token":"refresh","account_id":"acct"}"#,
         )
         .unwrap();
 
