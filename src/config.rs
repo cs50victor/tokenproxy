@@ -160,6 +160,7 @@ pub struct AccountConfig {
     pub supports_anthropic_messages: bool,
     pub service_tiers: Vec<String>,
     pub prompt_cache_key_seed_env: Option<String>,
+    pub codex_client_version: Option<String>,
 }
 
 impl Default for AccountConfig {
@@ -182,6 +183,7 @@ impl Default for AccountConfig {
             supports_anthropic_messages: false,
             service_tiers: vec!["auto".to_string(), "default".to_string()],
             prompt_cache_key_seed_env: None,
+            codex_client_version: None,
         }
     }
 }
@@ -493,6 +495,8 @@ struct UpstreamModel {
     slug: Option<String>,
 }
 
+const DEFAULT_CHATGPT_CODEX_CLIENT_VERSION: &str = "0.141.0";
+
 pub async fn discover_account_models(
     mut effective: EffectiveConfig,
 ) -> Result<EffectiveConfig, TokenproxyError> {
@@ -533,7 +537,9 @@ async fn fetch_account_models(
     let url = model_discovery_url(account)?;
     let mut request = client.get(url).bearer_auth(&account.bearer_token);
     if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
-        request = request.header(reqwest::header::USER_AGENT, "codex-cli");
+        request = request
+            .header(reqwest::header::USER_AGENT, "codex-cli")
+            .header("originator", "codex_cli_rs");
     }
     if let Some(account_id) = account.chatgpt_account_id.as_deref() {
         request = request.header("chatgpt-account-id", account_id);
@@ -599,17 +605,19 @@ fn model_discovery_url(account: &EffectiveAccount) -> Result<reqwest::Url, Token
             account.config.id
         ))
     })?;
-    let base_path = url.path().trim_end_matches('/');
-    let model_base_path = if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
-        base_path.strip_suffix("/codex").unwrap_or(base_path)
-    } else {
-        base_path
-    };
-    url.set_path(&format!("{model_base_path}/models"));
     if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
-        // Matches Codex's preview API query param: https://github.com/openai/codex/blob/main/codex-rs/core/tests/suite/client.rs#L3051
+        let base_path = url.path().trim_end_matches('/');
+        url.set_path(&format!("{base_path}/models"));
+        let client_version = account
+            .config
+            .codex_client_version
+            .as_deref()
+            .unwrap_or(DEFAULT_CHATGPT_CODEX_CLIENT_VERSION);
         url.query_pairs_mut()
-            .append_pair("api-version", "2025-04-01-preview");
+            .append_pair("client_version", client_version);
+    } else {
+        let base_path = url.path().trim_end_matches('/');
+        url.set_path(&format!("{base_path}/models"));
     }
     Ok(url)
 }
@@ -1186,6 +1194,7 @@ mod tests {
                     "{request}"
                 );
                 assert!(request.contains("user-agent: codex-cli"), "{request}");
+                assert!(request.contains("originator: codex_cli_rs"), "{request}");
             }
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
@@ -1260,7 +1269,7 @@ mod tests {
     async fn should_discover_chatgpt_models_when_models_are_omitted() {
         let base_url = model_fixture_base_url(
             "/backend-api/codex",
-            "/backend-api/models?api-version=2025-04-01-preview",
+            "/backend-api/codex/models?client_version=0.141.0",
             "authorization: Bearer chatgpt-access",
             Some("acct_123"),
             r#"{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.5"},{"slug":"gpt-5.4"}]}"#,
@@ -1284,6 +1293,34 @@ mod tests {
             effective.accounts[0].config.models,
             vec!["gpt-5.4", "gpt-5.5"]
         );
+    }
+
+    #[tokio::test]
+    async fn should_use_configured_codex_client_version_for_chatgpt_model_discovery() {
+        let base_url = model_fixture_base_url(
+            "/backend-api/codex",
+            "/backend-api/codex/models?client_version=0.142.0",
+            "authorization: Bearer chatgpt-access",
+            Some("acct_123"),
+            r#"{"models":[{"slug":"gpt-5.5"}]}"#,
+        )
+        .await;
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-discover-version-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.base_url = base_url;
+        account.codex_client_version = Some("0.142.0".to_string());
+        account.models.clear();
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access","account_id":"acct_123"}}"#.to_string(),
+        )]));
+        let mut config = config_with_account(account);
+        config.server.allow_insecure_upstream = true;
+
+        let effective = load_effective_config(config, &env(), &files).unwrap();
+        let effective = discover_account_models(effective).await.unwrap();
+
+        assert_eq!(effective.accounts[0].config.models, vec!["gpt-5.5"]);
     }
 
     #[tokio::test]
