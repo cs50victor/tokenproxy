@@ -452,11 +452,18 @@ pub fn load_effective_config(
                 )?;
                 let chatgpt_auth = parse_chatgpt_auth_json(&raw)?;
 
+                let mut account_config = account.clone();
+                account_config.auth_json_path = Some(expanded_path);
+                if !account_config
+                    .service_tiers
+                    .iter()
+                    .any(|tier| tier.trim().eq_ignore_ascii_case("priority"))
+                {
+                    account_config.service_tiers.push("priority".to_string());
+                }
+
                 EffectiveAccount {
-                    config: AccountConfig {
-                        auth_json_path: Some(expanded_path),
-                        ..account.clone()
-                    },
+                    config: account_config,
                     bearer_token: chatgpt_auth.bearer_token,
                     chatgpt_account_id: chatgpt_auth.account_id,
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
@@ -1250,6 +1257,27 @@ mod tests {
             .expect("ChatGPT models can be discovered after config loading");
 
         assert!(effective.accounts[0].config.models.is_empty());
+    }
+
+    #[test]
+    fn should_allow_chatgpt_codex_priority_service_tier_by_default() {
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-priority-auth.json");
+        let account = valid_chatgpt_account("chatgpt", path.clone());
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config_with_account(account), &env(), &files)
+            .expect("ChatGPT Codex account loads");
+
+        assert!(
+            effective.accounts[0]
+                .config
+                .service_tiers
+                .iter()
+                .any(|tier| tier == "priority")
+        );
     }
 
     #[test]
