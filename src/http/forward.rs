@@ -1,4 +1,6 @@
-use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue};
+use axum::http::header::{
+    AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue, USER_AGENT,
+};
 use axum::http::{HeaderMap, StatusCode};
 
 use crate::error::{ErrorCode, TokenproxyError};
@@ -18,7 +20,8 @@ const HOP_BY_HOP: &[&str] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamAuth {
-    Bearer,
+    OpenAiBearer,
+    ChatGptBearer,
     AnthropicApiKey,
 }
 
@@ -55,18 +58,21 @@ pub fn build_upstream_headers(
 
     output.insert(HOST, header_value(upstream_host, "upstream host")?);
     match auth {
-        UpstreamAuth::Bearer => {
+        UpstreamAuth::OpenAiBearer | UpstreamAuth::ChatGptBearer => {
             let mut authorization =
                 header_value(&format!("Bearer {upstream_token}"), "authorization")?;
             authorization.set_sensitive(true);
             output.insert(AUTHORIZATION, authorization);
-            // ChatGPT Codex auth pairs the OAuth access-token bearer with the
-            // workspace id header; see codex-rs model-provider BearerAuthProvider.
-            if let Some(account_id) = chatgpt_account_id {
-                output.insert(
-                    HeaderName::from_static("chatgpt-account-id"),
-                    header_value(account_id, "chatgpt account id")?,
-                );
+            if matches!(auth, UpstreamAuth::ChatGptBearer) {
+                output.insert(USER_AGENT, HeaderValue::from_static("codex-cli"));
+                // ChatGPT Codex auth pairs the OAuth access-token bearer with the
+                // workspace id header; see codex-rs model-provider BearerAuthProvider.
+                if let Some(account_id) = chatgpt_account_id {
+                    output.insert(
+                        HeaderName::from_static("chatgpt-account-id"),
+                        header_value(account_id, "chatgpt account id")?,
+                    );
+                }
             }
         }
         UpstreamAuth::AnthropicApiKey => {
@@ -146,7 +152,7 @@ mod tests {
             "upstream",
             Some("acct_123"),
             "req_1",
-            UpstreamAuth::Bearer,
+            UpstreamAuth::ChatGptBearer,
             false,
         )
         .unwrap();
@@ -154,6 +160,7 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer upstream");
         assert!(headers["authorization"].is_sensitive());
         assert_eq!(headers["chatgpt-account-id"], "acct_123");
+        assert_eq!(headers["user-agent"], "codex-cli");
         assert_eq!(headers["host"], "api.openai.com");
         assert_eq!(headers["x-tokenproxy-request-id"], "req_1");
         assert!(!headers.contains_key("connection"));
@@ -174,7 +181,7 @@ mod tests {
             "upstream",
             None,
             "req_1",
-            UpstreamAuth::Bearer,
+            UpstreamAuth::OpenAiBearer,
             true,
         )
         .unwrap();
@@ -182,6 +189,7 @@ mod tests {
         assert_eq!(headers["openai-organization"], "org_client");
         assert_eq!(headers["openai-project"], "proj_client");
         assert!(!headers.contains_key("openai-unknown"));
+        assert!(!headers.contains_key("user-agent"));
     }
 
     #[test]

@@ -1547,6 +1547,11 @@ async fn ensure_upstream_session(
             .headers_mut()
             .insert("chatgpt-account-id", header_value_from_str(account_id)?);
     }
+    if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+        request
+            .headers_mut()
+            .insert("user-agent", HeaderValue::from_static("codex-cli"));
+    }
     request.headers_mut().insert(
         "x-tokenproxy-request-id",
         header_value_from_str(request_id)?,
@@ -1972,7 +1977,8 @@ async fn forward_to_upstream(
         forward.request_id,
         match account.config.kind {
             AccountKind::AnthropicApiKey => UpstreamAuth::AnthropicApiKey,
-            AccountKind::OpenAiApiKey | AccountKind::ChatgptCodexAuthJson => UpstreamAuth::Bearer,
+            AccountKind::OpenAiApiKey => UpstreamAuth::OpenAiBearer,
+            AccountKind::ChatgptCodexAuthJson => UpstreamAuth::ChatGptBearer,
         },
         state.effective.config.server.allow_openai_request_headers,
     )?;
