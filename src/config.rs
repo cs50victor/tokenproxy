@@ -400,6 +400,7 @@ pub fn load_effective_config(
     env: &impl EnvProvider,
     files: &impl FileProvider,
 ) -> Result<EffectiveConfig, TokenproxyError> {
+    let config = expand_config_paths(config, env)?;
     validate_static_config(&config)?;
     let downstream_token = env_value(env, &config.downstream_auth.token_env)?;
 
@@ -431,7 +432,8 @@ pub fn load_effective_config(
                     ))
                 })?;
 
-                let location = auth_json_location(path, &account.id)?;
+                let expanded_path = expand_user_path(path, &account.id, env)?;
+                let location = auth_json_location(&expanded_path, &account.id)?;
                 if !auth_json_locations.insert(location.key.clone()) {
                     return Err(TokenproxyError::invalid_config(format!(
                         "auth_json_path reused by enabled account {}",
@@ -448,7 +450,10 @@ pub fn load_effective_config(
                 let chatgpt_auth = parse_chatgpt_auth_json(&raw)?;
 
                 EffectiveAccount {
-                    config: account.clone(),
+                    config: AccountConfig {
+                        auth_json_path: Some(expanded_path),
+                        ..account.clone()
+                    },
                     bearer_token: chatgpt_auth.bearer_token,
                     chatgpt_account_id: chatgpt_auth.account_id,
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
@@ -623,6 +628,51 @@ struct AuthJsonLocation {
 enum AuthJsonSource {
     Local(PathBuf),
     S3(String),
+}
+
+fn expand_user_path(
+    path: &Path,
+    account_id: &str,
+    env: &impl EnvProvider,
+) -> Result<PathBuf, TokenproxyError> {
+    let raw = path.to_string_lossy();
+    let expanded = expand_user_path_value(
+        raw.as_ref(),
+        &format!("auth_json_path for {account_id}"),
+        env,
+    )?;
+    Ok(PathBuf::from(expanded))
+}
+
+fn expand_config_paths(
+    mut config: Config,
+    env: &impl EnvProvider,
+) -> Result<Config, TokenproxyError> {
+    config.observability.dump_dir = expand_user_path_value(
+        &config.observability.dump_dir,
+        "observability.dump_dir",
+        env,
+    )?;
+    Ok(config)
+}
+
+fn expand_user_path_value(
+    raw: &str,
+    field: &str,
+    env: &impl EnvProvider,
+) -> Result<String, TokenproxyError> {
+    let home = env.get_env("HOME").filter(|value| !value.trim().is_empty());
+    if home.is_none() && uses_home_shortcut(raw) {
+        return Err(TokenproxyError::invalid_config(format!(
+            "{field} uses ~ but HOME is not set"
+        )));
+    }
+
+    Ok(shellexpand::tilde_with_context(raw, || home.as_deref()).into_owned())
+}
+
+fn uses_home_shortcut(path: &str) -> bool {
+    path == "~" || path.starts_with("~/")
 }
 
 fn auth_json_location(path: &Path, account_id: &str) -> Result<AuthJsonLocation, TokenproxyError> {
@@ -1647,6 +1697,27 @@ mod tests {
             "observability.dump_dir must be set",
         );
 
+        let mut dumps_with_home_dir = config_with_account(valid_openai_account());
+        dumps_with_home_dir.observability.request_body_dumps = true;
+        dumps_with_home_dir.observability.dump_dir = "~/.cache/tokenproxy/dumps".to_string();
+        let mut env_with_home = env();
+        env_with_home.insert("HOME".to_string(), "/Users/tokenproxy".to_string());
+        let effective = load_effective_config(dumps_with_home_dir, &env_with_home, &files).unwrap();
+        assert_eq!(
+            effective.config.observability.dump_dir,
+            "/Users/tokenproxy/.cache/tokenproxy/dumps"
+        );
+
+        let mut dumps_with_missing_home = config_with_account(valid_openai_account());
+        dumps_with_missing_home.observability.request_body_dumps = true;
+        dumps_with_missing_home.observability.dump_dir = "~/.cache/tokenproxy/dumps".to_string();
+        expect_config_error(
+            dumps_with_missing_home,
+            &env(),
+            &files,
+            "observability.dump_dir uses ~ but HOME is not set",
+        );
+
         let mut invalid_redaction = config_with_account(valid_openai_account());
         invalid_redaction
             .observability
@@ -1744,6 +1815,26 @@ mod tests {
     }
 
     #[test]
+    fn should_expand_home_relative_chatgpt_auth_path() {
+        let expanded = PathBuf::from("/Users/tokenproxy/.config/tokenproxy/auth.json");
+        let config = chatgpt_config("~/.config/tokenproxy/auth.json");
+        let mut env = env();
+        env.insert("HOME".to_string(), "/Users/tokenproxy".to_string());
+        let files = MemoryFiles(BTreeMap::from([(
+            expanded.clone(),
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config, &env, &files).unwrap();
+
+        assert_eq!(effective.accounts[0].bearer_token, "chatgpt-access");
+        assert_eq!(
+            effective.accounts[0].config.auth_json_path.as_deref(),
+            Some(expanded.as_path())
+        );
+    }
+
+    #[test]
     fn should_load_chatgpt_auth_json_from_s3_uri() {
         let uri = "s3://tokenproxy-auth/chatgpt/auth.json";
         let sources = MemorySources {
@@ -1783,6 +1874,13 @@ mod tests {
             &env(),
             &files,
             "auth_json_path for chatgpt must be absolute or use s3://",
+        );
+
+        expect_config_error(
+            chatgpt_config("~/missing-auth.json"),
+            &env(),
+            &files,
+            "auth_json_path for chatgpt uses ~ but HOME is not set",
         );
 
         let unreadable_path = PathBuf::from("/tmp/tokenproxy-unreadable-auth.json");
