@@ -6,6 +6,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use tokio::sync::{Mutex, watch};
 
+use crate::auth::{ChatGptAuthCell, ChatGptAuthSnapshot, chatgpt_auth_cells};
 use crate::config::{EffectiveAccount, EffectiveConfig};
 use crate::error::{ErrorCode, TokenproxyError};
 use crate::logging::{
@@ -25,6 +26,7 @@ pub struct AppState {
     pub(super) metrics: Metrics,
     pub(super) usage_windows: Arc<Mutex<BTreeMap<String, Vec<UsageWindow>>>>,
     account_health: Arc<BTreeMap<String, Arc<AccountHealthCell>>>,
+    chatgpt_auth: Arc<BTreeMap<String, Arc<ChatGptAuthCell>>>,
     log_format: LogFormat,
     shutdown_tx: watch::Sender<bool>,
 }
@@ -191,6 +193,7 @@ impl AppState {
                 .map(|account| (account.id.clone(), Arc::new(AccountHealthCell::new())))
                 .collect(),
         );
+        let chatgpt_auth = Arc::new(chatgpt_auth_cells(&effective)?);
         let metrics_enabled = effective.config.observability.metrics;
 
         Ok(Self {
@@ -200,6 +203,7 @@ impl AppState {
             metrics: Metrics::with_enabled(metrics_enabled),
             usage_windows: Arc::new(Mutex::new(BTreeMap::new())),
             account_health,
+            chatgpt_auth,
             log_format,
             shutdown_tx,
         })
@@ -284,6 +288,46 @@ impl AppState {
             })
             .collect()
     }
+
+    pub(super) async fn account_for_request(&self, account: &EffectiveAccount) -> EffectiveAccount {
+        let Some(cell) = self.chatgpt_auth.get(&account.config.id) else {
+            return account.clone();
+        };
+        apply_chatgpt_auth_snapshot(
+            account,
+            cell.snapshot_for_request(&self.upstream_client).await,
+        )
+    }
+
+    pub(super) async fn recover_chatgpt_unauthorized(
+        &self,
+        account: &EffectiveAccount,
+    ) -> Result<Option<EffectiveAccount>, TokenproxyError> {
+        let Some(cell) = self.chatgpt_auth.get(&account.config.id) else {
+            return Ok(None);
+        };
+        let snapshot = cell
+            .recover_after_unauthorized(&self.upstream_client, &account.bearer_token)
+            .await?;
+        self.store_account_health(&account.config.id, AccountHealth::Open);
+        Ok(Some(apply_chatgpt_auth_snapshot(account, snapshot)))
+    }
+
+    pub(super) fn chatgpt_bearer_authorized(&self, actual: &str) -> bool {
+        self.chatgpt_auth
+            .values()
+            .any(|cell| cell.bearer_matches(actual))
+    }
+}
+
+fn apply_chatgpt_auth_snapshot(
+    account: &EffectiveAccount,
+    snapshot: ChatGptAuthSnapshot,
+) -> EffectiveAccount {
+    let mut account = account.clone();
+    account.bearer_token = snapshot.bearer_token;
+    account.chatgpt_account_id = snapshot.account_id;
+    account
 }
 
 #[cfg(test)]
