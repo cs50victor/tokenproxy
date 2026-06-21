@@ -118,8 +118,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         },)
     );
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let state =
-        AppState::new_with_status(effective, log_format, shutdown_tx.clone(), config_status)?;
+    let state = AppState::new_with_status_and_overrides(
+        effective,
+        log_format,
+        shutdown_tx.clone(),
+        config_status,
+        cli.config_overrides,
+    )?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| CliError::Io {
@@ -187,11 +192,14 @@ fn default_config_fetch_timeout() -> Duration {
 
 fn initial_config_status(path: Option<&std::path::Path>, raw_config: Option<&str>) -> ConfigStatus {
     ConfigStatus {
+        revision: None,
         config_sha256: sha256_hex(raw_config.unwrap_or_default().as_bytes()),
         config_source: path
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| "inline".to_string()),
         loaded_at: now_timestamp_pair().utc,
+        reload_in_progress: false,
+        last_reload_error: None,
     }
 }
 

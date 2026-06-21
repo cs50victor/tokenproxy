@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -19,33 +20,41 @@ use crate::usage::UsageWindow;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub(super) effective: Arc<EffectiveConfig>,
+    effective: Arc<RwLock<Arc<EffectiveConfig>>>,
     // reqwest pools connections per origin internally, so one shared client
     // covers every upstream.
     pub(super) upstream_client: reqwest::Client,
     request_counter: Arc<AtomicU64>,
     pub(super) metrics: Metrics,
     pub(super) usage_windows: Arc<Mutex<BTreeMap<String, Vec<UsageWindow>>>>,
-    account_health: Arc<BTreeMap<String, Arc<AccountHealthCell>>>,
-    chatgpt_auth: Arc<BTreeMap<String, Arc<ChatGptAuthCell>>>,
-    config_status: Arc<ConfigStatus>,
+    account_health: Arc<RwLock<BTreeMap<String, Arc<AccountHealthCell>>>>,
+    chatgpt_auth: Arc<RwLock<BTreeMap<String, Arc<ChatGptAuthCell>>>>,
+    config_status: Arc<RwLock<ConfigStatus>>,
+    reload_in_progress: Arc<AtomicBool>,
+    config_overrides: Arc<Vec<String>>,
     log_format: LogFormat,
     shutdown_tx: watch::Sender<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ConfigStatus {
+    pub revision: Option<u64>,
     pub config_sha256: String,
     pub config_source: String,
     pub loaded_at: String,
+    pub reload_in_progress: bool,
+    pub last_reload_error: Option<String>,
 }
 
 impl Default for ConfigStatus {
     fn default() -> Self {
         Self {
+            revision: None,
             config_sha256: String::new(),
             config_source: "inline".to_string(),
             loaded_at: String::new(),
+            reload_in_progress: false,
+            last_reload_error: None,
         }
     }
 }
@@ -200,6 +209,22 @@ impl AppState {
         shutdown_tx: watch::Sender<bool>,
         config_status: ConfigStatus,
     ) -> Result<Self, TokenproxyError> {
+        Self::new_with_status_and_overrides(
+            effective,
+            log_format,
+            shutdown_tx,
+            config_status,
+            Vec::new(),
+        )
+    }
+
+    pub fn new_with_status_and_overrides(
+        effective: EffectiveConfig,
+        log_format: LogFormat,
+        shutdown_tx: watch::Sender<bool>,
+        config_status: ConfigStatus,
+        config_overrides: Vec<String>,
+    ) -> Result<Self, TokenproxyError> {
         let upstream_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
             .pool_idle_timeout(Duration::from_millis(
@@ -213,26 +238,22 @@ impl AppState {
                     format!("failed to build upstream HTTP client: {error}"),
                 )
             })?;
-        let account_health = Arc::new(
-            effective
-                .config
-                .accounts
-                .iter()
-                .map(|account| (account.id.clone(), Arc::new(AccountHealthCell::new())))
-                .collect(),
-        );
-        let chatgpt_auth = Arc::new(chatgpt_auth_cells(&effective)?);
+        let account_health = account_health_cells(&effective);
+        let chatgpt_auth = chatgpt_auth_cells(&effective)?;
         let metrics_enabled = effective.config.observability.metrics;
+        let effective = Arc::new(effective);
 
         Ok(Self {
-            effective: Arc::new(effective),
+            effective: Arc::new(RwLock::new(effective)),
             upstream_client,
             request_counter: Arc::new(AtomicU64::new(1)),
             metrics: Metrics::with_enabled(metrics_enabled),
             usage_windows: Arc::new(Mutex::new(BTreeMap::new())),
-            account_health,
-            chatgpt_auth,
-            config_status: Arc::new(config_status),
+            account_health: Arc::new(RwLock::new(account_health)),
+            chatgpt_auth: Arc::new(RwLock::new(chatgpt_auth)),
+            config_status: Arc::new(RwLock::new(config_status)),
+            reload_in_progress: Arc::new(AtomicBool::new(false)),
+            config_overrides: Arc::new(config_overrides),
             log_format,
             shutdown_tx,
         })
@@ -255,12 +276,23 @@ impl AppState {
         self.shutdown_tx.subscribe()
     }
 
-    pub(super) fn routing_accounts(&self) -> &[EffectiveAccount] {
-        &self.effective.accounts
+    pub(super) fn effective(&self) -> Arc<EffectiveConfig> {
+        self.effective
+            .read()
+            .expect("effective config lock poisoned")
+            .clone()
+    }
+
+    pub(super) fn routing_accounts(&self) -> Vec<EffectiveAccount> {
+        self.effective().accounts.clone()
     }
 
     pub(super) fn account_health_cell(&self, account_id: &str) -> Option<Arc<AccountHealthCell>> {
-        self.account_health.get(account_id).cloned()
+        self.account_health
+            .read()
+            .expect("account health lock poisoned")
+            .get(account_id)
+            .cloned()
     }
 
     pub(super) fn store_account_health(&self, account_id: &str, health: AccountHealth) {
@@ -306,6 +338,8 @@ impl AppState {
 
     pub(super) fn account_health_snapshot(&self) -> BTreeMap<String, AccountHealth> {
         self.account_health
+            .read()
+            .expect("account health lock poisoned")
             .iter()
             .filter_map(|(account_id, cell)| {
                 let health = cell.load();
@@ -319,11 +353,101 @@ impl AppState {
     }
 
     pub(super) fn config_status(&self) -> ConfigStatus {
-        (*self.config_status).clone()
+        self.config_status
+            .read()
+            .expect("config status lock poisoned")
+            .clone()
+    }
+
+    pub(super) fn config_overrides(&self) -> &[String] {
+        self.config_overrides.as_slice()
+    }
+
+    pub(super) fn try_begin_reload(&self) -> bool {
+        self.reload_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn finish_reload(&self) {
+        self.reload_in_progress.store(false, Ordering::Release);
+        let mut status = self
+            .config_status
+            .write()
+            .expect("config status lock poisoned");
+        status.reload_in_progress = false;
+    }
+
+    pub(super) fn set_reload_error(&self, error: String) {
+        let mut status = self
+            .config_status
+            .write()
+            .expect("config status lock poisoned");
+        status.reload_in_progress = false;
+        status.last_reload_error = Some(error);
+    }
+
+    pub(super) fn set_reload_in_progress(&self) {
+        let mut status = self
+            .config_status
+            .write()
+            .expect("config status lock poisoned");
+        status.reload_in_progress = true;
+        status.last_reload_error = None;
+    }
+
+    pub(super) fn swap_effective(
+        &self,
+        effective: EffectiveConfig,
+        status: ConfigStatus,
+    ) -> Result<(), TokenproxyError> {
+        let chatgpt_auth = chatgpt_auth_cells(&effective)?;
+        let account_health = {
+            let current = self
+                .account_health
+                .read()
+                .expect("account health lock poisoned");
+            effective
+                .config
+                .accounts
+                .iter()
+                .map(|account| {
+                    let cell = current
+                        .get(&account.id)
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(AccountHealthCell::new()));
+                    (account.id.clone(), cell)
+                })
+                .collect()
+        };
+
+        *self
+            .effective
+            .write()
+            .expect("effective config lock poisoned") = Arc::new(effective);
+        *self
+            .account_health
+            .write()
+            .expect("account health lock poisoned") = account_health;
+        *self
+            .chatgpt_auth
+            .write()
+            .expect("chatgpt auth lock poisoned") = chatgpt_auth;
+        *self
+            .config_status
+            .write()
+            .expect("config status lock poisoned") = status;
+        Ok(())
     }
 
     pub(super) async fn account_for_request(&self, account: &EffectiveAccount) -> EffectiveAccount {
-        let Some(cell) = self.chatgpt_auth.get(&account.config.id) else {
+        let Some(cell) = self
+            .chatgpt_auth
+            .read()
+            .expect("chatgpt auth lock poisoned")
+            .get(&account.config.id)
+            .cloned()
+        else {
             return account.clone();
         };
         apply_chatgpt_auth_snapshot(
@@ -336,7 +460,13 @@ impl AppState {
         &self,
         account: &EffectiveAccount,
     ) -> Result<Option<EffectiveAccount>, TokenproxyError> {
-        let Some(cell) = self.chatgpt_auth.get(&account.config.id) else {
+        let Some(cell) = self
+            .chatgpt_auth
+            .read()
+            .expect("chatgpt auth lock poisoned")
+            .get(&account.config.id)
+            .cloned()
+        else {
             return Ok(None);
         };
         let snapshot = cell
@@ -348,9 +478,20 @@ impl AppState {
 
     pub(super) fn chatgpt_bearer_authorized(&self, actual: &str) -> bool {
         self.chatgpt_auth
+            .read()
+            .expect("chatgpt auth lock poisoned")
             .values()
             .any(|cell| cell.bearer_matches(actual))
     }
+}
+
+fn account_health_cells(effective: &EffectiveConfig) -> BTreeMap<String, Arc<AccountHealthCell>> {
+    effective
+        .config
+        .accounts
+        .iter()
+        .map(|account| (account.id.clone(), Arc::new(AccountHealthCell::new())))
+        .collect()
 }
 
 fn apply_chatgpt_auth_snapshot(
@@ -387,5 +528,71 @@ pub mod tests {
         assert_eq!(cell.increment_transient_failure_count_at(1_000), 1);
         assert_eq!(cell.increment_transient_failure_count_at(2_000), 2);
         assert_eq!(cell.increment_transient_failure_count_at(302_000), 1);
+    }
+
+    #[test]
+    fn should_preserve_health_for_unchanged_accounts_after_swap() {
+        let first = effective_config_for_state_tests(&["keep", "remove"]);
+        let state = AppState::new(first).unwrap();
+        state.store_account_health("keep", AccountHealth::AuthFailed);
+        state.store_account_health(
+            "remove",
+            AccountHealth::Throttled {
+                next_retry_at_ms: 100,
+            },
+        );
+
+        state
+            .swap_effective(
+                effective_config_for_state_tests(&["keep", "add"]),
+                ConfigStatus::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.account_health_cell("keep").unwrap().load(),
+            AccountHealth::AuthFailed
+        );
+        assert_eq!(
+            state.account_health_cell("add").unwrap().load(),
+            AccountHealth::Open
+        );
+        assert!(state.account_health_cell("remove").is_none());
+    }
+
+    fn effective_config_for_state_tests(account_ids: &[&str]) -> EffectiveConfig {
+        let mut config = crate::config::Config::default();
+        config.server.allow_insecure_upstream = true;
+        config.accounts = account_ids
+            .iter()
+            .map(|account_id| crate::config::AccountConfig {
+                id: (*account_id).to_string(),
+                kind: crate::config::AccountKind::MainroomPeer,
+                base_url: "http://127.0.0.1:1/v1".to_string(),
+                models: vec!["gpt-5.5".to_string()],
+                supports_responses: true,
+                ..crate::config::AccountConfig::default()
+            })
+            .collect();
+        let accounts = config
+            .accounts
+            .iter()
+            .cloned()
+            .map(|account| EffectiveAccount {
+                config: account,
+                bearer_token: String::new(),
+                chatgpt_account_id: None,
+                auth_json: None,
+                prompt_cache_key_seed: None,
+            })
+            .collect();
+        EffectiveConfig {
+            config,
+            config_update_endpoint: None,
+            admin_token: Some("admin-key".to_string()),
+            downstream_token: "client-key".to_string(),
+            account_hash_key: "hash-key".to_string(),
+            accounts,
+        }
     }
 }

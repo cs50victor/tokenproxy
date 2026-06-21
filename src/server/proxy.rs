@@ -22,6 +22,7 @@ use eventsource_stream::{EventStream, Eventsource};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -33,7 +34,10 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::auth::bearer_header_matches;
 use crate::config::RetryConfig;
-use crate::config::{AccountKind, EffectiveAccount};
+use crate::config::{
+    AccountKind, EffectiveAccount, FileProvider, ProcessEnv, StdFileProvider,
+    discover_account_models, load_effective_config, parse_config_with_cli_overrides,
+};
 use crate::error::{ErrorCode, TokenproxyError};
 use crate::http::classify::{RequestShape, classify_request};
 use crate::http::forward::{
@@ -66,7 +70,7 @@ use crate::usage::{
     usage_windows_from_usage_limit_error_value,
 };
 
-use super::state::AppState;
+use super::state::{AppState, ConfigStatus};
 
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type DownstreamWebSocketSink = SplitSink<WebSocket, DownstreamMessage>;
@@ -206,6 +210,10 @@ pub fn app(state: AppState) -> Router {
             get(admin_config_status).fallback(authenticated_method_not_allowed),
         )
         .route(
+            "/admin/config/reload",
+            post(admin_config_reload).fallback(authenticated_method_not_allowed),
+        )
+        .route(
             "/v1/models",
             get(models).fallback(authenticated_method_not_allowed),
         )
@@ -243,7 +251,7 @@ async fn metrics(
     headers: HeaderMap,
 ) -> Result<Response, TokenproxyError> {
     require_auth(&state, &headers)?;
-    if !state.effective.config.observability.metrics {
+    if !state.effective().config.observability.metrics {
         return Err(TokenproxyError::new(
             StatusCode::NOT_FOUND,
             ErrorCode::UnsupportedRoute,
@@ -254,12 +262,12 @@ async fn metrics(
     let account_health = state.account_health_snapshot();
     let observed_at = now_rfc3339();
     let snapshot = usage_snapshot(
-        &state.effective.config.server.id,
+        &state.effective().config.server.id,
         &observed_at,
-        &state.effective.config.accounts,
+        &state.effective().config.accounts,
         &usage_windows,
         &account_health,
-        &state.effective.account_hash_key,
+        &state.effective().account_hash_key,
     );
     Ok((
         StatusCode::OK,
@@ -278,21 +286,24 @@ async fn usage(
     let account_health = state.account_health_snapshot();
     let observed_at = now_rfc3339();
     Ok(Json(usage_snapshot(
-        &state.effective.config.server.id,
+        &state.effective().config.server.id,
         &observed_at,
-        &state.effective.config.accounts,
+        &state.effective().config.accounts,
         &usage_windows,
         &account_health,
-        &state.effective.account_hash_key,
+        &state.effective().account_hash_key,
     )))
 }
 
 #[derive(Debug, Serialize)]
 struct AdminConfigStatus {
+    revision: Option<u64>,
     config_sha256: String,
     config_source: String,
     tokenproxy_version: &'static str,
     loaded_at: String,
+    reload_in_progress: bool,
+    last_reload_error: Option<String>,
     accounts: Vec<AdminAccountStatus>,
 }
 
@@ -317,10 +328,10 @@ async fn admin_config_status(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, TokenproxyError> {
     require_admin_auth(&state, &headers)?;
+    let effective = state.effective();
     let metadata = state.config_status();
     let health = state.account_health_snapshot();
-    let accounts = state
-        .effective
+    let accounts = effective
         .config
         .accounts
         .iter()
@@ -351,16 +362,173 @@ async fn admin_config_status(
         .collect();
 
     Ok(Json(AdminConfigStatus {
+        revision: metadata.revision,
         config_sha256: metadata.config_sha256,
         config_source: metadata.config_source,
         tokenproxy_version: env!("CARGO_PKG_VERSION"),
         loaded_at: metadata.loaded_at,
+        reload_in_progress: metadata.reload_in_progress,
+        last_reload_error: metadata.last_reload_error,
         accounts,
     }))
 }
 
-use serde::Serialize;
 use std::collections::BTreeSet;
+
+#[derive(Debug, Deserialize)]
+struct AdminConfigReloadRequest {
+    revision: Option<u64>,
+    config_sha256: Option<String>,
+    config_s3_uri: Option<String>,
+    config_toml: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminConfigReloadResponse {
+    reloaded: bool,
+    restart_required: bool,
+    revision: Option<u64>,
+    config_sha256: String,
+    config_source: String,
+    loaded_at: String,
+}
+
+async fn admin_config_reload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AdminConfigReloadRequest>,
+) -> Result<impl IntoResponse, TokenproxyError> {
+    require_admin_auth(&state, &headers)?;
+    if !state.try_begin_reload() {
+        return Err(TokenproxyError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::InvalidConfig,
+            "config reload is already in progress",
+        ));
+    }
+    state.set_reload_in_progress();
+
+    let result = admin_config_reload_inner(&state, request).await;
+    state.finish_reload();
+    if let Err(error) = &result {
+        state.set_reload_error(error.to_string());
+    }
+    result.map(Json)
+}
+
+async fn admin_config_reload_inner(
+    state: &AppState,
+    request: AdminConfigReloadRequest,
+) -> Result<AdminConfigReloadResponse, TokenproxyError> {
+    let current_status = state.config_status();
+    if let (Some(current), Some(next)) = (current_status.revision, request.revision)
+        && next <= current
+    {
+        return Err(TokenproxyError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::InvalidConfig,
+            format!("config revision {next} is not newer than running revision {current}"),
+        ));
+    }
+
+    let s3_timeout = Duration::from_millis(state.effective().config.timeouts.request_header_ms);
+    let (raw_config, source) = reload_config_source(&request, s3_timeout)?;
+    let config_sha256 = sha256_hex(raw_config.as_bytes());
+    if let Some(expected) = request.config_sha256.as_deref()
+        && expected != config_sha256
+    {
+        return Err(TokenproxyError::invalid_config(format!(
+            "config_sha256 mismatch: expected {expected}, got {config_sha256}"
+        )));
+    }
+
+    let config = parse_config_with_cli_overrides(Some(&raw_config), state.config_overrides())?;
+    let effective = load_effective_config(config, &ProcessEnv, &StdFileProvider)?;
+    let effective = discover_account_models(effective).await?;
+    let current = state.effective();
+    if restart_required_for_reload(&current, &effective) {
+        return Ok(AdminConfigReloadResponse {
+            reloaded: false,
+            restart_required: true,
+            revision: current_status.revision,
+            config_sha256: current_status.config_sha256,
+            config_source: current_status.config_source,
+            loaded_at: current_status.loaded_at,
+        });
+    }
+
+    let loaded_at = now_timestamp_pair().utc;
+    let status = ConfigStatus {
+        revision: request.revision,
+        config_sha256: config_sha256.clone(),
+        config_source: source.clone(),
+        loaded_at: loaded_at.clone(),
+        reload_in_progress: false,
+        last_reload_error: None,
+    };
+    state.swap_effective(effective, status)?;
+
+    Ok(AdminConfigReloadResponse {
+        reloaded: true,
+        restart_required: false,
+        revision: request.revision,
+        config_sha256,
+        config_source: source,
+        loaded_at,
+    })
+}
+
+fn restart_required_for_reload(
+    current: &crate::config::EffectiveConfig,
+    next: &crate::config::EffectiveConfig,
+) -> bool {
+    current.account_hash_key != next.account_hash_key
+        || current.config.server.id != next.config.server.id
+        || current.config.server.bind != next.config.server.bind
+        || current.config.server.allow_non_loopback != next.config.server.allow_non_loopback
+        || current.config.server.allow_insecure_upstream
+            != next.config.server.allow_insecure_upstream
+        || current.config.server.allow_openai_request_headers
+            != next.config.server.allow_openai_request_headers
+        || current.config.server.max_body_bytes != next.config.server.max_body_bytes
+        || current.config.server.shutdown_grace_ms != next.config.server.shutdown_grace_ms
+        || current.config.timeouts.connect_ms != next.config.timeouts.connect_ms
+        || current.config.timeouts.request_header_ms != next.config.timeouts.request_header_ms
+        || current.config.timeouts.stream_idle_ms != next.config.timeouts.stream_idle_ms
+        || current.config.timeouts.websocket_connect_ms != next.config.timeouts.websocket_connect_ms
+        || current.config.timeouts.websocket_idle_ms != next.config.timeouts.websocket_idle_ms
+        || current.config.timeouts.pool_idle_ms != next.config.timeouts.pool_idle_ms
+        || current.config.retry.max_precommit_retries != next.config.retry.max_precommit_retries
+        || current.config.retry.base_backoff_ms != next.config.retry.base_backoff_ms
+        || current.config.retry.max_backoff_ms != next.config.retry.max_backoff_ms
+        || current.config.retry.honor_retry_after != next.config.retry.honor_retry_after
+        || current.config.observability.metrics != next.config.observability.metrics
+        || current.config.observability.request_body_dumps
+            != next.config.observability.request_body_dumps
+        || current.config.observability.dump_dir != next.config.observability.dump_dir
+        || current.config.observability.redact_json_pointers
+            != next.config.observability.redact_json_pointers
+        || current.config.observability.account_id_hash_key_env
+            != next.config.observability.account_id_hash_key_env
+}
+
+fn reload_config_source(
+    request: &AdminConfigReloadRequest,
+    s3_timeout: Duration,
+) -> Result<(String, String), TokenproxyError> {
+    match (&request.config_toml, &request.config_s3_uri) {
+        (Some(_), Some(_)) => Err(TokenproxyError::invalid_config(
+            "set exactly one of config_toml or config_s3_uri",
+        )),
+        (Some(config_toml), None) => Ok((config_toml.clone(), "inline".to_string())),
+        (None, Some(config_s3_uri)) => StdFileProvider
+            .read_s3_uri_to_string(config_s3_uri, s3_timeout)
+            .map(|raw| (raw, config_s3_uri.clone())),
+        (None, None) => Err(TokenproxyError::invalid_config(
+            "set exactly one of config_toml or config_s3_uri",
+        )),
+    }
+}
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct ModelList {
@@ -406,7 +574,7 @@ async fn models(
 ) -> Result<impl IntoResponse, TokenproxyError> {
     require_auth(&state, &headers)?;
     let accounts = state.routing_accounts();
-    Ok(Json(model_list(accounts)))
+    Ok(Json(model_list(&accounts)))
 }
 
 fn method_not_allowed(method: Method, uri: Uri) -> TokenproxyError {
@@ -532,7 +700,7 @@ async fn proxy_http_inner(
     state.metrics.increment_requests();
     let mut inbound_headers = parts.headers;
 
-    let body = to_bytes(body, state.effective.config.server.max_body_bytes)
+    let body = to_bytes(body, state.effective().config.server.max_body_bytes)
         .await
         .map_err(|error| {
             TokenproxyError::new(
@@ -544,7 +712,7 @@ async fn proxy_http_inner(
     let body = decode_request_body(
         &mut inbound_headers,
         body,
-        state.effective.config.server.max_body_bytes,
+        state.effective().config.server.max_body_bytes,
     )?;
     if parts.uri.path() != "/v1/responses/compact" {
         maybe_dump_request_body(
@@ -663,7 +831,7 @@ async fn proxy_passthrough_inner(
     require_auth(state, &parts.headers)?;
     state.metrics.increment_requests();
 
-    let body = to_bytes(body, state.effective.config.server.max_body_bytes)
+    let body = to_bytes(body, state.effective().config.server.max_body_bytes)
         .await
         .map_err(|error| {
             TokenproxyError::new(
@@ -851,7 +1019,7 @@ async fn relay_websocket_session(
         downstream_metrics,
     ));
     let downstream_send_timeout =
-        Duration::from_millis(state.effective.config.timeouts.websocket_idle_ms);
+        Duration::from_millis(state.effective().config.timeouts.websocket_idle_ms);
 
     loop {
         if *shutdown_rx.borrow() {
@@ -1103,7 +1271,7 @@ async fn relay_single_websocket_create(
     );
     let initial_route_request = websocket_route_request(replay_state, &route_context, &value);
     let base_replay_state = replay_state.clone();
-    let max_attempts = usize::from(state.effective.config.retry.max_precommit_retries) + 1;
+    let max_attempts = usize::from(state.effective().config.retry.max_precommit_retries) + 1;
     let mut attempted_ids = Vec::new();
     let mut last_retryable_error = None;
 
@@ -1147,7 +1315,7 @@ async fn relay_single_websocket_create(
         let normalized = prepare_websocket_upstream_payload_with_hash_key(
             replay_state,
             &account,
-            &state.effective.account_hash_key,
+            &state.effective().account_hash_key,
             value.clone(),
             reused_upstream_previous_response,
         )?;
@@ -1168,8 +1336,10 @@ async fn relay_single_websocket_create(
         let mut recorded_first_event = false;
         let mut draining_shutdown = false;
         let request_started = Instant::now();
-        let idle_timeout = Duration::from_millis(state.effective.config.timeouts.websocket_idle_ms);
-        let shutdown_grace = Duration::from_millis(state.effective.config.server.shutdown_grace_ms);
+        let idle_timeout =
+            Duration::from_millis(state.effective().config.timeouts.websocket_idle_ms);
+        let shutdown_grace =
+            Duration::from_millis(state.effective().config.server.shutdown_grace_ms);
         let mut shutdown_deadline = Box::pin(tokio::time::sleep(Duration::from_secs(u64::MAX)));
         // A reused upstream session can die while idle. Allow one redial with the
         // same payload before surfacing the failure; if the fresh connection lacks
@@ -1811,7 +1981,7 @@ async fn ensure_upstream_session(
 
         let started = Instant::now();
         let connect_result = tokio::time::timeout(
-            Duration::from_millis(state.effective.config.timeouts.websocket_connect_ms),
+            Duration::from_millis(state.effective().config.timeouts.websocket_connect_ms),
             connect_async(request),
         )
         .await;
@@ -1837,7 +2007,7 @@ async fn ensure_upstream_session(
             "/v1/responses",
             "websocket",
             model_family,
-            &account_id_hash(&account.config.id, &state.effective.account_hash_key),
+            &account_id_hash(&account.config.id, &state.effective().account_hash_key),
             "initial",
             outcome,
         );
@@ -2315,7 +2485,7 @@ async fn forward_to_upstream(
     account: &EffectiveAccount,
     forward: UpstreamForward<'_>,
 ) -> Result<Response, TokenproxyError> {
-    let account_id_hash = account_id_hash(&account.config.id, &state.effective.account_hash_key);
+    let account_id_hash = account_id_hash(&account.config.id, &state.effective().account_hash_key);
     let method_name = forward.method.as_str().to_string();
     let upstream_url = upstream_url_for_path(account, forward.path_and_query)?;
     let origin = url_origin(&upstream_url);
@@ -2338,7 +2508,7 @@ async fn forward_to_upstream(
             AccountKind::ChatgptCodexAuthJson => UpstreamAuth::ChatGptBearer,
             AccountKind::MainroomPeer => UpstreamAuth::ForwardInboundBearer,
         },
-        state.effective.config.server.allow_openai_request_headers,
+        state.effective().config.server.allow_openai_request_headers,
     )?;
 
     let upstream_started = Instant::now();
@@ -2348,7 +2518,7 @@ async fn forward_to_upstream(
         .headers(headers)
         .body(forward.body);
     let response = match tokio::time::timeout(
-        Duration::from_millis(state.effective.config.timeouts.request_header_ms),
+        Duration::from_millis(state.effective().config.timeouts.request_header_ms),
         upstream_request.send(),
     )
     .await
@@ -2423,7 +2593,7 @@ async fn forward_to_upstream(
     let log_context = http_log_context(
         account,
         &response_headers,
-        &state.effective.account_hash_key,
+        &state.effective().account_hash_key,
     );
     let repair_sse = response
         .headers()
@@ -2491,7 +2661,7 @@ async fn forward_to_upstream(
     if let Some(compact_request_body) = forward.compact_request_body.as_ref() {
         let body = response_body_with_limit(
             response,
-            state.effective.config.server.max_body_bytes,
+            state.effective().config.server.max_body_bytes,
             "upstream compact response body",
         )
         .await?;
@@ -2518,7 +2688,7 @@ async fn forward_to_upstream(
             model_family: forward.model_family,
             account_id_hash: &account_id_hash,
             started: upstream_started,
-            idle_timeout: Duration::from_millis(state.effective.config.timeouts.stream_idle_ms),
+            idle_timeout: Duration::from_millis(state.effective().config.timeouts.stream_idle_ms),
         })
         .await?;
         if let Some(first_event_duration_ms) = stream_metadata.first_event_duration_ms {
@@ -2540,7 +2710,7 @@ async fn forward_to_upstream(
     if observe_json_usage {
         let body = response_body_with_limit(
             response,
-            state.effective.config.server.max_body_bytes,
+            state.effective().config.server.max_body_bytes,
             "upstream JSON response body",
         )
         .await?;
@@ -2993,7 +3163,7 @@ async fn maybe_dump_compact_body_hash(
     compact_request_body: &Bytes,
     response_body: &[u8],
 ) -> Result<(), TokenproxyError> {
-    let observability = &state.effective.config.observability;
+    let observability = &state.effective().config.observability;
     if !observability.request_body_dumps {
         return Ok(());
     }
@@ -3308,7 +3478,7 @@ async fn forward_with_precommit_failover(
 ) -> Result<Response, TokenproxyError> {
     let mut attempted_ids = Vec::new();
     let mut last_retryable_error = None;
-    let max_attempts = usize::from(state.effective.config.retry.max_precommit_retries) + 1;
+    let max_attempts = usize::from(state.effective().config.retry.max_precommit_retries) + 1;
 
     for _ in 0..max_attempts {
         let retry_phase = if attempted_ids.is_empty() {
@@ -3430,7 +3600,7 @@ async fn forward_passthrough_with_precommit_failover(
 ) -> Result<Response, TokenproxyError> {
     let mut attempted_ids = Vec::new();
     let mut last_retryable_error = None;
-    let max_attempts = usize::from(state.effective.config.retry.max_precommit_retries) + 1;
+    let max_attempts = usize::from(state.effective().config.retry.max_precommit_retries) + 1;
 
     for _ in 0..max_attempts {
         let retry_phase = if attempted_ids.is_empty() {
@@ -3716,7 +3886,7 @@ async fn maybe_dump_request_body(
     headers: &HeaderMap,
     body: &[u8],
 ) -> Result<(), TokenproxyError> {
-    let observability = &state.effective.config.observability;
+    let observability = &state.effective().config.observability;
     if !observability.request_body_dumps {
         return Ok(());
     }
@@ -3737,7 +3907,7 @@ async fn append_observability_record(
     filename: &str,
     record: Value,
 ) -> Result<(), TokenproxyError> {
-    let observability = &state.effective.config.observability;
+    let observability = &state.effective().config.observability;
     tokio::fs::create_dir_all(&observability.dump_dir)
         .await
         .map_err(|error| {
@@ -3932,7 +4102,7 @@ fn record_account_transient_failure(
             next_retry_at_ms: throttle_deadline_ms(
                 headers,
                 now_ms,
-                &state.effective.config.retry,
+                &state.effective().config.retry,
                 &account.config.id,
                 failure_count,
             ),
@@ -4039,11 +4209,12 @@ async fn select_next_account(
             "no eligible upstream account",
         )
     })?;
-    let selected_account_id_hash = account_id_hash(&selected_id, &state.effective.account_hash_key);
+    let selected_account_id_hash =
+        account_id_hash(&selected_id, &state.effective().account_hash_key);
     let timestamps = now_timestamp_pair();
     for (excluded_account_id, reason) in &selection.excluded {
         let excluded_account_id_hash =
-            account_id_hash(excluded_account_id, &state.effective.account_hash_key);
+            account_id_hash(excluded_account_id, &state.effective().account_hash_key);
         state.emit_route_selection_log(&RouteSelectionLog {
             event: "route_selection",
             timestamp_local: &timestamps.local,
@@ -4152,7 +4323,7 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|actual| {
-            bearer_header_matches(actual, &state.effective.downstream_token)
+            bearer_header_matches(actual, &state.effective().downstream_token)
                 // SECURITY: Remove this fallback or route only to the matching account if flagged.
                 || chatgpt_bearer_authorized(state, actual)
         });
@@ -4162,7 +4333,7 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
         .is_some_and(|actual| {
             constant_time_eq(
                 actual.as_bytes(),
-                state.effective.downstream_token.as_bytes(),
+                state.effective().downstream_token.as_bytes(),
             )
         });
 
@@ -4178,7 +4349,8 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
 }
 
 fn require_admin_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
-    let Some(admin_token) = state.effective.admin_token.as_deref() else {
+    let effective = state.effective();
+    let Some(admin_token) = effective.admin_token.as_deref() else {
         return Err(TokenproxyError::new(
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthorized,
@@ -4207,7 +4379,7 @@ fn chatgpt_bearer_authorized(state: &AppState, actual: &str) -> bool {
         return true;
     }
 
-    state.effective.accounts.iter().any(|account| {
+    state.effective().accounts.iter().any(|account| {
         if !matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
             return false;
         }
@@ -4683,6 +4855,42 @@ mod tests {
         }
     }
 
+    fn set_reload_env(suffix: &str) {
+        unsafe {
+            std::env::set_var(format!("TOKENPROXY_TEST_CLIENT_KEY_{suffix}"), "client-key");
+            std::env::set_var(format!("TOKENPROXY_TEST_ADMIN_KEY_{suffix}"), "admin-key");
+        }
+    }
+
+    fn reload_config_toml(
+        suffix: &str,
+        account_id: &str,
+        model: &str,
+        connect_ms: Option<u64>,
+    ) -> String {
+        let timeout = connect_ms
+            .map(|connect_ms| format!("\n[timeouts]\nconnect_ms = {connect_ms}\n"))
+            .unwrap_or_default();
+        format!(
+            r#"[server]
+allow_insecure_upstream = true
+
+[admin_auth]
+token_env = "TOKENPROXY_TEST_ADMIN_KEY_{suffix}"
+
+[downstream_auth]
+token_env = "TOKENPROXY_TEST_CLIENT_KEY_{suffix}"
+{timeout}
+[[accounts]]
+id = "{account_id}"
+kind = "mainroom_peer"
+base_url = "http://localhost:1/v1"
+models = ["{model}"]
+supports_responses = true
+"#
+        )
+    }
+
     fn ws_event(text: &str) -> Value {
         serde_json::from_str(text).expect("test event payload parses")
     }
@@ -5154,7 +5362,7 @@ mod tests {
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts.first().unwrap().clone();
+        let selected = state.effective().accounts.first().unwrap().clone();
         let mut session = None;
 
         ensure_upstream_session(
@@ -5193,7 +5401,7 @@ mod tests {
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts.first().unwrap().clone();
+        let selected = state.effective().accounts.first().unwrap().clone();
         let mut session = None;
 
         ensure_upstream_session(
@@ -5233,7 +5441,7 @@ mod tests {
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts.first().unwrap().clone();
+        let selected = state.effective().accounts.first().unwrap().clone();
         let mut session = None;
 
         ensure_upstream_session(
@@ -5271,7 +5479,7 @@ mod tests {
         chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
         chatgpt.chatgpt_account_id = Some("acct_123".to_string());
         let state = AppState::new(effective_config(vec![chatgpt])).unwrap();
-        let selected = state.effective.accounts.first().unwrap().clone();
+        let selected = state.effective().accounts.first().unwrap().clone();
         assert_eq!(selected.chatgpt_account_id.as_deref(), Some("acct_123"));
         let mut session = None;
         let mut upstream_headers = HeaderMap::new();
@@ -5338,7 +5546,7 @@ mod tests {
         chatgpt.config.kind = AccountKind::ChatgptCodexAuthJson;
         chatgpt.chatgpt_account_id = Some("acct_123".to_string());
         let state = AppState::new(effective_config(vec![chatgpt])).unwrap();
-        let selected = state.effective.accounts.first().unwrap().clone();
+        let selected = state.effective().accounts.first().unwrap().clone();
         let mut session = None;
 
         ensure_upstream_session(
@@ -5378,7 +5586,7 @@ mod tests {
             auth_json_path.clone(),
         )]))
         .unwrap();
-        let selected = state.effective.accounts.first().unwrap().clone();
+        let selected = state.effective().accounts.first().unwrap().clone();
         let mut session = None;
 
         ensure_upstream_session(
@@ -5415,7 +5623,7 @@ mod tests {
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
         let mut session = None;
 
         let error = ensure_upstream_session(
@@ -7013,7 +7221,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
 
         record_account_http_status(
             &state,
@@ -7045,7 +7253,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
         state.store_account_health(
             "primary",
             AccountHealth::Throttled {
@@ -7071,7 +7279,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
         state.store_account_health(
             "primary",
             AccountHealth::Throttled {
@@ -7101,7 +7309,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
         state.store_account_health(
             "primary",
             AccountHealth::Throttled {
@@ -7132,7 +7340,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
 
         record_websocket_usage_limit_error_event(
         &state,
@@ -7165,7 +7373,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
 
         record_account_http_status(
             &state,
@@ -7193,7 +7401,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
 
         record_account_http_status(
             &state,
@@ -7306,7 +7514,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", "120".parse().unwrap());
 
@@ -7336,7 +7544,7 @@ data: {"type":"response.custom.future_event"}
             100,
         )]))
         .unwrap();
-        let selected = state.effective.accounts[0].clone();
+        let selected = state.effective().accounts[0].clone();
         let reset_at_ms = now_unix_ms() + 60_000;
 
         record_account_http_status(
@@ -7562,8 +7770,9 @@ data: {"type":"response.custom.future_event"}
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        let status = response.status();
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["tokenproxy_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["accounts"][0]["id"], "peer:userb");
@@ -7593,6 +7802,207 @@ data: {"type":"response.custom.future_event"}
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn should_reload_inline_config_for_new_requests() {
+        set_reload_env("SUCCESS");
+        let mut effective = effective_config(vec![mainroom_peer_account(
+            "peer:old",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]);
+        effective.admin_token = Some("admin-key".to_string());
+        effective.account_hash_key = "tokenproxy-local".to_string();
+        let state = AppState::new(effective).unwrap();
+        let config = reload_config_toml("SUCCESS", "peer:new", "gpt-5.6", None);
+        let request = serde_json::json!({
+            "revision": 2,
+            "config_sha256": sha256_hex(config.as_bytes()),
+            "config_toml": config,
+        });
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config/reload")
+                    .header("authorization", "Bearer admin-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reloaded"], true);
+        assert_eq!(body["restart_required"], false);
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/models")
+                    .header("authorization", "Bearer client-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"][0]["id"], "gpt-5.6");
+    }
+
+    #[tokio::test]
+    async fn should_keep_old_config_when_inline_reload_is_invalid() {
+        set_reload_env("INVALID");
+        let mut effective = effective_config(vec![mainroom_peer_account(
+            "peer:old",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]);
+        effective.admin_token = Some("admin-key".to_string());
+        let state = AppState::new(effective).unwrap();
+        let request = serde_json::json!({
+            "revision": 2,
+            "config_toml": "[[accounts]]\nid = 'broken'\nkind = 'mainroom_peer'\n",
+        });
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config/reload")
+                    .header("authorization", "Bearer admin-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.routing_accounts()[0].config.id, "peer:old");
+        assert!(state.config_status().last_reload_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn should_reject_reload_hash_mismatch() {
+        set_reload_env("HASH");
+        let mut effective = effective_config(vec![mainroom_peer_account(
+            "peer:old",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]);
+        effective.admin_token = Some("admin-key".to_string());
+        let state = AppState::new(effective).unwrap();
+        let config = reload_config_toml("HASH", "peer:new", "gpt-5.6", None);
+        let request = serde_json::json!({
+            "revision": 2,
+            "config_sha256": "not-the-hash",
+            "config_toml": config,
+        });
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config/reload")
+                    .header("authorization", "Bearer admin-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(state.routing_accounts()[0].config.id, "peer:old");
+    }
+
+    #[tokio::test]
+    async fn should_reject_non_newer_reload_revision() {
+        set_reload_env("REVISION");
+        let mut effective = effective_config(vec![mainroom_peer_account(
+            "peer:old",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]);
+        effective.admin_token = Some("admin-key".to_string());
+        let state = AppState::new_with_status(
+            effective,
+            crate::logging::LogFormat::Text,
+            watch::channel(false).0,
+            ConfigStatus {
+                revision: Some(3),
+                ..ConfigStatus::default()
+            },
+        )
+        .unwrap();
+        let config = reload_config_toml("REVISION", "peer:new", "gpt-5.6", None);
+        let request = serde_json::json!({
+            "revision": 3,
+            "config_toml": config,
+        });
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config/reload")
+                    .header("authorization", "Bearer admin-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn should_report_restart_required_for_client_pool_changes() {
+        set_reload_env("RESTART");
+        let mut effective = effective_config(vec![mainroom_peer_account(
+            "peer:old",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]);
+        effective.admin_token = Some("admin-key".to_string());
+        let state = AppState::new(effective).unwrap();
+        let config = reload_config_toml("RESTART", "peer:new", "gpt-5.6", Some(12_345));
+        let request = serde_json::json!({
+            "revision": 2,
+            "config_toml": config,
+        });
+
+        let response = app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/config/reload")
+                    .header("authorization", "Bearer admin-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["reloaded"], false);
+        assert_eq!(body["restart_required"], true);
+        assert_eq!(state.routing_accounts()[0].config.id, "peer:old");
+        assert!(!state.config_status().reload_in_progress);
     }
 
     #[tokio::test]
