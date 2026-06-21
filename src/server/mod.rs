@@ -1,3 +1,3 @@
 mod state;
 
-pub use state::{AppState, app};
+pub use state::{AppState, ConfigStatus, app};

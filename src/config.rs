@@ -1,26 +1,34 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use object_store::ObjectStoreExt;
-use serde::Deserialize;
 use serde::de::Error as SerdeError;
+use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
 
 use crate::error::TokenproxyError;
 
 pub const CONFIG_UPDATE_ENDPOINT_ENV_VAR: &str = "TOKENPROXY_CONFIG_UPDATE_ENDPOINT";
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub server: ServerConfig,
+    pub admin_auth: AdminAuthConfig,
     pub downstream_auth: DownstreamAuthConfig,
     pub timeouts: TimeoutConfig,
     pub retry: RetryConfig,
     pub observability: ObservabilityConfig,
     pub accounts: Vec<AccountConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AdminAuthConfig {
+    pub token_env: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,7 +150,7 @@ impl Default for ObservabilityConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AccountConfig {
     pub id: String,
@@ -163,6 +171,8 @@ pub struct AccountConfig {
     pub service_tiers: Vec<String>,
     pub prompt_cache_key_seed_env: Option<String>,
     pub codex_client_version: Option<String>,
+    #[serde(flatten)]
+    pub extra_fields: BTreeMap<String, TomlValue>,
 }
 
 impl Default for AccountConfig {
@@ -172,7 +182,7 @@ impl Default for AccountConfig {
             display_name: None,
             enabled: true,
             kind: AccountKind::OpenAiApiKey,
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: DEFAULT_OPENAI_BASE_URL.to_string(),
             token_env: None,
             auth_json_path: None,
             priority: 0,
@@ -186,6 +196,7 @@ impl Default for AccountConfig {
             service_tiers: vec!["auto".to_string(), "default".to_string()],
             prompt_cache_key_seed_env: None,
             codex_client_version: None,
+            extra_fields: BTreeMap::new(),
         }
     }
 }
@@ -216,7 +227,7 @@ impl AccountConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum AccountKind {
     #[serde(rename = "openai_api_key")]
     #[default]
@@ -225,12 +236,15 @@ pub enum AccountKind {
     AnthropicApiKey,
     #[serde(rename = "chatgpt_codex_auth_json")]
     ChatgptCodexAuthJson,
+    #[serde(rename = "mainroom_peer")]
+    MainroomPeer,
 }
 
 #[derive(Debug, Clone)]
 pub struct EffectiveConfig {
     pub config: Config,
     pub config_update_endpoint: Option<String>,
+    pub admin_token: Option<String>,
     pub downstream_token: String,
     pub account_hash_key: String,
     pub accounts: Vec<EffectiveAccount>,
@@ -265,7 +279,7 @@ pub trait FileProvider {
     ) -> Result<String, TokenproxyError> {
         let _ = timeout;
         Err(TokenproxyError::invalid_config(format!(
-            "S3 auth_json_path {uri} cannot be read by this provider"
+            "S3 URI {uri} cannot be read by this provider"
         )))
     }
 }
@@ -439,6 +453,13 @@ pub fn load_effective_config(
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
                 }
             }
+            AccountKind::MainroomPeer => EffectiveAccount {
+                config: account.clone(),
+                bearer_token: String::new(),
+                chatgpt_account_id: None,
+                auth_json: None,
+                prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
+            },
             AccountKind::ChatgptCodexAuthJson => {
                 let path = account.auth_json_path.as_ref().ok_or_else(|| {
                     TokenproxyError::invalid_config(format!(
@@ -505,11 +526,20 @@ pub fn load_effective_config(
 
     Ok(EffectiveConfig {
         account_hash_key: account_hash_key(&config, env),
+        admin_token: optional_env_value(env, &config.admin_auth.token_env),
         config,
         config_update_endpoint,
         downstream_token,
         accounts: enabled_accounts,
     })
+}
+
+fn optional_env_value(env: &impl EnvProvider, key: &str) -> Option<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    env.get_env(key).filter(|value| !value.trim().is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -803,38 +833,35 @@ fn read_s3_uri_to_string_blocking(
             .build()
             .map_err(|error| {
                 TokenproxyError::invalid_config(format!(
-                    "failed to initialize S3 auth_json_path runtime: {error}"
+                    "failed to initialize S3 read runtime: {error}"
                 ))
             })
             .and_then(|runtime| runtime.block_on(read_s3_uri_to_string(&uri, timeout)));
         let _ = sender.send(result);
     });
     receiver.recv().map_err(|error| {
-        TokenproxyError::invalid_config(format!("failed to read S3 auth_json_path: {error}"))
+        TokenproxyError::invalid_config(format!("failed to read S3 URI: {error}"))
     })?
 }
 
 async fn read_s3_uri_to_string(uri: &str, timeout: Duration) -> Result<String, TokenproxyError> {
-    let url = reqwest::Url::parse(uri).map_err(|error| {
-        TokenproxyError::invalid_config(format!("invalid S3 auth_json_path URI: {error}"))
-    })?;
+    let url = reqwest::Url::parse(uri)
+        .map_err(|error| TokenproxyError::invalid_config(format!("invalid S3 URI: {error}")))?;
     let (store, path) = object_store::parse_url_opts(&url, std::env::vars()).map_err(|error| {
-        TokenproxyError::invalid_config(format!("failed to configure S3 auth_json_path: {error}"))
+        TokenproxyError::invalid_config(format!("failed to configure S3 URI: {error}"))
     })?;
     let bytes = tokio::time::timeout(timeout, async {
         let object = store.get(&path).await?;
         object.bytes().await
     })
     .await
-    .map_err(|_| TokenproxyError::invalid_config("S3 auth_json_path fetch timed out"))?
+    .map_err(|_| TokenproxyError::invalid_config("S3 URI fetch timed out"))?
     .map_err(|error| {
-        TokenproxyError::invalid_config(format!(
-            "failed to fetch S3 auth_json_path object: {error}"
-        ))
+        TokenproxyError::invalid_config(format!("failed to fetch S3 object: {error}"))
     })?;
 
     String::from_utf8(bytes.to_vec()).map_err(|error| {
-        TokenproxyError::invalid_config(format!("S3 auth_json_path object is not UTF-8: {error}"))
+        TokenproxyError::invalid_config(format!("S3 object is not UTF-8: {error}"))
     })
 }
 
@@ -997,10 +1024,13 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
         }
         if account.enabled
             && account.supports_anthropic_messages
-            && !matches!(account.kind, AccountKind::AnthropicApiKey)
+            && !matches!(
+                account.kind,
+                AccountKind::AnthropicApiKey | AccountKind::MainroomPeer
+            )
         {
             return Err(TokenproxyError::invalid_config(format!(
-                "account {} must use kind anthropic_api_key to support Anthropic messages",
+                "account {} must use kind anthropic_api_key or mainroom_peer to support Anthropic messages",
                 account.id
             )));
         }
@@ -1022,9 +1052,64 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
                 account.id
             )));
         }
+        if matches!(account.kind, AccountKind::MainroomPeer) {
+            validate_mainroom_peer_account(account)?;
+        }
         validate_base_url(config, account)?;
     }
 
+    Ok(())
+}
+
+fn validate_mainroom_peer_account(account: &AccountConfig) -> Result<(), TokenproxyError> {
+    let base_url = account.base_url.trim();
+    if base_url.is_empty() || base_url == DEFAULT_OPENAI_BASE_URL {
+        return Err(TokenproxyError::invalid_config(format!(
+            "mainroom_peer account {} must set base_url",
+            account.id
+        )));
+    }
+    if account.token_env.is_some() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "mainroom_peer account {} must not set token_env",
+            account.id
+        )));
+    }
+    if account.auth_json_path.is_some() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "mainroom_peer account {} must not set auth_json_path",
+            account.id
+        )));
+    }
+    if account.models.is_empty()
+        && (account.supports_chat_completions
+            || account.supports_responses
+            || account.supports_responses_ws
+            || account.supports_anthropic_messages)
+    {
+        return Err(TokenproxyError::invalid_config(format!(
+            "mainroom_peer account {} must set models for routed generation endpoints",
+            account.id
+        )));
+    }
+    if account.supports_responses_ws && !account.supports_responses {
+        return Err(TokenproxyError::invalid_config(format!(
+            "mainroom_peer account {} cannot support response WebSockets without responses",
+            account.id
+        )));
+    }
+    for field in [
+        "mainroom_peer_grant_id",
+        "mainroom_peer_provider",
+        "mainroom_peer_consumer",
+    ] {
+        if account.extra_fields.contains_key(field) {
+            return Err(TokenproxyError::invalid_config(format!(
+                "mainroom_peer account {} must not set {field}",
+                account.id
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -1196,6 +1281,26 @@ mod tests {
         }
     }
 
+    fn valid_mainroom_peer_account() -> AccountConfig {
+        AccountConfig {
+            id: "peer:userb".to_string(),
+            kind: AccountKind::MainroomPeer,
+            base_url: "https://userb.mainroom.sh/v1".to_string(),
+            token_env: None,
+            models: vec!["gpt-5.5".to_string()],
+            supports_chat_completions: true,
+            supports_responses: true,
+            supports_responses_ws: false,
+            supports_compact: false,
+            service_tiers: vec![
+                "auto".to_string(),
+                "default".to_string(),
+                "priority".to_string(),
+            ],
+            ..AccountConfig::default()
+        }
+    }
+
     fn valid_chatgpt_account(id: &str, auth_json_path: impl Into<PathBuf>) -> AccountConfig {
         AccountConfig {
             id: id.to_string(),
@@ -1325,6 +1430,127 @@ mod tests {
         assert!(effective.config_update_endpoint.is_none());
         assert_eq!(effective.accounts[0].bearer_token, "upstream");
         assert!(effective.config.server.allow_openai_request_headers);
+    }
+
+    #[test]
+    fn should_load_mainroom_peer_without_token_env() {
+        let effective = load_effective_config(
+            config_with_account(valid_mainroom_peer_account()),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+        )
+        .expect("mainroom peer loads without static upstream token");
+
+        assert_eq!(effective.accounts.len(), 1);
+        assert_eq!(effective.accounts[0].config.kind, AccountKind::MainroomPeer);
+        assert!(effective.accounts[0].bearer_token.is_empty());
+        assert!(effective.accounts[0].chatgpt_account_id.is_none());
+    }
+
+    #[test]
+    fn should_reject_mainroom_peer_old_grant_fields() {
+        let config = parse_config(
+            r#"
+            [[accounts]]
+            id = "peer:userb"
+            kind = "mainroom_peer"
+            base_url = "https://userb.mainroom.sh/v1"
+            models = ["gpt-5.5"]
+            supports_responses = true
+            mainroom_peer_grant_id = "grant_123"
+            "#,
+        )
+        .unwrap();
+
+        expect_config_error(
+            config,
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "must not set mainroom_peer_grant_id",
+        );
+    }
+
+    #[test]
+    fn should_reject_disabled_mainroom_peer_old_grant_fields() {
+        let config = parse_config(
+            r#"
+            [[accounts]]
+            id = "peer:userb"
+            enabled = false
+            kind = "mainroom_peer"
+            base_url = "https://userb.mainroom.sh/v1"
+            mainroom_peer_provider = "userb"
+            "#,
+        )
+        .unwrap();
+
+        expect_config_error(
+            config,
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "must not set mainroom_peer_provider",
+        );
+    }
+
+    #[test]
+    fn should_reject_mainroom_peer_without_explicit_base_url() {
+        let mut account = valid_mainroom_peer_account();
+        account.base_url = AccountConfig::default().base_url;
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "mainroom_peer account peer:userb must set base_url",
+        );
+    }
+
+    #[test]
+    fn should_reject_mainroom_peer_static_credentials() {
+        let mut token_env_account = valid_mainroom_peer_account();
+        token_env_account.token_env = Some("MAINROOM_PEER_TOKEN_USERB".to_string());
+        expect_config_error(
+            config_with_account(token_env_account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "mainroom_peer account peer:userb must not set token_env",
+        );
+
+        let mut auth_json_account = valid_mainroom_peer_account();
+        auth_json_account.auth_json_path = Some(PathBuf::from("/tmp/tokenproxy-auth.json"));
+        expect_config_error(
+            config_with_account(auth_json_account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "mainroom_peer account peer:userb must not set auth_json_path",
+        );
+    }
+
+    #[test]
+    fn should_reject_mainroom_peer_websocket_without_responses() {
+        let mut account = valid_mainroom_peer_account();
+        account.supports_responses = false;
+        account.supports_responses_ws = true;
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "cannot support response WebSockets without responses",
+        );
+    }
+
+    #[test]
+    fn should_reject_mainroom_peer_without_models_for_generation_routes() {
+        let mut account = valid_mainroom_peer_account();
+        account.models.clear();
+
+        expect_config_error(
+            config_with_account(account),
+            &env(),
+            &MemoryFiles(BTreeMap::new()),
+            "must set models for routed generation endpoints",
+        );
     }
 
     #[test]
@@ -1744,7 +1970,7 @@ mod tests {
             config_with_account(account),
             &env(),
             &files,
-            "account chatgpt must use kind anthropic_api_key to support Anthropic messages",
+            "account chatgpt must use kind anthropic_api_key or mainroom_peer to support Anthropic messages",
         );
     }
 
@@ -1775,7 +2001,7 @@ mod tests {
             config_with_account(account),
             &env(),
             &MemoryFiles(BTreeMap::new()),
-            "account openai-primary must use kind anthropic_api_key to support Anthropic messages",
+            "account openai-primary must use kind anthropic_api_key or mainroom_peer to support Anthropic messages",
         );
     }
 

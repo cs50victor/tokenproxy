@@ -26,6 +26,7 @@ pub enum UpstreamAuth {
     OpenAiBearer,
     ChatGptBearer,
     AnthropicApiKey,
+    ForwardInboundBearer,
 }
 
 pub fn build_upstream_headers(
@@ -45,7 +46,9 @@ pub fn build_upstream_headers(
             allow_openai_headers && matches!(lower, "openai-organization" | "openai-project");
         let forward_codex_openai_beta =
             matches!(auth, UpstreamAuth::ChatGptBearer) && lower == "openai-beta";
-        if lower == AUTHORIZATION.as_str()
+        let forward_inbound_authorization =
+            matches!(auth, UpstreamAuth::ForwardInboundBearer) && lower == AUTHORIZATION.as_str();
+        if (!forward_inbound_authorization && lower == AUTHORIZATION.as_str())
             || lower == HOST.as_str()
             || lower == CONTENT_LENGTH.as_str()
             || HOP_BY_HOP.contains(&lower)
@@ -93,6 +96,17 @@ pub fn build_upstream_headers(
             output
                 .entry(HeaderName::from_static("content-type"))
                 .or_insert(HeaderValue::from_static("application/json"));
+        }
+        UpstreamAuth::ForwardInboundBearer => {
+            let Some(mut authorization) = output.get(AUTHORIZATION).cloned() else {
+                return Err(TokenproxyError::new(
+                    StatusCode::UNAUTHORIZED,
+                    ErrorCode::Unauthorized,
+                    "mainroom_peer forwarding requires a downstream Authorization bearer",
+                ));
+            };
+            authorization.set_sensitive(true);
+            output.insert(AUTHORIZATION, authorization);
         }
     }
     output.insert(
@@ -296,6 +310,49 @@ mod tests {
         assert_eq!(headers["content-type"], "application/json");
         assert_eq!(headers["host"], "api.anthropic.com");
         assert!(!headers.contains_key("authorization"));
+    }
+
+    #[test]
+    fn should_forward_inbound_bearer_for_mainroom_peer() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert("authorization", "Bearer caller".parse().unwrap());
+        inbound.insert("x-api-key", "client-key".parse().unwrap());
+        inbound.insert("host", "tokenproxy.local".parse().unwrap());
+        inbound.insert("content-type", "application/json".parse().unwrap());
+
+        let headers = build_upstream_headers(
+            &inbound,
+            "peer.mainroom.sh",
+            "",
+            None,
+            "req_1",
+            UpstreamAuth::ForwardInboundBearer,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(headers["authorization"], "Bearer caller");
+        assert!(headers["authorization"].is_sensitive());
+        assert_eq!(headers["host"], "peer.mainroom.sh");
+        assert_eq!(headers["x-tokenproxy-request-id"], "req_1");
+        assert!(!headers.contains_key("x-api-key"));
+    }
+
+    #[test]
+    fn should_reject_mainroom_peer_forwarding_without_inbound_bearer() {
+        let error = build_upstream_headers(
+            &HeaderMap::new(),
+            "peer.mainroom.sh",
+            "",
+            None,
+            "req_1",
+            UpstreamAuth::ForwardInboundBearer,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert!(error.message.contains("mainroom_peer"));
     }
 
     #[test]
