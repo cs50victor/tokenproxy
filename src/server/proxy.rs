@@ -26,10 +26,12 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message as UpstreamMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use crate::auth::bearer_header_matches;
 use crate::config::RetryConfig;
 use crate::config::{AccountKind, EffectiveAccount};
 use crate::error::{ErrorCode, TokenproxyError};
@@ -1689,82 +1691,108 @@ async fn ensure_upstream_session(
         return Ok(true);
     }
 
-    let ws_url = websocket_upstream_url_for_account(account)?;
-    let origin = websocket_origin(&account.config.base_url);
-    let mut request = ws_url.as_str().into_client_request().map_err(|error| {
-        TokenproxyError::new(
-            StatusCode::BAD_GATEWAY,
-            ErrorCode::UpstreamFailure,
-            format!("failed to build upstream WebSocket request: {error}"),
-        )
-    })?;
-    request.headers_mut().insert(
-        "authorization",
-        upstream_authorization_header(&account.bearer_token)?,
-    );
-    copy_codex_upstream_headers(request.headers_mut(), upstream_headers);
-    if let Some(account_id) = account.chatgpt_account_id.as_deref() {
-        request
-            .headers_mut()
-            .insert("chatgpt-account-id", header_value_from_str(account_id)?);
-    }
-    if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
-        apply_chatgpt_codex_default_websocket_headers(request.headers_mut(), request_id);
-    }
-    request.headers_mut().insert(
-        "x-tokenproxy-request-id",
-        header_value_from_str(request_id)?,
-    );
-
-    let started = Instant::now();
-    let connect_result = tokio::time::timeout(
-        Duration::from_millis(state.effective.config.timeouts.websocket_connect_ms),
-        connect_async(request),
-    )
-    .await;
-    let connect_duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    record_account_connect_duration(state, account, connect_duration_ms);
-    state.metrics.record_upstream_connect_duration_labeled(
-        &origin,
-        "websocket",
-        connect_duration_ms,
-    );
-    state.metrics.record_ws_connect_duration_labeled(
-        &origin,
-        model_family,
-        false,
-        connect_duration_ms,
-    );
-    let outcome = if matches!(connect_result, Ok(Ok(_))) {
-        "connected"
-    } else {
-        "transport_error"
-    };
-    state.metrics.increment_upstream_attempt(
-        "/v1/responses",
-        "websocket",
-        model_family,
-        &account_id_hash(&account.config.id, &state.effective.account_hash_key),
-        "initial",
-        outcome,
-    );
-    let (socket, _) = match connect_result {
-        Ok(Ok(socket)) => socket,
-        Ok(Err(error)) => {
-            record_account_transient_failure(state, account, &HeaderMap::new());
-            return Err(TokenproxyError::new(
+    let mut account = state.account_for_request(account).await;
+    let mut recovered_unauthorized = false;
+    let (socket, _) = loop {
+        let ws_url = websocket_upstream_url_for_account(&account)?;
+        let origin = websocket_origin(&account.config.base_url);
+        let mut request = ws_url.as_str().into_client_request().map_err(|error| {
+            TokenproxyError::new(
                 StatusCode::BAD_GATEWAY,
                 ErrorCode::UpstreamFailure,
-                format!("failed to connect upstream WebSocket: {error}"),
-            ));
+                format!("failed to build upstream WebSocket request: {error}"),
+            )
+        })?;
+        request.headers_mut().insert(
+            "authorization",
+            upstream_authorization_header(&account.bearer_token)?,
+        );
+        copy_codex_upstream_headers(request.headers_mut(), upstream_headers);
+        if let Some(account_id) = account.chatgpt_account_id.as_deref() {
+            request
+                .headers_mut()
+                .insert("chatgpt-account-id", header_value_from_str(account_id)?);
         }
-        Err(_) => {
-            record_account_transient_failure(state, account, &HeaderMap::new());
-            return Err(TokenproxyError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                ErrorCode::UpstreamFailure,
-                "timed out connecting upstream WebSocket",
-            ));
+        if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
+            apply_chatgpt_codex_default_websocket_headers(request.headers_mut(), request_id);
+        }
+        request.headers_mut().insert(
+            "x-tokenproxy-request-id",
+            header_value_from_str(request_id)?,
+        );
+
+        let started = Instant::now();
+        let connect_result = tokio::time::timeout(
+            Duration::from_millis(state.effective.config.timeouts.websocket_connect_ms),
+            connect_async(request),
+        )
+        .await;
+        let connect_duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        record_account_connect_duration(state, &account, connect_duration_ms);
+        state.metrics.record_upstream_connect_duration_labeled(
+            &origin,
+            "websocket",
+            connect_duration_ms,
+        );
+        state.metrics.record_ws_connect_duration_labeled(
+            &origin,
+            model_family,
+            false,
+            connect_duration_ms,
+        );
+        let outcome = if matches!(connect_result, Ok(Ok(_))) {
+            "connected"
+        } else {
+            "transport_error"
+        };
+        state.metrics.increment_upstream_attempt(
+            "/v1/responses",
+            "websocket",
+            model_family,
+            &account_id_hash(&account.config.id, &state.effective.account_hash_key),
+            "initial",
+            outcome,
+        );
+        match connect_result {
+            Ok(Ok(socket)) => break socket,
+            Ok(Err(error))
+                if !recovered_unauthorized
+                    && websocket_error_status(&error) == Some(StatusCode::UNAUTHORIZED) =>
+            {
+                record_account_http_status(
+                    state,
+                    &account,
+                    StatusCode::UNAUTHORIZED,
+                    &HeaderMap::new(),
+                    None,
+                )
+                .await;
+                let Some(recovered) = state.recover_chatgpt_unauthorized(&account).await? else {
+                    return Err(TokenproxyError::new(
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCode::UpstreamFailure,
+                        format!("failed to connect upstream WebSocket: {error}"),
+                    ));
+                };
+                account = recovered;
+                recovered_unauthorized = true;
+            }
+            Ok(Err(error)) => {
+                record_account_transient_failure(state, &account, &HeaderMap::new());
+                return Err(TokenproxyError::new(
+                    StatusCode::BAD_GATEWAY,
+                    ErrorCode::UpstreamFailure,
+                    format!("failed to connect upstream WebSocket: {error}"),
+                ));
+            }
+            Err(_) => {
+                record_account_transient_failure(state, &account, &HeaderMap::new());
+                return Err(TokenproxyError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    ErrorCode::UpstreamFailure,
+                    "timed out connecting upstream WebSocket",
+                ));
+            }
         }
     };
     let old_session = upstream_session.replace(UpstreamSession {
@@ -3201,6 +3229,7 @@ async fn forward_with_precommit_failover(
             }
         };
         attempted_ids.push(selected.config.id.clone());
+        let selected = state.account_for_request(&selected).await;
 
         let response_result = forward_to_upstream(
             state,
@@ -3228,6 +3257,37 @@ async fn forward_with_precommit_failover(
             }
             Err(error) => return Err(error),
         };
+        if response.status() == StatusCode::UNAUTHORIZED
+            && let Some(recovered) = state.recover_chatgpt_unauthorized(&selected).await?
+        {
+            let response_result = forward_to_upstream(
+                state,
+                &recovered,
+                UpstreamForward {
+                    request_id: &attempt.request_id,
+                    method: attempt.method.clone(),
+                    path: &attempt.path,
+                    path_and_query: &attempt.path_and_query,
+                    inbound_headers: attempt.inbound_headers.clone(),
+                    body: body_with_request_transforms(&attempt.body, route_request, &recovered)?,
+                    model_family: &route_request.model_family,
+                    retry_phase: "retry",
+                    compact_request_body: attempt.compact_request_body.clone(),
+                },
+            )
+            .await;
+            response = match response_result {
+                Ok(response) => response,
+                Err(error)
+                    if should_retry_precommit_error(&error)
+                        && attempted_ids.len() < max_attempts =>
+                {
+                    last_retryable_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        }
         response.extensions_mut().insert(HttpMetricContext {
             model_family: route_request.model_family.clone(),
             stream: route_request.stream,
@@ -3290,6 +3350,7 @@ async fn forward_passthrough_with_precommit_failover(
                 Err(error) => return Err(last_retryable_error.unwrap_or(error)),
             };
         attempted_ids.push(selected.config.id.clone());
+        let selected = state.account_for_request(&selected).await;
 
         let response_result = forward_to_upstream(
             state,
@@ -3307,7 +3368,7 @@ async fn forward_passthrough_with_precommit_failover(
             },
         )
         .await;
-        let response = match response_result {
+        let mut response = match response_result {
             Ok(response) => response,
             Err(error)
                 if should_retry_precommit_error(&error) && attempted_ids.len() < max_attempts =>
@@ -3317,6 +3378,37 @@ async fn forward_passthrough_with_precommit_failover(
             }
             Err(error) => return Err(error),
         };
+        if response.status() == StatusCode::UNAUTHORIZED
+            && let Some(recovered) = state.recover_chatgpt_unauthorized(&selected).await?
+        {
+            let response_result = forward_to_upstream(
+                state,
+                &recovered,
+                UpstreamForward {
+                    request_id: &attempt.request_id,
+                    method: attempt.method.clone(),
+                    path: &attempt.path,
+                    path_and_query: &attempt.path_and_query,
+                    inbound_headers: attempt.inbound_headers.clone(),
+                    body: attempt.body.clone(),
+                    model_family: "passthrough",
+                    retry_phase: "retry",
+                    compact_request_body: None,
+                },
+            )
+            .await;
+            response = match response_result {
+                Ok(response) => response,
+                Err(error)
+                    if should_retry_precommit_error(&error)
+                        && attempted_ids.len() < max_attempts =>
+                {
+                    last_retryable_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        }
 
         if should_retry_precommit_response(&response) && attempted_ids.len() < max_attempts {
             continue;
@@ -3909,6 +4001,13 @@ fn should_retry_precommit_error(error: &TokenproxyError) -> bool {
         )
 }
 
+fn websocket_error_status(error: &WebSocketError) -> Option<StatusCode> {
+    match error {
+        WebSocketError::Http(response) => Some(response.status()),
+        _ => None,
+    }
+}
+
 fn status_class(status: StatusCode) -> &'static str {
     match status.as_u16() {
         100..=199 => "1xx",
@@ -3947,12 +4046,11 @@ fn record_websocket_request_metrics(
 }
 
 fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
-    let expected = format!("Bearer {}", state.effective.downstream_token);
     let bearer_authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|actual| {
-            constant_time_eq(actual.as_bytes(), expected.as_bytes())
+            bearer_header_matches(actual, &state.effective.downstream_token)
                 // SECURITY: Remove this fallback or route only to the matching account if flagged.
                 || chatgpt_bearer_authorized(state, actual)
         });
@@ -3978,12 +4076,15 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
 }
 
 fn chatgpt_bearer_authorized(state: &AppState, actual: &str) -> bool {
+    if state.chatgpt_bearer_authorized(actual) {
+        return true;
+    }
+
     state.effective.accounts.iter().any(|account| {
         if !matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
             return false;
         }
-        let expected = format!("Bearer {}", account.bearer_token);
-        constant_time_eq(actual.as_bytes(), expected.as_bytes())
+        bearer_header_matches(actual, &account.bearer_token)
     })
 }
 
@@ -4127,6 +4228,7 @@ fn routing_account_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::use_refresh_endpoint_for_testing;
     use crate::config::{AccountConfig, Config, EffectiveConfig};
     use futures_util::TryStreamExt;
     use std::{net::SocketAddr, sync::Mutex as StdMutex};
@@ -4184,6 +4286,46 @@ mod tests {
         address
     }
 
+    #[allow(clippy::result_large_err)]
+    async fn fake_refreshing_websocket_upstream(
+        captured_headers: Arc<StdMutex<Vec<HeaderMap>>>,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let captured_headers = Arc::clone(&captured_headers);
+                tokio::spawn(async move {
+                    let callback =
+                        |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                         response| {
+                            let authorization = request
+                                .headers()
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string();
+                            captured_headers
+                                .lock()
+                                .expect("header capture lock is not poisoned")
+                                .push(request.headers().clone());
+                            if authorization == "Bearer old-access" {
+                                return Err(http::Response::builder()
+                                    .status(StatusCode::UNAUTHORIZED)
+                                    .body(Some("unauthorized".to_string()))
+                                    .expect("401 websocket response builds"));
+                            }
+                            Ok(response)
+                        };
+                    if let Ok(mut socket) = accept_hdr_async(stream, callback).await {
+                        while socket.next().await.is_some() {}
+                    }
+                });
+            }
+        });
+        address
+    }
+
     async fn fake_http_upstream(captured_requests: Arc<StdMutex<Vec<String>>>) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -4210,6 +4352,100 @@ mod tests {
             }
         });
         address
+    }
+
+    async fn fake_refreshing_http_upstream(
+        captured_requests: Arc<StdMutex<Vec<String>>>,
+    ) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let captured_requests = Arc::clone(&captured_requests);
+                tokio::spawn(async move {
+                    let mut buffer = [0; 4096];
+                    let Ok(size) = stream.read(&mut buffer).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+                    let authorized = request.contains("authorization: Bearer new-access");
+                    captured_requests
+                        .lock()
+                        .expect("request capture lock is not poisoned")
+                        .push(request);
+                    if authorized {
+                        let body = br#"{"id":"resp_1","object":"response","output":[]}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.write_all(body).await;
+                    } else {
+                        let body = br#"{"error":{"message":"expired"}}"#;
+                        let response = format!(
+                            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.write_all(body).await;
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    async fn fake_refresh_authority() -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0; 4096];
+                    let Ok(size) = stream.read(&mut buffer).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    if !request.contains(r#""grant_type":"refresh_token""#)
+                        || !request.contains(r#""refresh_token":"old-refresh""#)
+                    {
+                        return;
+                    }
+                    let body = br#"{"access_token":"new-access","refresh_token":"new-refresh"}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(body).await;
+                });
+            }
+        });
+        address
+    }
+
+    fn refreshable_chatgpt_account(
+        id: &str,
+        base_url: String,
+        auth_json_path: std::path::PathBuf,
+    ) -> EffectiveAccount {
+        let mut account = chatgpt_account(id, base_url, "old-access", 100);
+        account.config.auth_json_path = Some(auth_json_path);
+        account
+    }
+
+    fn write_refreshable_auth_json(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tokenproxy-proxy-refresh-{name}-{}", now_unix_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"tokens":{"access_token":"old-access","refresh_token":"old-refresh","account_id":"acct-refresh"}}"#,
+        )
+        .unwrap();
+        path
     }
 
     fn effective_config(accounts: Vec<EffectiveAccount>) -> EffectiveConfig {
@@ -4968,6 +5204,48 @@ mod tests {
         assert_eq!(headers[0]["openai-beta"], DEFAULT_CODEX_OPENAI_BETA);
         assert_eq!(headers[0]["x-client-request-id"], "req_non_codex_ws");
         assert_eq!(headers[0]["chatgpt-account-id"], "acct_123");
+    }
+
+    #[tokio::test]
+    async fn should_refresh_chatgpt_auth_after_upstream_websocket_unauthorized() {
+        let authority = fake_refresh_authority().await;
+        let _refresh_endpoint =
+            use_refresh_endpoint_for_testing(format!("http://{authority}/oauth/token"));
+        let captured_headers = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_refreshing_websocket_upstream(Arc::clone(&captured_headers)).await;
+        let auth_json_path = write_refreshable_auth_json("ws");
+        let state = AppState::new(effective_config(vec![refreshable_chatgpt_account(
+            "primary",
+            format!("http://{upstream}/backend-api/codex"),
+            auth_json_path.clone(),
+        )]))
+        .unwrap();
+        let selected = state.effective.accounts.first().unwrap().clone();
+        let mut session = None;
+
+        ensure_upstream_session(
+            &state,
+            &selected,
+            &mut session,
+            &HeaderMap::new(),
+            "gpt",
+            "req_refresh_ws",
+        )
+        .await
+        .unwrap();
+        sleep(Duration::from_millis(25)).await;
+
+        let headers = captured_headers
+            .lock()
+            .expect("header capture lock is not poisoned");
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0]["authorization"], "Bearer old-access");
+        assert_eq!(headers[1]["authorization"], "Bearer new-access");
+        assert_eq!(headers[1]["chatgpt-account-id"], "acct-refresh");
+        drop(headers);
+
+        let saved = std::fs::read_to_string(auth_json_path).unwrap();
+        assert!(saved.contains(r#""access_token":"new-access""#));
     }
 
     #[tokio::test]
@@ -6061,6 +6339,61 @@ data: {"type":"response.custom.future_event"}
         response.extensions_mut().insert(SseFirstFrameObserved);
 
         assert!(!should_retry_precommit_response(&response));
+    }
+
+    #[tokio::test]
+    async fn should_refresh_chatgpt_auth_after_upstream_http_unauthorized() {
+        let authority = fake_refresh_authority().await;
+        let _refresh_endpoint =
+            use_refresh_endpoint_for_testing(format!("http://{authority}/oauth/token"));
+        let captured_requests = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_refreshing_http_upstream(Arc::clone(&captured_requests)).await;
+        let auth_json_path = write_refreshable_auth_json("http");
+        let state = AppState::new(effective_config(vec![refreshable_chatgpt_account(
+            "primary",
+            format!("http://{upstream}/backend-api/codex"),
+            auth_json_path.clone(),
+        )]))
+        .unwrap();
+        let route_request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".to_string(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".to_string(),
+            stream: false,
+        };
+
+        let response = forward_with_precommit_failover(
+            &state,
+            &route_request,
+            HttpProxyAttempt {
+                request_id: "req_refresh_http".to_string(),
+                method: Method::POST,
+                path: "/v1/responses".to_string(),
+                path_and_query: "/v1/responses".to_string(),
+                inbound_headers: HeaderMap::new(),
+                body: Bytes::from_static(br#"{"model":"gpt-5.5","input":[]}"#),
+                request_shape: None,
+                compact_request_body: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = captured_requests
+            .lock()
+            .expect("request capture lock is not poisoned");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("authorization: Bearer old-access"));
+        assert!(requests[1].contains("authorization: Bearer new-access"));
+        drop(requests);
+
+        let saved = std::fs::read_to_string(auth_json_path).unwrap();
+        assert!(saved.contains(r#""access_token":"new-access""#));
     }
 
     #[test]
