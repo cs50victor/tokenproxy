@@ -742,8 +742,15 @@ fn auth_json_location(path: &Path, account_id: &str) -> Result<AuthJsonLocation,
     let raw = path.to_string_lossy();
     if raw.starts_with("https://") {
         let url = normalize_remote_auth_json_url(&raw, account_id)?;
+        let mut key = reqwest::Url::parse(&url).map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "auth_json_path for {account_id} is not a valid https:// URL: {error}"
+            ))
+        })?;
+        key.set_query(None);
+        key.set_fragment(None);
         return Ok(AuthJsonLocation {
-            key: remote_url_identity(&url),
+            key: key.to_string(),
             source: AuthJsonSource::RemoteUrl(url),
         });
     }
@@ -794,32 +801,24 @@ fn normalize_remote_auth_json_url(url: &str, account_id: &str) -> Result<String,
 
 pub fn redact_remote_url_for_error(raw: &str) -> String {
     let Ok(mut url) = reqwest::Url::parse(raw) else {
-        return format!("invalid-url#sha256={}", short_hash(raw));
+        let hash: String = crate::observability::sha256_hex(raw.as_bytes())
+            .chars()
+            .take(12)
+            .collect();
+        return format!("invalid-url#sha256={hash}");
     };
     let query_or_fragment = url.query().is_some() || url.fragment().is_some();
     url.set_query(None);
     url.set_fragment(None);
     if query_or_fragment {
-        format!("{url}?redacted_sha256={}", short_hash(raw))
+        let hash: String = crate::observability::sha256_hex(raw.as_bytes())
+            .chars()
+            .take(12)
+            .collect();
+        format!("{url}?redacted_sha256={hash}")
     } else {
         url.to_string()
     }
-}
-
-fn short_hash(raw: &str) -> String {
-    crate::observability::sha256_hex(raw.as_bytes())
-        .chars()
-        .take(12)
-        .collect()
-}
-
-fn remote_url_identity(raw: &str) -> String {
-    let Ok(mut url) = reqwest::Url::parse(raw) else {
-        return raw.to_string();
-    };
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
 }
 
 pub fn validate_remote_https_url(raw: &str, field: &str) -> Result<String, TokenproxyError> {
