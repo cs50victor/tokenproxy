@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::Message as UpstreamMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use crate::auth::bearer_header_matches;
 use crate::config::RetryConfig;
 use crate::config::{AccountKind, EffectiveAccount};
 use crate::error::{ErrorCode, TokenproxyError};
@@ -4045,12 +4046,11 @@ fn record_websocket_request_metrics(
 }
 
 fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
-    let expected = format!("Bearer {}", state.effective.downstream_token);
     let bearer_authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|actual| {
-            constant_time_eq(actual.as_bytes(), expected.as_bytes())
+            bearer_header_matches(actual, &state.effective.downstream_token)
                 // SECURITY: Remove this fallback or route only to the matching account if flagged.
                 || chatgpt_bearer_authorized(state, actual)
         });
@@ -4084,8 +4084,7 @@ fn chatgpt_bearer_authorized(state: &AppState, actual: &str) -> bool {
         if !matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
             return false;
         }
-        let expected = format!("Bearer {}", account.bearer_token);
-        constant_time_eq(actual.as_bytes(), expected.as_bytes())
+        bearer_header_matches(actual, &account.bearer_token)
     })
 }
 

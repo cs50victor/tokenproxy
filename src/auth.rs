@@ -53,7 +53,7 @@ openai/codex commit 6f5dd7b4226f3c77d4d253d8be1e10ac1686ccf9, not main:
   https://github.com/openai/codex/blob/6f5dd7b4226f3c77d4d253d8be1e10ac1686ccf9/codex-api/src/endpoint/responses_websocket.rs#L322-L360
   https://github.com/openai/codex/blob/6f5dd7b4226f3c77d4d253d8be1e10ac1686ccf9/codex-api/src/endpoint/responses_websocket.rs#L516-L538
 
-Tokenproxy follows those constraints for both transports: load the current
+Tokenproxy follows the transport constraints implemented below: load the current
 auth.json token into HTTP and WebSocket headers, recover only after an upstream
 401, reload before refreshing, retry once with the same account, and let the
 existing routing layer handle any remaining pre-commit failover.
@@ -89,7 +89,7 @@ enum AuthJsonLayout {
     TopLevel,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PermanentRefreshFailure {
     Expired,
     Reused,
@@ -106,10 +106,10 @@ enum RefreshError {
 }
 
 #[derive(Serialize)]
-struct RefreshRequest {
+struct RefreshRequest<'a> {
     client_id: String,
     grant_type: &'static str,
-    refresh_token: String,
+    refresh_token: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -179,10 +179,7 @@ impl ChatGptAuthCell {
 
     pub fn bearer_matches(&self, actual: &str) -> bool {
         let state = self.state.read().expect("chatgpt auth state lock poisoned");
-        constant_time_eq(
-            actual.as_bytes(),
-            format!("Bearer {}", state.access_token).as_bytes(),
-        )
+        bearer_header_matches(actual, &state.access_token)
     }
 
     pub async fn snapshot_for_request(&self, client: &reqwest::Client) -> ChatGptAuthSnapshot {
@@ -217,21 +214,13 @@ impl ChatGptAuthCell {
 
     async fn refresh_token(&self, client: &reqwest::Client) -> Result<(), RefreshError> {
         let _guard = self.refresh_lock.lock().await;
-        if let Some(error) = self
-            .state
-            .read()
-            .expect("chatgpt auth state lock poisoned")
-            .permanent_failure
-            .clone()
-        {
-            return Err(RefreshError::Permanent(error));
-        }
-
-        let current = self
-            .state
-            .read()
-            .expect("chatgpt auth state lock poisoned")
-            .clone();
+        let current = {
+            let state = self.state.read().expect("chatgpt auth state lock poisoned");
+            if let Some(error) = state.permanent_failure {
+                return Err(RefreshError::Permanent(error));
+            }
+            state.clone()
+        };
         let reloaded = read_auth_state(&self.path).await?;
         if reloaded.account_id.as_deref() != current.account_id.as_deref() {
             record_permanent_failure(&self.state, PermanentRefreshFailure::AccountMismatch);
@@ -247,15 +236,14 @@ impl ChatGptAuthCell {
             return Ok(());
         }
 
-        let response =
-            match request_chatgpt_token_refresh(client, current.refresh_token.clone()).await {
-                Ok(response) => response,
-                Err(RefreshError::Permanent(failure)) => {
-                    record_permanent_failure(&self.state, failure.clone());
-                    return Err(RefreshError::Permanent(failure));
-                }
-                Err(error) => return Err(error),
-            };
+        let response = match request_chatgpt_token_refresh(client, &current.refresh_token).await {
+            Ok(response) => response,
+            Err(RefreshError::Permanent(failure)) => {
+                record_permanent_failure(&self.state, failure);
+                return Err(RefreshError::Permanent(failure));
+            }
+            Err(error) => return Err(error),
+        };
         let updated = apply_refresh_response(current, response, Utc::now())?;
         persist_auth_json(&self.path, &updated.raw).await?;
         *self
@@ -286,6 +274,10 @@ fn parse_refreshable_auth_json(input: &str) -> Result<ChatGptAuthState, Tokenpro
     let raw: Value = serde_json::from_str(input).map_err(|error| {
         TokenproxyError::invalid_config(format!("auth_json_path contains invalid JSON: {error}"))
     })?;
+    parse_refreshable_auth_value(raw)
+}
+
+fn parse_refreshable_auth_value(raw: Value) -> Result<ChatGptAuthState, TokenproxyError> {
     let tokens = raw.get("tokens").unwrap_or(&Value::Null);
     let access_token = string_field(tokens, "access_token")
         .or_else(|| string_field(&raw, "access_token"))
@@ -332,43 +324,29 @@ fn apply_refresh_response(
     response: RefreshResponse,
     now: DateTime<Utc>,
 ) -> Result<ChatGptAuthState, RefreshError> {
-    match state.layout {
-        AuthJsonLayout::Tokens => {
-            if !state.raw.get("tokens").is_some_and(Value::is_object) {
-                state.raw["tokens"] = Value::Object(serde_json::Map::new());
-            }
-            if let Some(access_token) = response.access_token {
-                state.raw["tokens"]["access_token"] = Value::String(access_token);
-            }
-            if let Some(refresh_token) = response.refresh_token {
-                state.raw["tokens"]["refresh_token"] = Value::String(refresh_token);
-            }
-            if let Some(id_token) = response.id_token {
-                state.raw["tokens"]["id_token"] = Value::String(id_token);
-            }
-        }
-        AuthJsonLayout::TopLevel => {
-            if let Some(access_token) = response.access_token {
-                state.raw["access_token"] = Value::String(access_token);
-            }
-            if let Some(refresh_token) = response.refresh_token {
-                state.raw["refresh_token"] = Value::String(refresh_token);
-            }
-            if let Some(id_token) = response.id_token {
-                state.raw["id_token"] = Value::String(id_token);
-            }
-        }
+    if let Some(access_token) = response.access_token {
+        set_auth_json_string(&mut state.raw, state.layout, "access_token", &access_token);
+    }
+    if let Some(refresh_token) = response.refresh_token {
+        set_auth_json_string(
+            &mut state.raw,
+            state.layout,
+            "refresh_token",
+            &refresh_token,
+        );
+    }
+    if let Some(id_token) = response.id_token {
+        set_auth_json_string(&mut state.raw, state.layout, "id_token", &id_token);
     }
     state.raw["last_refresh"] = Value::String(format_rfc3339(now).ok_or_else(|| {
         RefreshError::Transient("failed to format refresh timestamp".to_string())
     })?);
-    parse_refreshable_auth_json(&state.raw.to_string())
-        .map_err(|error| RefreshError::Transient(error.message))
+    parse_refreshable_auth_value(state.raw).map_err(|error| RefreshError::Transient(error.message))
 }
 
 async fn request_chatgpt_token_refresh(
     client: &reqwest::Client,
-    refresh_token: String,
+    refresh_token: &str,
 ) -> Result<RefreshResponse, RefreshError> {
     if refresh_token.is_empty() {
         return Err(RefreshError::Permanent(
@@ -418,12 +396,14 @@ fn oauth_client_id() -> String {
 
 fn refresh_token_endpoint() -> String {
     #[cfg(test)]
-    if let Some(url) = TEST_REFRESH_ENDPOINT_VALUE
-        .lock()
-        .expect("test refresh endpoint override lock is not poisoned")
-        .clone()
     {
-        return url;
+        let url = TEST_REFRESH_ENDPOINT_VALUE
+            .lock()
+            .expect("test refresh endpoint override lock is not poisoned")
+            .clone();
+        if let Some(url) = url {
+            return url;
+        }
     }
 
     std::env::var(CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR)
@@ -431,31 +411,26 @@ fn refresh_token_endpoint() -> String {
 }
 
 fn classify_refresh_token_failure(body: &str) -> Option<PermanentRefreshFailure> {
-    let code = extract_refresh_token_error_code(body)?;
-    match code.to_ascii_lowercase().as_str() {
-        "refresh_token_expired" => Some(PermanentRefreshFailure::Expired),
-        "refresh_token_reused" => Some(PermanentRefreshFailure::Reused),
-        "refresh_token_invalidated" => Some(PermanentRefreshFailure::Invalidated),
-        _ => None,
-    }
-}
-
-fn extract_refresh_token_error_code(body: &str) -> Option<String> {
     let Value::Object(map) = serde_json::from_str::<Value>(body).ok()? else {
         return None;
     };
-    if let Some(error) = map.get("error") {
-        match error {
-            Value::Object(object) => {
-                if let Some(code) = object.get("code").and_then(Value::as_str) {
-                    return Some(code.to_string());
-                }
-            }
-            Value::String(code) => return Some(code.to_string()),
-            _ => {}
+    let code = match map.get("error") {
+        Some(Value::Object(error)) => error.get("code").and_then(Value::as_str),
+        Some(Value::String(code)) => Some(code.as_str()),
+        _ => map.get("code").and_then(Value::as_str),
+    }?;
+    match code {
+        code if code.eq_ignore_ascii_case("refresh_token_expired") => {
+            Some(PermanentRefreshFailure::Expired)
         }
+        code if code.eq_ignore_ascii_case("refresh_token_reused") => {
+            Some(PermanentRefreshFailure::Reused)
+        }
+        code if code.eq_ignore_ascii_case("refresh_token_invalidated") => {
+            Some(PermanentRefreshFailure::Invalidated)
+        }
+        _ => None,
     }
-    map.get("code").and_then(Value::as_str).map(str::to_string)
 }
 
 async fn persist_auth_json(path: &Path, value: &Value) -> Result<(), RefreshError> {
@@ -479,10 +454,11 @@ async fn persist_auth_json(path: &Path, value: &Value) -> Result<(), RefreshErro
         .map_err(|error| {
             RefreshError::Transient(format!("failed to create auth JSON temp file: {error}"))
         })?;
-    file.write_all(value.to_string().as_bytes())
-        .await
-        .map_err(|error| RefreshError::Transient(format!("failed to write auth JSON: {error}")))?;
-    file.write_all(b"\n")
+    let mut body = serde_json::to_vec(value).map_err(|error| {
+        RefreshError::Transient(format!("failed to serialize auth JSON: {error}"))
+    })?;
+    body.push(b'\n');
+    file.write_all(&body)
         .await
         .map_err(|error| RefreshError::Transient(format!("failed to write auth JSON: {error}")))?;
     file.sync_data()
@@ -515,14 +491,14 @@ fn record_permanent_failure(state: &RwLock<ChatGptAuthState>, failure: Permanent
 }
 
 impl PermanentRefreshFailure {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match self {
-            PermanentRefreshFailure::Expired => "refresh_token_expired",
-            PermanentRefreshFailure::Reused => "refresh_token_reused",
-            PermanentRefreshFailure::Invalidated => "refresh_token_invalidated",
-            PermanentRefreshFailure::Unauthorized => "unauthorized",
-            PermanentRefreshFailure::AccountMismatch => "account_mismatch",
-            PermanentRefreshFailure::MissingRefreshToken => "missing_refresh_token",
+            Self::Expired => "refresh_token_expired",
+            Self::Reused => "refresh_token_reused",
+            Self::Invalidated => "refresh_token_invalidated",
+            Self::Unauthorized => "unauthorized",
+            Self::AccountMismatch => "account_mismatch",
+            Self::MissingRefreshToken => "missing_refresh_token",
         }
     }
 }
@@ -566,6 +542,20 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn set_auth_json_string(raw: &mut Value, layout: AuthJsonLayout, field: &str, value: &str) {
+    match layout {
+        AuthJsonLayout::Tokens => {
+            if !raw.get("tokens").is_some_and(Value::is_object) {
+                raw["tokens"] = Value::Object(serde_json::Map::new());
+            }
+            raw["tokens"][field] = Value::String(value.to_owned());
+        }
+        AuthJsonLayout::TopLevel => {
+            raw[field] = Value::String(value.to_owned());
+        }
+    }
+}
+
 fn jwt_expiration(token: &str) -> Option<DateTime<Utc>> {
     let payload = token.split('.').nth(1)?;
     let decoded = base64_url_decode(payload)?;
@@ -598,13 +588,13 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let max_len = left.len().max(right.len());
-    let mut diff = left.len() ^ right.len();
-    for index in 0..max_len {
-        let left = left.get(index).copied().unwrap_or(0);
-        let right = right.get(index).copied().unwrap_or(0);
-        diff |= usize::from(left ^ right);
+pub(crate) fn bearer_header_matches(actual: &str, bearer_token: &str) -> bool {
+    const PREFIX: &[u8] = b"Bearer ";
+    let actual = actual.as_bytes();
+    let token = bearer_token.as_bytes();
+    let mut diff = actual.len() ^ (PREFIX.len() + token.len());
+    for (index, expected) in PREFIX.iter().chain(token).copied().enumerate() {
+        diff |= usize::from(actual.get(index).copied().unwrap_or(0) ^ expected);
     }
     diff == 0
 }
