@@ -167,7 +167,7 @@ pub fn chatgpt_auth_cells(
                 bearer_token: effective.downstream_token.clone(),
                 upload_name: upload_name.clone(),
             });
-        let local_path = if path.to_string_lossy().starts_with("s3://") {
+        let local_path = if path.to_string_lossy().starts_with("https://") {
             if config_update.is_none() {
                 continue;
             }
