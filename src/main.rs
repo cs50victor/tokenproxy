@@ -301,6 +301,7 @@ mod tests {
         ];
         let effective = EffectiveConfig {
             config,
+            config_update_endpoint: None,
             downstream_token: "client".to_string(),
             account_hash_key: "hash-key".to_string(),
             accounts: vec![
@@ -341,6 +342,7 @@ mod tests {
             },
             bearer_token: "upstream".to_string(),
             chatgpt_account_id: None,
+            auth_json: None,
             prompt_cache_key_seed: None,
         }
     }

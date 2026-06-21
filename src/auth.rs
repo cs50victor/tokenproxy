@@ -7,6 +7,7 @@ use axum::http::StatusCode;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Digest;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -67,14 +68,23 @@ pub struct ChatGptAuthSnapshot {
 
 #[derive(Debug)]
 pub struct ChatGptAuthCell {
-    path: PathBuf,
+    local_path: Option<PathBuf>,
+    config_update: Option<ConfigUpdateTarget>,
     state: RwLock<ChatGptAuthState>,
     refresh_lock: Mutex<()>,
 }
 
 #[derive(Clone, Debug)]
+struct ConfigUpdateTarget {
+    endpoint: String,
+    bearer_token: String,
+    upload_name: String,
+}
+
+#[derive(Clone, Debug)]
 struct ChatGptAuthState {
     raw: Value,
+    raw_sha256: String,
     access_token: String,
     refresh_token: String,
     account_id: Option<String>,
@@ -119,6 +129,21 @@ struct RefreshResponse {
     refresh_token: Option<String>,
 }
 
+#[derive(Serialize)]
+struct ConfigUpdateRequest<'a> {
+    #[serde(rename = "uploadName")]
+    upload_name: &'a str,
+    #[serde(rename = "previousSha256")]
+    previous_sha256: &'a str,
+    #[serde(rename = "authJson")]
+    auth_json: &'a Value,
+}
+
+#[derive(Deserialize)]
+struct ConfigUpdateResponse {
+    sha256: String,
+}
+
 pub fn chatgpt_auth_cells(
     effective: &EffectiveConfig,
 ) -> Result<BTreeMap<String, Arc<ChatGptAuthCell>>, TokenproxyError> {
@@ -130,10 +155,29 @@ pub fn chatgpt_auth_cells(
         let Some(path) = account.config.auth_json_path.as_ref() else {
             continue;
         };
-        if path.to_string_lossy().starts_with("s3://") {
+        let Some(auth_json) = account.auth_json.as_ref() else {
             continue;
-        }
-        if let Some(cell) = ChatGptAuthCell::from_path(path)? {
+        };
+        let config_update = effective
+            .config_update_endpoint
+            .as_ref()
+            .zip(auth_json.upload_name.as_ref())
+            .map(|(endpoint, upload_name)| ConfigUpdateTarget {
+                endpoint: endpoint.clone(),
+                bearer_token: effective.downstream_token.clone(),
+                upload_name: upload_name.clone(),
+            });
+        let local_path = if path.to_string_lossy().starts_with("s3://") {
+            if config_update.is_none() {
+                continue;
+            }
+            None
+        } else {
+            Some(path.clone())
+        };
+        if let Some(cell) =
+            ChatGptAuthCell::from_loaded_auth(local_path, &auth_json.text, config_update)?
+        {
             cells.insert(account.config.id.clone(), Arc::new(cell));
         }
     }
@@ -141,19 +185,18 @@ pub fn chatgpt_auth_cells(
 }
 
 impl ChatGptAuthCell {
-    fn from_path(path: &Path) -> Result<Option<Self>, TokenproxyError> {
-        let raw = std::fs::read_to_string(path).map_err(|error| {
-            TokenproxyError::invalid_config(format!(
-                "failed to read refreshable auth_json_path {}: {error}",
-                path.display()
-            ))
-        })?;
-        let state = parse_refreshable_auth_json(&raw)?;
+    fn from_loaded_auth(
+        local_path: Option<PathBuf>,
+        raw: &str,
+        config_update: Option<ConfigUpdateTarget>,
+    ) -> Result<Option<Self>, TokenproxyError> {
+        let state = parse_refreshable_auth_json(raw)?;
         if state.refresh_token.is_empty() {
             return Ok(None);
         }
         Ok(Some(Self {
-            path: path.to_path_buf(),
+            local_path,
+            config_update,
             state: RwLock::new(state),
             refresh_lock: Mutex::new(()),
         }))
@@ -163,7 +206,8 @@ impl ChatGptAuthCell {
     fn from_path_for_testing(path: PathBuf) -> Self {
         let raw = std::fs::read_to_string(&path).expect("test auth json reads");
         Self {
-            path,
+            local_path: Some(path),
+            config_update: None,
             state: RwLock::new(parse_refreshable_auth_json(&raw).expect("test auth json parses")),
             refresh_lock: Mutex::new(()),
         }
@@ -221,19 +265,21 @@ impl ChatGptAuthCell {
             }
             state.clone()
         };
-        let reloaded = read_auth_state(&self.path).await?;
-        if reloaded.account_id.as_deref() != current.account_id.as_deref() {
-            record_permanent_failure(&self.state, PermanentRefreshFailure::AccountMismatch);
-            return Err(RefreshError::Permanent(
-                PermanentRefreshFailure::AccountMismatch,
-            ));
-        }
-        if reloaded.access_token != current.access_token || reloaded.raw != current.raw {
-            *self
-                .state
-                .write()
-                .expect("chatgpt auth state lock poisoned") = reloaded;
-            return Ok(());
+        if let Some(path) = &self.local_path {
+            let reloaded = read_auth_state(path).await?;
+            if reloaded.account_id.as_deref() != current.account_id.as_deref() {
+                record_permanent_failure(&self.state, PermanentRefreshFailure::AccountMismatch);
+                return Err(RefreshError::Permanent(
+                    PermanentRefreshFailure::AccountMismatch,
+                ));
+            }
+            if reloaded.access_token != current.access_token || reloaded.raw != current.raw {
+                *self
+                    .state
+                    .write()
+                    .expect("chatgpt auth state lock poisoned") = reloaded;
+                return Ok(());
+            }
         }
 
         let response = match request_chatgpt_token_refresh(client, &current.refresh_token).await {
@@ -244,8 +290,22 @@ impl ChatGptAuthCell {
             }
             Err(error) => return Err(error),
         };
+        let previous_sha256 = current.raw_sha256.clone();
         let updated = apply_refresh_response(current, response, Utc::now())?;
-        persist_auth_json(&self.path, &updated.raw).await?;
+        if let Some(path) = &self.local_path {
+            persist_auth_json(path, &updated.raw).await?;
+        }
+        let updated = match &self.config_update {
+            Some(target) => {
+                let sha256 =
+                    post_config_update(client, target, &previous_sha256, &updated.raw).await?;
+                ChatGptAuthState {
+                    raw_sha256: sha256,
+                    ..updated
+                }
+            }
+            None => updated,
+        };
         *self
             .state
             .write()
@@ -274,10 +334,13 @@ fn parse_refreshable_auth_json(input: &str) -> Result<ChatGptAuthState, Tokenpro
     let raw: Value = serde_json::from_str(input).map_err(|error| {
         TokenproxyError::invalid_config(format!("auth_json_path contains invalid JSON: {error}"))
     })?;
-    parse_refreshable_auth_value(raw)
+    parse_refreshable_auth_value(raw, sha256_hex(input.as_bytes()))
 }
 
-fn parse_refreshable_auth_value(raw: Value) -> Result<ChatGptAuthState, TokenproxyError> {
+fn parse_refreshable_auth_value(
+    raw: Value,
+    raw_sha256: String,
+) -> Result<ChatGptAuthState, TokenproxyError> {
     let tokens = raw.get("tokens").unwrap_or(&Value::Null);
     let access_token = string_field(tokens, "access_token")
         .or_else(|| string_field(&raw, "access_token"))
@@ -310,6 +373,7 @@ fn parse_refreshable_auth_value(raw: Value) -> Result<ChatGptAuthState, Tokenpro
         string_field(tokens, "account_id").or_else(|| string_field(&raw, "account_id"));
     Ok(ChatGptAuthState {
         raw,
+        raw_sha256,
         access_token,
         refresh_token,
         account_id,
@@ -341,7 +405,9 @@ fn apply_refresh_response(
     state.raw["last_refresh"] = Value::String(format_rfc3339(now).ok_or_else(|| {
         RefreshError::Transient("failed to format refresh timestamp".to_string())
     })?);
-    parse_refreshable_auth_value(state.raw).map_err(|error| RefreshError::Transient(error.message))
+    let raw_sha256 = auth_json_value_sha256(&state.raw)?;
+    parse_refreshable_auth_value(state.raw, raw_sha256)
+        .map_err(|error| RefreshError::Transient(error.message))
 }
 
 async fn request_chatgpt_token_refresh(
@@ -471,6 +537,50 @@ async fn persist_auth_json(path: &Path, value: &Value) -> Result<(), RefreshErro
     Ok(())
 }
 
+async fn post_config_update(
+    client: &reqwest::Client,
+    target: &ConfigUpdateTarget,
+    previous_sha256: &str,
+    auth_json: &Value,
+) -> Result<String, RefreshError> {
+    let payload = ConfigUpdateRequest {
+        upload_name: &target.upload_name,
+        previous_sha256,
+        auth_json,
+    };
+    let response = client
+        .post(&target.endpoint)
+        .bearer_auth(&target.bearer_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| {
+            RefreshError::Transient(format!("config update request failed: {error}"))
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RefreshError::Transient(format!(
+            "config update failed with HTTP {status}"
+        )));
+    }
+    let response = response
+        .json::<ConfigUpdateResponse>()
+        .await
+        .map_err(|error| RefreshError::Transient(format!("config update JSON failed: {error}")))?;
+    if !is_sha256_hex(&response.sha256) {
+        return Err(RefreshError::Transient(
+            "config update response sha256 was invalid".to_string(),
+        ));
+    }
+    Ok(response.sha256.to_ascii_lowercase())
+}
+
+fn auth_json_value_sha256(value: &Value) -> Result<String, RefreshError> {
+    serde_json::to_vec(value)
+        .map(|body| sha256_hex(&body))
+        .map_err(|error| RefreshError::Transient(format!("failed to serialize auth JSON: {error}")))
+}
+
 fn refresh_error(error: RefreshError) -> TokenproxyError {
     let message = match error {
         RefreshError::Permanent(reason) => {
@@ -588,6 +698,21 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
+fn sha256_hex(input: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = sha2::Sha256::digest(input);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub(crate) fn bearer_header_matches(actual: &str, bearer_token: &str) -> bool {
     const PREFIX: &[u8] = b"Bearer ";
     let actual = actual.as_bytes();
@@ -604,6 +729,7 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     #[test]
     fn should_parse_jwt_expiration_from_access_token() {
@@ -735,6 +861,48 @@ mod tests {
         assert_eq!(saved["tokens"]["access_token"], "new-access");
     }
 
+    #[tokio::test]
+    async fn should_post_config_update_after_refresh() {
+        let authority = fake_refresh_authority().await;
+        let _refresh_endpoint =
+            use_refresh_endpoint_for_testing(format!("http://{authority}/oauth/token"));
+        let (update_endpoint, update_request) = fake_config_update_endpoint("b".repeat(64)).await;
+        let raw = r#"{"tokens":{"access_token":"old-access","refresh_token":"old-refresh","account_id":"acct"}}"#;
+        let cell = ChatGptAuthCell::from_loaded_auth(
+            None,
+            raw,
+            Some(ConfigUpdateTarget {
+                endpoint: update_endpoint,
+                bearer_token: "client-key".to_string(),
+                upload_name: "auth.json".to_string(),
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        cell.recover_after_unauthorized(&client, "old-access")
+            .await
+            .unwrap();
+
+        let request = tokio::time::timeout(std::time::Duration::from_secs(2), update_request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(request.starts_with("POST /config/update HTTP/1.1"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer client-key")
+        );
+        assert!(request.contains(r#""uploadName":"auth.json""#));
+        assert!(request.contains(&format!(
+            r#""previousSha256":"{}""#,
+            sha256_hex(raw.as_bytes())
+        )));
+        assert!(request.contains(r#""access_token":"new-access""#));
+    }
+
     async fn fake_refresh_authority() -> std::net::SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -762,5 +930,29 @@ mod tests {
             }
         });
         address
+    }
+
+    async fn fake_config_update_endpoint(sha256: String) -> (String, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sender, receiver) = oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0; 8192];
+            let Ok(size) = stream.read(&mut buffer).await else {
+                return;
+            };
+            let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+            let _ = sender.send(request);
+            let body = format!(r#"{{"sha256":"{sha256}"}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (format!("http://{address}/config/update"), receiver)
     }
 }

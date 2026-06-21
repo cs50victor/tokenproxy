@@ -4229,7 +4229,7 @@ fn routing_account_state(
 mod tests {
     use super::*;
     use crate::auth::use_refresh_endpoint_for_testing;
-    use crate::config::{AccountConfig, Config, EffectiveConfig};
+    use crate::config::{AccountConfig, Config, EffectiveAuthJson, EffectiveConfig};
     use futures_util::TryStreamExt;
     use std::{net::SocketAddr, sync::Mutex as StdMutex};
     use tokio::{io::AsyncReadExt, net::TcpListener, time::sleep};
@@ -4431,7 +4431,12 @@ mod tests {
         auth_json_path: std::path::PathBuf,
     ) -> EffectiveAccount {
         let mut account = chatgpt_account(id, base_url, "old-access", 100);
+        let text = std::fs::read_to_string(&auth_json_path).unwrap();
         account.config.auth_json_path = Some(auth_json_path);
+        account.auth_json = Some(EffectiveAuthJson {
+            text,
+            upload_name: Some("auth.json".to_string()),
+        });
         account
     }
 
@@ -4461,6 +4466,7 @@ mod tests {
         };
         EffectiveConfig {
             config,
+            config_update_endpoint: None,
             downstream_token: "client-key".to_string(),
             account_hash_key: "test-account-hash-key".to_string(),
             accounts,
@@ -4485,6 +4491,7 @@ mod tests {
             },
             bearer_token: bearer_token.to_string(),
             chatgpt_account_id: None,
+            auth_json: None,
             prompt_cache_key_seed: None,
         }
     }
@@ -4521,6 +4528,7 @@ mod tests {
             },
             bearer_token: api_key.to_string(),
             chatgpt_account_id: None,
+            auth_json: None,
             prompt_cache_key_seed: None,
         }
     }
@@ -7520,6 +7528,7 @@ data: {"type":"response.custom.future_event"}
                 },
                 bearer_token: "token".to_string(),
                 chatgpt_account_id: None,
+                auth_json: None,
                 prompt_cache_key_seed: None,
             }
         }

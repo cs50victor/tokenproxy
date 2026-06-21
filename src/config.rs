@@ -10,6 +10,8 @@ use toml::Value as TomlValue;
 
 use crate::error::TokenproxyError;
 
+pub const CONFIG_UPDATE_ENDPOINT_ENV_VAR: &str = "TOKENPROXY_CONFIG_UPDATE_ENDPOINT";
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -228,6 +230,7 @@ pub enum AccountKind {
 #[derive(Debug, Clone)]
 pub struct EffectiveConfig {
     pub config: Config,
+    pub config_update_endpoint: Option<String>,
     pub downstream_token: String,
     pub account_hash_key: String,
     pub accounts: Vec<EffectiveAccount>,
@@ -238,7 +241,14 @@ pub struct EffectiveAccount {
     pub config: AccountConfig,
     pub bearer_token: String,
     pub chatgpt_account_id: Option<String>,
+    pub auth_json: Option<EffectiveAuthJson>,
     pub prompt_cache_key_seed: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveAuthJson {
+    pub text: String,
+    pub upload_name: Option<String>,
 }
 
 pub trait EnvProvider {
@@ -406,6 +416,7 @@ pub fn load_effective_config(
     let config = expand_config_paths(config, env)?;
     validate_static_config(&config)?;
     let downstream_token = env_value(env, &config.downstream_auth.token_env)?;
+    let config_update_endpoint = config_update_endpoint(&config, env)?;
 
     let mut enabled_accounts = Vec::new();
     let mut auth_json_locations = BTreeSet::new();
@@ -424,6 +435,7 @@ pub fn load_effective_config(
                     config: account.clone(),
                     bearer_token: env_value(env, token_env)?,
                     chatgpt_account_id: None,
+                    auth_json: None,
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
                 }
             }
@@ -451,6 +463,13 @@ pub fn load_effective_config(
                     auth_json_fetch_timeout,
                 )?;
                 let chatgpt_auth = parse_chatgpt_auth_json(&raw)?;
+                let upload_name = auth_json_upload_name(&location);
+                if config_update_endpoint.is_some() && upload_name.is_none() {
+                    return Err(TokenproxyError::invalid_config(format!(
+                        "auth_json_path for {} must end in a JSON upload filename when config_update_endpoint is set",
+                        account.id
+                    )));
+                }
 
                 let mut account_config = account.clone();
                 account_config.auth_json_path = Some(expanded_path);
@@ -466,6 +485,10 @@ pub fn load_effective_config(
                     config: account_config,
                     bearer_token: chatgpt_auth.bearer_token,
                     chatgpt_account_id: chatgpt_auth.account_id,
+                    auth_json: Some(EffectiveAuthJson {
+                        text: raw,
+                        upload_name,
+                    }),
                     prompt_cache_key_seed: prompt_cache_key_seed(account, env)?,
                 }
             }
@@ -483,6 +506,7 @@ pub fn load_effective_config(
     Ok(EffectiveConfig {
         account_hash_key: account_hash_key(&config, env),
         config,
+        config_update_endpoint,
         downstream_token,
         accounts: enabled_accounts,
     })
@@ -814,6 +838,24 @@ async fn read_s3_uri_to_string(uri: &str, timeout: Duration) -> Result<String, T
     })
 }
 
+fn auth_json_upload_name(location: &AuthJsonLocation) -> Option<String> {
+    let upload_name = match &location.source {
+        AuthJsonSource::Local(path) => path.file_name().and_then(|value| value.to_str()),
+        AuthJsonSource::S3(uri) => uri.rsplit('/').next(),
+    };
+    upload_name
+        .filter(|value| is_json_upload_name(value))
+        .map(ToOwned::to_owned)
+}
+
+fn is_json_upload_name(value: &str) -> bool {
+    value.len() <= 160
+        && value.ends_with(".json")
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'@' | b'+' | b'-'))
+}
+
 fn account_hash_key(config: &Config, env: &impl EnvProvider) -> String {
     let env_name = config.observability.account_id_hash_key_env.trim();
     if env_name.is_empty() {
@@ -833,6 +875,47 @@ fn prompt_cache_key_seed(
         .as_deref()
         .map(|env_name| env_value(env, env_name))
         .transpose()
+}
+
+fn config_update_endpoint(
+    config: &Config,
+    env: &impl EnvProvider,
+) -> Result<Option<String>, TokenproxyError> {
+    let Some(endpoint) = env
+        .get_env(CONFIG_UPDATE_ENDPOINT_ENV_VAR)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    validate_config_update_endpoint(config, &endpoint)?;
+    Ok(Some(endpoint))
+}
+
+fn validate_config_update_endpoint(config: &Config, endpoint: &str) -> Result<(), TokenproxyError> {
+    let url = reqwest::Url::parse(endpoint).map_err(|error| {
+        TokenproxyError::invalid_config(format!("config_update_endpoint is invalid: {error}"))
+    })?;
+    match url.scheme() {
+        "https" => {}
+        "http" if config.server.allow_insecure_upstream => {}
+        "http" => {
+            return Err(TokenproxyError::invalid_config(
+                "config_update_endpoint must use https",
+            ));
+        }
+        _ => {
+            return Err(TokenproxyError::invalid_config(
+                "config_update_endpoint must use http or https",
+            ));
+        }
+    }
+    if url.host_str().is_none() {
+        return Err(TokenproxyError::invalid_config(
+            "config_update_endpoint must include a host",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
@@ -1239,8 +1322,46 @@ mod tests {
             .expect("valid config loads");
 
         assert_eq!(effective.downstream_token, "client");
+        assert!(effective.config_update_endpoint.is_none());
         assert_eq!(effective.accounts[0].bearer_token, "upstream");
         assert!(effective.config.server.allow_openai_request_headers);
+    }
+
+    #[test]
+    fn should_load_config_update_endpoint_from_env() {
+        let mut env = env();
+        env.insert(
+            CONFIG_UPDATE_ENDPOINT_ENV_VAR.to_string(),
+            "https://config.example.test/v0/tokenproxy/auth-json/refresh".to_string(),
+        );
+
+        let effective = load_effective_config(
+            config_with_account(valid_openai_account()),
+            &env,
+            &MemoryFiles(BTreeMap::new()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            effective.config_update_endpoint.as_deref(),
+            Some("https://config.example.test/v0/tokenproxy/auth-json/refresh")
+        );
+    }
+
+    #[test]
+    fn should_reject_insecure_config_update_endpoint_without_opt_in() {
+        let mut env = env();
+        env.insert(
+            CONFIG_UPDATE_ENDPOINT_ENV_VAR.to_string(),
+            "http://config.example.test/update".to_string(),
+        );
+
+        expect_config_error(
+            config_with_account(valid_openai_account()),
+            &env,
+            &MemoryFiles(BTreeMap::new()),
+            "config_update_endpoint must use https",
+        );
     }
 
     #[test]
@@ -1926,6 +2047,26 @@ mod tests {
         assert_eq!(
             effective.accounts[0].chatgpt_account_id.as_deref(),
             Some("acct_123")
+        );
+    }
+
+    #[test]
+    fn should_reject_auth_json_path_without_upload_name_when_update_endpoint_is_set() {
+        let path = PathBuf::from("/tmp/tokenproxy-auth");
+        let mut env = env();
+        env.insert(
+            CONFIG_UPDATE_ENDPOINT_ENV_VAR.to_string(),
+            "https://config.example.test/update".to_string(),
+        );
+
+        expect_config_error(
+            config_with_account(valid_chatgpt_account("chatgpt", path.clone())),
+            &env,
+            &MemoryFiles(BTreeMap::from([(
+                path,
+                r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+            )])),
+            "must end in a JSON upload filename",
         );
     }
 
