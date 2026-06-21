@@ -3,7 +3,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use object_store::ObjectStoreExt;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Serialize};
 use toml::Value as TomlValue;
@@ -272,14 +271,15 @@ pub trait EnvProvider {
 pub trait FileProvider {
     fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     fn is_file(&self, path: &Path) -> bool;
-    fn read_s3_uri_to_string(
+    fn read_remote_url_to_string(
         &self,
-        uri: &str,
+        url: &str,
         timeout: Duration,
     ) -> Result<String, TokenproxyError> {
         let _ = timeout;
         Err(TokenproxyError::invalid_config(format!(
-            "S3 URI {uri} cannot be read by this provider"
+            "remote URL {} cannot be read by this provider",
+            redact_remote_url_for_error(url)
         )))
     }
 }
@@ -303,12 +303,12 @@ impl FileProvider for StdFileProvider {
         path.is_file()
     }
 
-    fn read_s3_uri_to_string(
+    fn read_remote_url_to_string(
         &self,
-        uri: &str,
+        url: &str,
         timeout: Duration,
     ) -> Result<String, TokenproxyError> {
-        read_s3_uri_to_string_blocking(uri.to_string(), timeout)
+        read_remote_url_to_string_blocking(url.to_string(), timeout)
     }
 }
 
@@ -690,7 +690,7 @@ struct AuthJsonLocation {
 
 enum AuthJsonSource {
     Local(PathBuf),
-    S3(String),
+    RemoteUrl(String),
 }
 
 fn expand_user_path(
@@ -740,17 +740,24 @@ fn uses_home_shortcut(path: &str) -> bool {
 
 fn auth_json_location(path: &Path, account_id: &str) -> Result<AuthJsonLocation, TokenproxyError> {
     let raw = path.to_string_lossy();
-    if raw.starts_with("s3://") {
-        let uri = normalize_s3_auth_json_uri(&raw, account_id)?;
+    if raw.starts_with("https://") {
+        let url = normalize_remote_auth_json_url(&raw, account_id)?;
+        let mut key = reqwest::Url::parse(&url).map_err(|error| {
+            TokenproxyError::invalid_config(format!(
+                "auth_json_path for {account_id} is not a valid https:// URL: {error}"
+            ))
+        })?;
+        key.set_query(None);
+        key.set_fragment(None);
         return Ok(AuthJsonLocation {
-            key: uri.clone(),
-            source: AuthJsonSource::S3(uri),
+            key: key.to_string(),
+            source: AuthJsonSource::RemoteUrl(url),
         });
     }
 
     if !path.is_absolute() {
         return Err(TokenproxyError::invalid_config(format!(
-            "auth_json_path for {account_id} must be absolute or use s3://"
+            "auth_json_path for {account_id} must be absolute or use https://"
         )));
     }
 
@@ -760,38 +767,75 @@ fn auth_json_location(path: &Path, account_id: &str) -> Result<AuthJsonLocation,
     })
 }
 
-fn normalize_s3_auth_json_uri(uri: &str, account_id: &str) -> Result<String, TokenproxyError> {
-    let url = reqwest::Url::parse(uri).map_err(|error| {
+fn normalize_remote_auth_json_url(url: &str, account_id: &str) -> Result<String, TokenproxyError> {
+    let url = reqwest::Url::parse(url).map_err(|error| {
         TokenproxyError::invalid_config(format!(
-            "auth_json_path for {account_id} is not a valid s3:// URI: {error}"
+            "auth_json_path for {account_id} is not a valid https:// URL: {error}"
         ))
     })?;
-    if url.scheme() != "s3" {
+    if url.scheme() != "https" {
         return Err(TokenproxyError::invalid_config(format!(
-            "auth_json_path for {account_id} must be absolute or use s3://"
+            "auth_json_path for {account_id} must be absolute or use https://"
         )));
     }
-    if url.query().is_some() || url.fragment().is_some() {
+    if url.fragment().is_some() {
         return Err(TokenproxyError::invalid_config(format!(
-            "auth_json_path for {account_id} must not include query or fragment data"
+            "auth_json_path for {account_id} must not include fragment data"
         )));
     }
-    let bucket = url
-        .host_str()
-        .filter(|bucket| !bucket.is_empty())
+    url.host_str()
+        .filter(|host| !host.is_empty())
         .ok_or_else(|| {
             TokenproxyError::invalid_config(format!(
-                "auth_json_path for {account_id} must include an S3 bucket"
+                "auth_json_path for {account_id} must include a URL host"
             ))
         })?;
-    let key = url.path().trim_start_matches('/');
-    if key.is_empty() {
+    if url.path().trim_start_matches('/').is_empty() {
         return Err(TokenproxyError::invalid_config(format!(
-            "auth_json_path for {account_id} must include an S3 object key"
+            "auth_json_path for {account_id} must include a URL path"
         )));
     }
 
-    Ok(format!("s3://{bucket}/{key}"))
+    Ok(url.to_string())
+}
+
+pub fn redact_remote_url_for_error(raw: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        let hash: String = crate::observability::sha256_hex(raw.as_bytes())
+            .chars()
+            .take(12)
+            .collect();
+        return format!("invalid-url#sha256={hash}");
+    };
+    let query_or_fragment = url.query().is_some() || url.fragment().is_some();
+    url.set_query(None);
+    url.set_fragment(None);
+    if query_or_fragment {
+        let hash: String = crate::observability::sha256_hex(raw.as_bytes())
+            .chars()
+            .take(12)
+            .collect();
+        format!("{url}?redacted_sha256={hash}")
+    } else {
+        url.to_string()
+    }
+}
+
+pub fn validate_remote_https_url(raw: &str, field: &str) -> Result<String, TokenproxyError> {
+    let url = reqwest::Url::parse(raw).map_err(|error| {
+        TokenproxyError::invalid_config(format!("{field} is not a valid https:// URL: {error}"))
+    })?;
+    if url.scheme() != "https" {
+        return Err(TokenproxyError::invalid_config(format!(
+            "{field} must use https://"
+        )));
+    }
+    url.host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| {
+            TokenproxyError::invalid_config(format!("{field} must include a URL host"))
+        })?;
+    Ok(url.to_string())
 }
 
 fn read_auth_json_location(
@@ -813,17 +857,22 @@ fn read_auth_json_location(
                 ))
             })
         }
-        AuthJsonSource::S3(uri) => files.read_s3_uri_to_string(uri, timeout).map_err(|error| {
-            TokenproxyError::invalid_config(format!(
-                "failed to read auth_json_path for {account_id}: {}",
-                error.message
-            ))
-        }),
+        AuthJsonSource::RemoteUrl(url) => {
+            files
+                .read_remote_url_to_string(url, timeout)
+                .map_err(|error| {
+                    TokenproxyError::invalid_config(format!(
+                        "failed to read auth_json_path for {account_id} from {}: {}",
+                        redact_remote_url_for_error(url),
+                        error.message
+                    ))
+                })
+        }
     }
 }
 
-fn read_s3_uri_to_string_blocking(
-    uri: String,
+fn read_remote_url_to_string_blocking(
+    url: String,
     timeout: Duration,
 ) -> Result<String, TokenproxyError> {
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -833,46 +882,68 @@ fn read_s3_uri_to_string_blocking(
             .build()
             .map_err(|error| {
                 TokenproxyError::invalid_config(format!(
-                    "failed to initialize S3 read runtime: {error}"
+                    "failed to initialize remote URL read runtime: {error}"
                 ))
             })
-            .and_then(|runtime| runtime.block_on(read_s3_uri_to_string(&uri, timeout)));
+            .and_then(|runtime| runtime.block_on(read_remote_url_to_string(&url, timeout)));
         let _ = sender.send(result);
     });
     receiver.recv().map_err(|error| {
-        TokenproxyError::invalid_config(format!("failed to read S3 URI: {error}"))
+        TokenproxyError::invalid_config(format!("failed to read remote URL: {error}"))
     })?
 }
 
-async fn read_s3_uri_to_string(uri: &str, timeout: Duration) -> Result<String, TokenproxyError> {
-    let url = reqwest::Url::parse(uri)
-        .map_err(|error| TokenproxyError::invalid_config(format!("invalid S3 URI: {error}")))?;
-    let (store, path) = object_store::parse_url_opts(&url, std::env::vars()).map_err(|error| {
-        TokenproxyError::invalid_config(format!("failed to configure S3 URI: {error}"))
+async fn read_remote_url_to_string(
+    url: &str,
+    timeout: Duration,
+) -> Result<String, TokenproxyError> {
+    let url = validate_remote_https_url(url, "remote URL")?;
+    let redacted = redact_remote_url_for_error(&url);
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|error| {
+            TokenproxyError::invalid_config(format!("failed to build remote URL client: {error}"))
+        })?;
+    let response = client.get(&url).send().await.map_err(|error| {
+        let error = if error.url().is_some_and(|url| url.query().is_some()) {
+            error.without_url()
+        } else {
+            error
+        };
+        TokenproxyError::invalid_config(format!("failed to fetch {redacted}: {error}"))
     })?;
-    let bytes = tokio::time::timeout(timeout, async {
-        let object = store.get(&path).await?;
-        object.bytes().await
-    })
-    .await
-    .map_err(|_| TokenproxyError::invalid_config("S3 URI fetch timed out"))?
-    .map_err(|error| {
-        TokenproxyError::invalid_config(format!("failed to fetch S3 object: {error}"))
+    let status = response.status();
+    if !status.is_success() {
+        return Err(TokenproxyError::invalid_config(format!(
+            "failed to fetch {redacted}: HTTP {status}"
+        )));
+    }
+    let bytes = response.bytes().await.map_err(|error| {
+        TokenproxyError::invalid_config(format!("failed to read {redacted}: {error}"))
     })?;
 
     String::from_utf8(bytes.to_vec()).map_err(|error| {
-        TokenproxyError::invalid_config(format!("S3 object is not UTF-8: {error}"))
+        TokenproxyError::invalid_config(format!("{redacted} is not UTF-8: {error}"))
     })
 }
 
 fn auth_json_upload_name(location: &AuthJsonLocation) -> Option<String> {
-    let upload_name = match &location.source {
-        AuthJsonSource::Local(path) => path.file_name().and_then(|value| value.to_str()),
-        AuthJsonSource::S3(uri) => uri.rsplit('/').next(),
-    };
-    upload_name
-        .filter(|value| is_json_upload_name(value))
-        .map(ToOwned::to_owned)
+    match &location.source {
+        AuthJsonSource::Local(path) => path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| is_json_upload_name(value))
+            .map(ToOwned::to_owned),
+        AuthJsonSource::RemoteUrl(url) => reqwest::Url::parse(url)
+            .ok()
+            .and_then(|url| {
+                url.path_segments()
+                    .and_then(Iterator::last)
+                    .map(str::to_owned)
+            })
+            .filter(|value| is_json_upload_name(value)),
+    }
 }
 
 fn is_json_upload_name(value: &str) -> bool {
@@ -1213,8 +1284,8 @@ mod tests {
     #[derive(Default)]
     struct MemorySources {
         files: BTreeMap<PathBuf, String>,
-        s3: BTreeMap<String, String>,
-        s3_error: Option<String>,
+        urls: BTreeMap<String, String>,
+        url_error: Option<String>,
     }
 
     impl FileProvider for MemorySources {
@@ -1228,18 +1299,18 @@ mod tests {
             self.files.contains_key(path)
         }
 
-        fn read_s3_uri_to_string(
+        fn read_remote_url_to_string(
             &self,
-            uri: &str,
+            url: &str,
             _timeout: Duration,
         ) -> Result<String, TokenproxyError> {
-            if let Some(error) = &self.s3_error {
+            if let Some(error) = &self.url_error {
                 return Err(TokenproxyError::invalid_config(error.clone()));
             }
-            self.s3
-                .get(uri)
+            self.urls
+                .get(url)
                 .cloned()
-                .ok_or_else(|| TokenproxyError::invalid_config("missing test S3 auth object"))
+                .ok_or_else(|| TokenproxyError::invalid_config("missing test remote auth object"))
         }
     }
 
@@ -2256,23 +2327,31 @@ mod tests {
     }
 
     #[test]
-    fn should_load_chatgpt_auth_json_from_s3_uri() {
-        let uri = "s3://tokenproxy-auth/chatgpt/auth.json";
+    fn should_load_chatgpt_auth_json_from_signed_url() {
+        let url = "https://tokenproxy-auth.example.test/chatgpt/auth.json?X-Amz-Signature=secret";
         let sources = MemorySources {
-            s3: BTreeMap::from([(
-                uri.to_string(),
+            urls: BTreeMap::from([(
+                url.to_string(),
                 r#"{"tokens":{"access_token":"chatgpt-access","account_id":"acct_123"}}"#
                     .to_string(),
             )]),
             ..MemorySources::default()
         };
 
-        let effective = load_effective_config(chatgpt_config(uri), &env(), &sources).unwrap();
+        let effective = load_effective_config(chatgpt_config(url), &env(), &sources).unwrap();
 
         assert_eq!(effective.accounts[0].bearer_token, "chatgpt-access");
         assert_eq!(
             effective.accounts[0].chatgpt_account_id.as_deref(),
             Some("acct_123")
+        );
+        assert_eq!(
+            effective.accounts[0]
+                .auth_json
+                .as_ref()
+                .unwrap()
+                .upload_name,
+            Some("auth.json".to_string())
         );
     }
 
@@ -2314,7 +2393,7 @@ mod tests {
             config_with_account(relative_path),
             &env(),
             &files,
-            "auth_json_path for chatgpt must be absolute or use s3://",
+            "auth_json_path for chatgpt must be absolute or use https://",
         );
 
         expect_config_error(
@@ -2346,35 +2425,41 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_invalid_chatgpt_auth_s3_uris() {
+    fn should_reject_invalid_chatgpt_auth_urls() {
         expect_config_error(
-            chatgpt_config("s3://tokenproxy-auth"),
+            chatgpt_config("http://tokenproxy-auth.example.test/auth.json"),
             &env(),
             &MemorySources::default(),
-            "must include an S3 object key",
+            "auth_json_path for chatgpt must be absolute or use https://",
         );
 
         expect_config_error(
-            chatgpt_config("s3://tokenproxy-auth/auth.json?token=secret"),
+            chatgpt_config("https://tokenproxy-auth.example.test/auth.json#secret"),
             &env(),
             &MemorySources::default(),
-            "must not include query or fragment data",
+            "must not include fragment data",
         );
     }
 
     #[test]
-    fn should_surface_chatgpt_auth_s3_fetch_errors() {
+    fn should_surface_chatgpt_auth_url_fetch_errors_without_query_secret() {
         let sources = MemorySources {
-            s3_error: Some("S3 object not found".to_string()),
+            url_error: Some("remote object not found".to_string()),
             ..MemorySources::default()
         };
 
-        expect_config_error(
-            chatgpt_config("s3://tokenproxy-auth/missing.json"),
+        let error = load_effective_config(
+            chatgpt_config("https://tokenproxy-auth.example.test/missing.json?token=secret"),
             &env(),
             &sources,
-            "failed to read auth_json_path for chatgpt: S3 object not found",
-        );
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("https://tokenproxy-auth.example.test/missing.json"));
+        assert!(error.contains("redacted_sha256="));
+        assert!(!error.contains("token=secret"));
+        assert!(error.contains("remote object not found"));
     }
 
     #[test]
@@ -2400,12 +2485,13 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_duplicate_enabled_chatgpt_auth_s3_uris() {
-        let uri = "s3://tokenproxy-auth/shared/auth.json";
+    fn should_reject_duplicate_enabled_chatgpt_auth_urls() {
+        let first = "https://tokenproxy-auth.example.test/shared/auth.json?token=one";
+        let second = "https://tokenproxy-auth.example.test/shared/auth.json?token=two";
         let config = Config {
             accounts: vec![
-                valid_chatgpt_account("chatgpt-one", uri),
-                valid_chatgpt_account("chatgpt-two", uri),
+                valid_chatgpt_account("chatgpt-one", first),
+                valid_chatgpt_account("chatgpt-two", second),
             ],
             ..Config::default()
         };
@@ -2414,8 +2500,8 @@ mod tests {
             config,
             &env(),
             &MemorySources {
-                s3: BTreeMap::from([(
-                    uri.to_string(),
+                urls: BTreeMap::from([(
+                    first.to_string(),
                     r#"{"tokens":{"id_token":"chatgpt-token"}}"#.to_string(),
                 )]),
                 ..MemorySources::default()

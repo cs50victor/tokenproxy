@@ -5,7 +5,8 @@ use std::time::Duration;
 use clap::{ArgAction, Parser};
 use tokenproxy::config::{
     EffectiveConfig, FileProvider, ProcessEnv, StdFileProvider, discover_account_models,
-    load_effective_config, parse_config_with_cli_overrides,
+    load_effective_config, parse_config_with_cli_overrides, redact_remote_url_for_error,
+    validate_remote_https_url,
 };
 use tokenproxy::error::TokenproxyError;
 use tokenproxy::logging::{
@@ -24,8 +25,8 @@ use tokio::sync::watch;
 struct Cli {
     #[arg(
         long,
-        value_name = "FILE_OR_S3_URI",
-        help = "Path or s3:// URI to tokenproxy.toml"
+        value_name = "FILE_OR_URL",
+        help = "Path or signed https:// URL to tokenproxy.toml"
     )]
     config: Option<PathBuf>,
     #[arg(
@@ -166,13 +167,15 @@ fn read_config_file(
 ) -> Result<Option<String>, CliError> {
     path.map(|path| {
         let raw = path.to_string_lossy();
-        if raw.starts_with("s3://") {
+        if raw.starts_with("https://") {
+            let url =
+                validate_remote_https_url(&raw, "config URL").map_err(CliError::Tokenproxy)?;
             files
-                .read_s3_uri_to_string(raw.as_ref(), default_config_fetch_timeout())
+                .read_remote_url_to_string(&url, default_config_fetch_timeout())
                 .map_err(|source| {
                     CliError::Tokenproxy(TokenproxyError::invalid_config(format!(
                         "failed to read config file {}: {}",
-                        path.display(),
+                        redact_remote_url_for_error(&url),
                         source.message
                     )))
                 })
@@ -195,7 +198,14 @@ fn initial_config_status(path: Option<&std::path::Path>, raw_config: Option<&str
         revision: None,
         config_sha256: sha256_hex(raw_config.unwrap_or_default().as_bytes()),
         config_source: path
-            .map(|path| path.to_string_lossy().into_owned())
+            .map(|path| {
+                let raw = path.to_string_lossy();
+                if raw.starts_with("https://") {
+                    redact_remote_url_for_error(&raw)
+                } else {
+                    raw.into_owned()
+                }
+            })
             .unwrap_or_else(|| "inline".to_string()),
         loaded_at: now_timestamp_pair().utc,
         reload_in_progress: false,
@@ -335,44 +345,51 @@ mod tests {
     }
 
     #[test]
-    fn should_read_top_level_config_from_s3_uri() {
+    fn should_read_top_level_config_from_signed_url() {
         let files = ConfigFiles {
             files: BTreeMap::new(),
-            s3: BTreeMap::from([(
-                "s3://bucket/tokenproxy/user/current.toml".to_string(),
-                "[server]\nid = \"from-s3\"\n".to_string(),
+            urls: BTreeMap::from([(
+                "https://bucket.example.test/tokenproxy/user/current.toml?X-Amz-Signature=secret"
+                    .to_string(),
+                "[server]\nid = \"from-url\"\n".to_string(),
             )]),
         };
 
         let raw = read_config_file(
-            Some(Path::new("s3://bucket/tokenproxy/user/current.toml")),
+            Some(Path::new(
+                "https://bucket.example.test/tokenproxy/user/current.toml?X-Amz-Signature=secret",
+            )),
             &files,
         )
         .unwrap();
 
-        assert_eq!(raw.as_deref(), Some("[server]\nid = \"from-s3\"\n"));
+        assert_eq!(raw.as_deref(), Some("[server]\nid = \"from-url\"\n"));
     }
 
     #[test]
-    fn should_include_top_level_s3_config_uri_in_read_errors() {
+    fn should_redact_top_level_config_url_query_in_read_errors() {
         let error = read_config_file(
-            Some(Path::new("s3://bucket/tokenproxy/user/missing.toml")),
+            Some(Path::new(
+                "https://bucket.example.test/tokenproxy/user/missing.toml?X-Amz-Signature=secret",
+            )),
             &ConfigFiles::default(),
         )
-        .expect_err("missing S3 config rejected");
+        .expect_err("missing URL config rejected");
 
         assert!(
             error
                 .to_string()
-                .contains("s3://bucket/tokenproxy/user/missing.toml")
+                .contains("https://bucket.example.test/tokenproxy/user/missing.toml")
         );
-        assert!(error.to_string().contains("missing S3 config"));
+        assert!(error.to_string().contains("redacted_sha256="));
+        assert!(!error.to_string().contains("X-Amz-Signature=secret"));
+        assert!(error.to_string().contains("missing URL config"));
     }
 
     #[derive(Default)]
     struct ConfigFiles {
         files: BTreeMap<PathBuf, String>,
-        s3: BTreeMap<String, String>,
+        urls: BTreeMap<String, String>,
     }
 
     impl FileProvider for ConfigFiles {
@@ -386,15 +403,15 @@ mod tests {
             self.files.contains_key(path)
         }
 
-        fn read_s3_uri_to_string(
+        fn read_remote_url_to_string(
             &self,
-            uri: &str,
+            url: &str,
             _timeout: Duration,
         ) -> Result<String, TokenproxyError> {
-            self.s3
-                .get(uri)
+            self.urls
+                .get(url)
                 .cloned()
-                .ok_or_else(|| TokenproxyError::invalid_config("missing S3 config"))
+                .ok_or_else(|| TokenproxyError::invalid_config("missing URL config"))
         }
     }
 

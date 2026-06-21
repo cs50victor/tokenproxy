@@ -37,6 +37,7 @@ use crate::config::RetryConfig;
 use crate::config::{
     AccountKind, EffectiveAccount, FileProvider, ProcessEnv, StdFileProvider,
     discover_account_models, load_effective_config, parse_config_with_cli_overrides,
+    redact_remote_url_for_error, validate_remote_https_url,
 };
 use crate::error::{ErrorCode, TokenproxyError};
 use crate::http::classify::{RequestShape, classify_request};
@@ -379,7 +380,7 @@ use std::collections::BTreeSet;
 struct AdminConfigReloadRequest {
     revision: Option<u64>,
     config_sha256: Option<String>,
-    config_s3_uri: Option<String>,
+    config_url: Option<String>,
     config_toml: Option<String>,
 }
 
@@ -431,8 +432,8 @@ async fn admin_config_reload_inner(
         ));
     }
 
-    let s3_timeout = Duration::from_millis(state.effective().config.timeouts.request_header_ms);
-    let (raw_config, source) = reload_config_source(&request, s3_timeout)?;
+    let fetch_timeout = Duration::from_millis(state.effective().config.timeouts.request_header_ms);
+    let (raw_config, source) = reload_config_source(&request, fetch_timeout, &StdFileProvider)?;
     let config_sha256 = sha256_hex(raw_config.as_bytes());
     if let Some(expected) = request.config_sha256.as_deref()
         && expected != config_sha256
@@ -514,18 +515,22 @@ fn restart_required_for_reload(
 
 fn reload_config_source(
     request: &AdminConfigReloadRequest,
-    s3_timeout: Duration,
+    fetch_timeout: Duration,
+    files: &impl FileProvider,
 ) -> Result<(String, String), TokenproxyError> {
-    match (&request.config_toml, &request.config_s3_uri) {
+    match (&request.config_toml, &request.config_url) {
         (Some(_), Some(_)) => Err(TokenproxyError::invalid_config(
-            "set exactly one of config_toml or config_s3_uri",
+            "set exactly one of config_toml or config_url",
         )),
         (Some(config_toml), None) => Ok((config_toml.clone(), "inline".to_string())),
-        (None, Some(config_s3_uri)) => StdFileProvider
-            .read_s3_uri_to_string(config_s3_uri, s3_timeout)
-            .map(|raw| (raw, config_s3_uri.clone())),
+        (None, Some(config_url)) => {
+            let url = validate_remote_https_url(config_url, "config_url")?;
+            files
+                .read_remote_url_to_string(&url, fetch_timeout)
+                .map(|raw| (raw, redact_remote_url_for_error(&url)))
+        }
         (None, None) => Err(TokenproxyError::invalid_config(
-            "set exactly one of config_toml or config_s3_uri",
+            "set exactly one of config_toml or config_url",
         )),
     }
 }
@@ -4530,7 +4535,7 @@ mod tests {
     use crate::auth::use_refresh_endpoint_for_testing;
     use crate::config::{AccountConfig, Config, EffectiveAuthJson, EffectiveConfig};
     use futures_util::TryStreamExt;
-    use std::{net::SocketAddr, sync::Mutex as StdMutex};
+    use std::{collections::BTreeMap, net::SocketAddr, path::Path, sync::Mutex as StdMutex};
     use tokio::{io::AsyncReadExt, net::TcpListener, time::sleep};
     use tokio_tungstenite::{accept_async, accept_hdr_async};
     use tower::ServiceExt;
@@ -4538,6 +4543,33 @@ mod tests {
     impl SseMetricContext {
         fn unknown() -> Self {
             Self::new("unknown", "unknown")
+        }
+    }
+
+    #[derive(Default)]
+    struct MemoryConfigUrls(BTreeMap<String, String>);
+
+    impl FileProvider for MemoryConfigUrls {
+        fn read_to_string(&self, _path: &Path) -> std::io::Result<String> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing test file",
+            ))
+        }
+
+        fn is_file(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn read_remote_url_to_string(
+            &self,
+            url: &str,
+            _timeout: Duration,
+        ) -> Result<String, TokenproxyError> {
+            self.0
+                .get(url)
+                .cloned()
+                .ok_or_else(|| TokenproxyError::invalid_config("missing remote test config"))
         }
     }
 
@@ -7857,6 +7889,30 @@ data: {"type":"response.custom.future_event"}
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["data"][0]["id"], "gpt-5.6");
+    }
+
+    #[test]
+    fn should_read_reload_config_from_signed_url_without_preserving_query_secret() {
+        let config = reload_config_toml("URL", "peer:new", "gpt-5.6", None);
+        let url = "https://config.example.test/tokenproxy/current.toml?X-Amz-Signature=secret";
+        let request = AdminConfigReloadRequest {
+            revision: Some(2),
+            config_sha256: Some(sha256_hex(config.as_bytes())),
+            config_url: Some(url.to_string()),
+            config_toml: None,
+        };
+
+        let (raw, source) = reload_config_source(
+            &request,
+            Duration::from_secs(1),
+            &MemoryConfigUrls(BTreeMap::from([(url.to_string(), config.clone())])),
+        )
+        .unwrap();
+
+        assert_eq!(raw, config);
+        assert!(source.contains("https://config.example.test/tokenproxy/current.toml"));
+        assert!(source.contains("redacted_sha256="));
+        assert!(!source.contains("X-Amz-Signature=secret"));
     }
 
     #[tokio::test]
