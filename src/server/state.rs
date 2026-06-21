@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use serde::Serialize;
 use tokio::sync::{Mutex, watch};
 
 use crate::auth::{ChatGptAuthCell, ChatGptAuthSnapshot, chatgpt_auth_cells};
@@ -27,8 +28,26 @@ pub struct AppState {
     pub(super) usage_windows: Arc<Mutex<BTreeMap<String, Vec<UsageWindow>>>>,
     account_health: Arc<BTreeMap<String, Arc<AccountHealthCell>>>,
     chatgpt_auth: Arc<BTreeMap<String, Arc<ChatGptAuthCell>>>,
+    config_status: Arc<ConfigStatus>,
     log_format: LogFormat,
     shutdown_tx: watch::Sender<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigStatus {
+    pub config_sha256: String,
+    pub config_source: String,
+    pub loaded_at: String,
+}
+
+impl Default for ConfigStatus {
+    fn default() -> Self {
+        Self {
+            config_sha256: String::new(),
+            config_source: "inline".to_string(),
+            loaded_at: String::new(),
+        }
+    }
 }
 
 const TRANSIENT_FAILURE_QUIET_RESET_MS: u64 = 5 * 60 * 1000;
@@ -172,6 +191,15 @@ impl AppState {
         log_format: LogFormat,
         shutdown_tx: watch::Sender<bool>,
     ) -> Result<Self, TokenproxyError> {
+        Self::new_with_status(effective, log_format, shutdown_tx, ConfigStatus::default())
+    }
+
+    pub fn new_with_status(
+        effective: EffectiveConfig,
+        log_format: LogFormat,
+        shutdown_tx: watch::Sender<bool>,
+        config_status: ConfigStatus,
+    ) -> Result<Self, TokenproxyError> {
         let upstream_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
             .pool_idle_timeout(Duration::from_millis(
@@ -204,6 +232,7 @@ impl AppState {
             usage_windows: Arc::new(Mutex::new(BTreeMap::new())),
             account_health,
             chatgpt_auth,
+            config_status: Arc::new(config_status),
             log_format,
             shutdown_tx,
         })
@@ -287,6 +316,10 @@ impl AppState {
                 }
             })
             .collect()
+    }
+
+    pub(super) fn config_status(&self) -> ConfigStatus {
+        (*self.config_status).clone()
     }
 
     pub(super) async fn account_for_request(&self, account: &EffectiveAccount) -> EffectiveAccount {

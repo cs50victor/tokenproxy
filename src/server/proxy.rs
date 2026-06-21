@@ -202,6 +202,10 @@ pub fn app(state: AppState) -> Router {
             get(usage).fallback(authenticated_method_not_allowed),
         )
         .route(
+            "/admin/config/status",
+            get(admin_config_status).fallback(authenticated_method_not_allowed),
+        )
+        .route(
             "/v1/models",
             get(models).fallback(authenticated_method_not_allowed),
         )
@@ -281,6 +285,78 @@ async fn usage(
         &account_health,
         &state.effective.account_hash_key,
     )))
+}
+
+#[derive(Debug, Serialize)]
+struct AdminConfigStatus {
+    config_sha256: String,
+    config_source: String,
+    tokenproxy_version: &'static str,
+    loaded_at: String,
+    accounts: Vec<AdminAccountStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminAccountStatus {
+    id: String,
+    kind: AccountKind,
+    enabled: bool,
+    supports_chat_completions: bool,
+    supports_responses: bool,
+    supports_responses_ws: bool,
+    supports_incremental_previous_response_id: bool,
+    supports_compact: bool,
+    supports_anthropic_messages: bool,
+    models: Vec<String>,
+    service_tiers: Vec<String>,
+    health: String,
+}
+
+async fn admin_config_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, TokenproxyError> {
+    require_admin_auth(&state, &headers)?;
+    let metadata = state.config_status();
+    let health = state.account_health_snapshot();
+    let accounts = state
+        .effective
+        .config
+        .accounts
+        .iter()
+        .map(|account| AdminAccountStatus {
+            id: account.id.clone(),
+            kind: account.kind.clone(),
+            enabled: account.enabled,
+            supports_chat_completions: account.supports_chat_completions,
+            supports_responses: account.supports_responses,
+            supports_responses_ws: account.supports_responses_ws,
+            supports_incremental_previous_response_id: account
+                .supports_incremental_previous_response_id,
+            supports_compact: account.supports_compact,
+            supports_anthropic_messages: account.supports_anthropic_messages,
+            models: account.models.clone(),
+            service_tiers: account.service_tiers.clone(),
+            health: if account.enabled {
+                health
+                    .get(&account.id)
+                    .cloned()
+                    .unwrap_or(AccountHealth::Open)
+                    .as_str()
+                    .to_string()
+            } else {
+                "disabled".to_string()
+            },
+        })
+        .collect();
+
+    Ok(Json(AdminConfigStatus {
+        config_sha256: metadata.config_sha256,
+        config_source: metadata.config_source,
+        tokenproxy_version: env!("CARGO_PKG_VERSION"),
+        loaded_at: metadata.loaded_at,
+        accounts,
+    }))
 }
 
 use serde::Serialize;
@@ -1703,10 +1779,22 @@ async fn ensure_upstream_session(
                 format!("failed to build upstream WebSocket request: {error}"),
             )
         })?;
-        request.headers_mut().insert(
-            "authorization",
-            upstream_authorization_header(&account.bearer_token)?,
-        );
+        if matches!(account.config.kind, AccountKind::MainroomPeer) {
+            let Some(mut authorization) = upstream_headers.get("authorization").cloned() else {
+                return Err(TokenproxyError::new(
+                    StatusCode::UNAUTHORIZED,
+                    ErrorCode::Unauthorized,
+                    "mainroom_peer WebSocket forwarding requires a downstream Authorization bearer",
+                ));
+            };
+            authorization.set_sensitive(true);
+            request.headers_mut().insert("authorization", authorization);
+        } else {
+            request.headers_mut().insert(
+                "authorization",
+                upstream_authorization_header(&account.bearer_token)?,
+            );
+        }
         copy_codex_upstream_headers(request.headers_mut(), upstream_headers);
         if let Some(account_id) = account.chatgpt_account_id.as_deref() {
             request
@@ -1822,6 +1910,9 @@ const DEFAULT_CODEX_OPENAI_BETA: &str = "responses_websockets=2026-02-06";
 
 fn codex_upstream_websocket_headers(inbound: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
+    if let Some(authorization) = inbound.get("authorization") {
+        headers.insert("authorization", authorization.clone());
+    }
     copy_codex_upstream_headers(&mut headers, inbound);
     headers
 }
@@ -2127,7 +2218,9 @@ fn upstream_url_for_path(
     let (public_path, public_query) = split_path_and_query(public_path_and_query);
 
     match account.config.kind {
-        AccountKind::OpenAiApiKey => append_path_and_query(base_url, public_path, public_query),
+        AccountKind::OpenAiApiKey | AccountKind::MainroomPeer => {
+            append_path_and_query(base_url, public_path, public_query)
+        }
         AccountKind::AnthropicApiKey => {
             if public_path != "/v1/messages" {
                 return Err(TokenproxyError::new(
@@ -2243,6 +2336,7 @@ async fn forward_to_upstream(
             AccountKind::AnthropicApiKey => UpstreamAuth::AnthropicApiKey,
             AccountKind::OpenAiApiKey => UpstreamAuth::OpenAiBearer,
             AccountKind::ChatgptCodexAuthJson => UpstreamAuth::ChatGptBearer,
+            AccountKind::MainroomPeer => UpstreamAuth::ForwardInboundBearer,
         },
         state.effective.config.server.allow_openai_request_headers,
     )?;
@@ -3719,6 +3813,7 @@ async fn select_next_passthrough_account(
 fn passthrough_account_matches_path(account: &EffectiveAccount, path: &str) -> bool {
     match account.config.kind {
         AccountKind::OpenAiApiKey => openai_api_key_passthrough_matches_path(account, path),
+        AccountKind::MainroomPeer => mainroom_peer_passthrough_matches_path(account, path),
         AccountKind::AnthropicApiKey => path == "/v1/messages",
         AccountKind::ChatgptCodexAuthJson => true,
     }
@@ -3742,6 +3837,13 @@ fn openai_api_key_passthrough_matches_path(account: &EffectiveAccount, path: &st
         && account.config.supports_responses
         && account.config.supports_responses_ws
         && account.config.supports_compact
+}
+
+fn mainroom_peer_passthrough_matches_path(account: &EffectiveAccount, path: &str) -> bool {
+    if path == "/v1/messages" {
+        return account.config.supports_anthropic_messages;
+    }
+    openai_api_key_passthrough_matches_path(account, path)
 }
 
 async fn record_account_http_status(
@@ -4071,6 +4173,31 @@ fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyE
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthorized,
             "missing or invalid downstream credential",
+        ))
+    }
+}
+
+fn require_admin_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
+    let Some(admin_token) = state.effective.admin_token.as_deref() else {
+        return Err(TokenproxyError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthorized,
+            "admin credential is not configured",
+        ));
+    };
+    let authorized = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|actual| actual.strip_prefix("Bearer "))
+        .is_some_and(|actual| constant_time_eq(actual.as_bytes(), admin_token.as_bytes()));
+
+    if authorized {
+        Ok(())
+    } else {
+        Err(TokenproxyError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthorized,
+            "missing or invalid admin credential",
         ))
     }
 }
@@ -4467,6 +4594,7 @@ mod tests {
         EffectiveConfig {
             config,
             config_update_endpoint: None,
+            admin_token: None,
             downstream_token: "client-key".to_string(),
             account_hash_key: "test-account-hash-key".to_string(),
             accounts,
@@ -4527,6 +4655,28 @@ mod tests {
                 ..AccountConfig::default()
             },
             bearer_token: api_key.to_string(),
+            chatgpt_account_id: None,
+            auth_json: None,
+            prompt_cache_key_seed: None,
+        }
+    }
+
+    fn mainroom_peer_account(id: &str, base_url: String, priority: i32) -> EffectiveAccount {
+        EffectiveAccount {
+            config: AccountConfig {
+                id: id.to_string(),
+                kind: AccountKind::MainroomPeer,
+                base_url,
+                priority,
+                models: vec!["gpt-5.5".to_string()],
+                supports_chat_completions: true,
+                supports_responses: true,
+                supports_responses_ws: true,
+                supports_compact: true,
+                service_tiers: vec!["default".to_string(), "priority".to_string()],
+                ..AccountConfig::default()
+            },
+            bearer_token: String::new(),
             chatgpt_account_id: None,
             auth_json: None,
             prompt_cache_key_seed: None,
@@ -7349,6 +7499,100 @@ data: {"type":"response.custom.future_event"}
             metrics.request_outcomes[0].0.endpoint,
             PASSTHROUGH_METRIC_ENDPOINT
         );
+    }
+
+    #[tokio::test]
+    async fn should_forward_downstream_authorization_to_mainroom_peer() {
+        let captured_requests = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_http_upstream(Arc::clone(&captured_requests)).await;
+        let state = AppState::new(effective_config(vec![mainroom_peer_account(
+            "peer:userb",
+            format!("http://{upstream}/v1"),
+            100,
+        )]))
+        .unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("authorization", "Bearer client-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"gpt-5.5","input":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = captured_requests
+            .lock()
+            .expect("request capture lock is not poisoned")
+            .first()
+            .cloned()
+            .expect("upstream request should be captured");
+        assert!(
+            request.starts_with("POST /v1/responses HTTP/1.1"),
+            "{request}"
+        );
+        assert!(request.contains("authorization: Bearer client-key"));
+        assert!(!request.contains("Bearer upstream-token"));
+    }
+
+    #[tokio::test]
+    async fn should_report_admin_config_status() {
+        let mut effective = effective_config(vec![mainroom_peer_account(
+            "peer:userb",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]);
+        effective.admin_token = Some("admin-key".to_string());
+        let state = AppState::new(effective).unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/config/status")
+                    .header("authorization", "Bearer admin-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["tokenproxy_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["accounts"][0]["id"], "peer:userb");
+        assert_eq!(body["accounts"][0]["kind"], "mainroom_peer");
+        assert_eq!(body["accounts"][0]["health"], "open");
+    }
+
+    #[tokio::test]
+    async fn should_reject_admin_config_status_without_admin_token() {
+        let state = AppState::new(effective_config(vec![mainroom_peer_account(
+            "peer:userb",
+            "http://127.0.0.1:1/v1".to_string(),
+            100,
+        )]))
+        .unwrap();
+
+        let response = app(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/config/status")
+                    .header("authorization", "Bearer client-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

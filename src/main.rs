@@ -4,14 +4,15 @@ use std::time::Duration;
 
 use clap::{ArgAction, Parser};
 use tokenproxy::config::{
-    EffectiveConfig, ProcessEnv, StdFileProvider, discover_account_models, load_effective_config,
-    parse_config_with_cli_overrides,
+    EffectiveConfig, FileProvider, ProcessEnv, StdFileProvider, discover_account_models,
+    load_effective_config, parse_config_with_cli_overrides,
 };
 use tokenproxy::error::TokenproxyError;
 use tokenproxy::logging::{
     LogFormat, StartupConfigSummary, StartupLogLine, shutdown_forced_log_line, startup_log_line,
 };
-use tokenproxy::server::{AppState, app};
+use tokenproxy::observability::sha256_hex;
+use tokenproxy::server::{AppState, ConfigStatus, app};
 use tokenproxy::time_parse::now_timestamp_pair;
 use tokio::sync::watch;
 
@@ -21,7 +22,11 @@ use tokio::sync::watch;
     about = "Small Rust proxy for OpenAI-compatible agent traffic"
 )]
 struct Cli {
-    #[arg(long, value_name = "FILE", help = "Path to tokenproxy.toml")]
+    #[arg(
+        long,
+        value_name = "FILE_OR_S3_URI",
+        help = "Path or s3:// URI to tokenproxy.toml"
+    )]
     config: Option<PathBuf>,
     #[arg(
         short = 'c',
@@ -62,7 +67,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         });
 
-    let raw_config = read_config_file(config_path.as_deref())?;
+    let raw_config = read_config_file(config_path.as_deref(), &StdFileProvider)?;
+    let config_status = initial_config_status(config_path.as_deref(), raw_config.as_deref());
     let mut config = parse_config_with_cli_overrides(raw_config.as_deref(), &cli.config_overrides)?;
     if let Some(bind) = cli.bind {
         config.server.bind = bind;
@@ -113,7 +119,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     );
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let state =
-        AppState::new_with_log_format_and_shutdown(effective, log_format, shutdown_tx.clone())?;
+        AppState::new_with_status(effective, log_format, shutdown_tx.clone(), config_status)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| CliError::Io {
@@ -149,14 +155,44 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     Ok(())
 }
 
-fn read_config_file(path: Option<&std::path::Path>) -> Result<Option<String>, CliError> {
+fn read_config_file(
+    path: Option<&std::path::Path>,
+    files: &impl FileProvider,
+) -> Result<Option<String>, CliError> {
     path.map(|path| {
-        std::fs::read_to_string(path).map_err(|source| CliError::Io {
-            context: format!("failed to read config file {}", path.display()),
-            source,
-        })
+        let raw = path.to_string_lossy();
+        if raw.starts_with("s3://") {
+            files
+                .read_s3_uri_to_string(raw.as_ref(), default_config_fetch_timeout())
+                .map_err(|source| {
+                    CliError::Tokenproxy(TokenproxyError::invalid_config(format!(
+                        "failed to read config file {}: {}",
+                        path.display(),
+                        source.message
+                    )))
+                })
+        } else {
+            files.read_to_string(path).map_err(|source| CliError::Io {
+                context: format!("failed to read config file {}", path.display()),
+                source,
+            })
+        }
     })
     .transpose()
+}
+
+fn default_config_fetch_timeout() -> Duration {
+    Duration::from_millis(tokenproxy::config::TimeoutConfig::default().request_header_ms)
+}
+
+fn initial_config_status(path: Option<&std::path::Path>, raw_config: Option<&str>) -> ConfigStatus {
+    ConfigStatus {
+        config_sha256: sha256_hex(raw_config.unwrap_or_default().as_bytes()),
+        config_source: path
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "inline".to_string()),
+        loaded_at: now_timestamp_pair().utc,
+    }
 }
 
 #[derive(Debug)]
@@ -245,6 +281,8 @@ async fn force_shutdown_after(shutdown_rx: watch::Receiver<bool>, grace: Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::path::Path;
     use tokenproxy::config::{AccountConfig, Config, EffectiveAccount};
 
     #[test]
@@ -279,12 +317,77 @@ mod tests {
     #[test]
     fn should_render_missing_config_path_readably() {
         let missing = PathBuf::from("/tmp/tokenproxy-missing-config-for-test.toml");
-        let error = read_config_file(Some(&missing)).expect_err("missing config rejected");
+        let error = read_config_file(Some(&missing), &StdFileProvider)
+            .expect_err("missing config rejected");
 
         assert_eq!(
             error.to_string(),
             "failed to read config file /tmp/tokenproxy-missing-config-for-test.toml: No such file or directory (os error 2)"
         );
+    }
+
+    #[test]
+    fn should_read_top_level_config_from_s3_uri() {
+        let files = ConfigFiles {
+            files: BTreeMap::new(),
+            s3: BTreeMap::from([(
+                "s3://bucket/tokenproxy/user/current.toml".to_string(),
+                "[server]\nid = \"from-s3\"\n".to_string(),
+            )]),
+        };
+
+        let raw = read_config_file(
+            Some(Path::new("s3://bucket/tokenproxy/user/current.toml")),
+            &files,
+        )
+        .unwrap();
+
+        assert_eq!(raw.as_deref(), Some("[server]\nid = \"from-s3\"\n"));
+    }
+
+    #[test]
+    fn should_include_top_level_s3_config_uri_in_read_errors() {
+        let error = read_config_file(
+            Some(Path::new("s3://bucket/tokenproxy/user/missing.toml")),
+            &ConfigFiles::default(),
+        )
+        .expect_err("missing S3 config rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("s3://bucket/tokenproxy/user/missing.toml")
+        );
+        assert!(error.to_string().contains("missing S3 config"));
+    }
+
+    #[derive(Default)]
+    struct ConfigFiles {
+        files: BTreeMap<PathBuf, String>,
+        s3: BTreeMap<String, String>,
+    }
+
+    impl FileProvider for ConfigFiles {
+        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            self.files.get(path).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "missing test config")
+            })
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.contains_key(path)
+        }
+
+        fn read_s3_uri_to_string(
+            &self,
+            uri: &str,
+            _timeout: Duration,
+        ) -> Result<String, TokenproxyError> {
+            self.s3
+                .get(uri)
+                .cloned()
+                .ok_or_else(|| TokenproxyError::invalid_config("missing S3 config"))
+        }
     }
 
     #[test]
@@ -302,6 +405,7 @@ mod tests {
         let effective = EffectiveConfig {
             config,
             config_update_endpoint: None,
+            admin_token: None,
             downstream_token: "client".to_string(),
             account_hash_key: "hash-key".to_string(),
             accounts: vec![
