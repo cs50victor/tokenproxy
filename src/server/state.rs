@@ -18,15 +18,19 @@ use crate::metrics::Metrics;
 use crate::routing::AccountHealth;
 use crate::usage::UsageWindow;
 
+mod proxy;
+
+pub use proxy::app;
+
 #[derive(Clone)]
 pub struct AppState {
     effective: Arc<RwLock<Arc<EffectiveConfig>>>,
     // reqwest pools connections per origin internally, so one shared client
     // covers every upstream.
-    pub(super) upstream_client: reqwest::Client,
+    upstream_client: reqwest::Client,
     request_counter: Arc<AtomicU64>,
-    pub(super) metrics: Metrics,
-    pub(super) usage_windows: Arc<Mutex<BTreeMap<String, Vec<UsageWindow>>>>,
+    metrics: Metrics,
+    usage_windows: Arc<Mutex<BTreeMap<String, Vec<UsageWindow>>>>,
     account_health: Arc<RwLock<BTreeMap<String, Arc<AccountHealthCell>>>>,
     chatgpt_auth: Arc<RwLock<BTreeMap<String, Arc<ChatGptAuthCell>>>>,
     config_status: Arc<RwLock<ConfigStatus>>,
@@ -67,7 +71,7 @@ const ACCOUNT_HEALTH_USAGE_LIMITED: u8 = 3;
 const ACCOUNT_HEALTH_AUTH_FAILED: u8 = 4;
 
 #[derive(Debug)]
-pub(super) struct AccountHealthCell {
+struct AccountHealthCell {
     state: AtomicU8,
     deadline_ms: AtomicU64,
     transient_failure_count: AtomicU32,
@@ -77,7 +81,7 @@ pub(super) struct AccountHealthCell {
 }
 
 impl AccountHealthCell {
-    pub(super) fn new() -> Self {
+    fn new() -> Self {
         Self {
             state: AtomicU8::new(ACCOUNT_HEALTH_OPEN),
             deadline_ms: AtomicU64::new(0),
@@ -88,7 +92,7 @@ impl AccountHealthCell {
         }
     }
 
-    pub(super) fn load(&self) -> AccountHealth {
+    fn load(&self) -> AccountHealth {
         match self.state.load(Ordering::Acquire) {
             ACCOUNT_HEALTH_UNKNOWN => AccountHealth::Unknown,
             ACCOUNT_HEALTH_THROTTLED => AccountHealth::Throttled {
@@ -102,27 +106,27 @@ impl AccountHealthCell {
         }
     }
 
-    pub(super) fn transient_failure_count(&self) -> u32 {
+    fn transient_failure_count(&self) -> u32 {
         self.transient_failure_count.load(Ordering::Acquire)
     }
 
-    pub(super) fn record_connect_duration_ms(&self, duration_ms: u64) {
+    fn record_connect_duration_ms(&self, duration_ms: u64) {
         update_latency_ewma(&self.ewma_connect_ms, duration_ms);
     }
 
-    pub(super) fn record_first_event_duration_ms(&self, duration_ms: u64) {
+    fn record_first_event_duration_ms(&self, duration_ms: u64) {
         update_latency_ewma(&self.ewma_first_event_ms, duration_ms);
     }
 
-    pub(super) fn connect_latency_bucket(&self) -> u16 {
+    fn connect_latency_bucket(&self) -> u16 {
         latency_bucket(self.ewma_connect_ms.load(Ordering::Acquire))
     }
 
-    pub(super) fn first_event_latency_bucket(&self) -> u16 {
+    fn first_event_latency_bucket(&self) -> u16 {
         latency_bucket(self.ewma_first_event_ms.load(Ordering::Acquire))
     }
 
-    pub(super) fn increment_transient_failure_count_at(&self, now_ms: u64) -> u32 {
+    fn increment_transient_failure_count_at(&self, now_ms: u64) -> u32 {
         loop {
             let previous_last = self.last_transient_failure_ms.load(Ordering::Acquire);
             let previous_count = self.transient_failure_count.load(Ordering::Acquire);
@@ -259,35 +263,35 @@ impl AppState {
         })
     }
 
-    pub(super) fn next_request_id(&self) -> String {
+    fn next_request_id(&self) -> String {
         let id = self.request_counter.fetch_add(1, Ordering::Relaxed);
         format!("req_{id:016x}")
     }
 
-    pub(super) fn emit_request_log(&self, log: &RequestLog<'_>) {
+    fn emit_request_log(&self, log: &RequestLog<'_>) {
         eprintln!("{}", request_log_line(self.log_format, log));
     }
 
-    pub(super) fn emit_route_selection_log(&self, log: &RouteSelectionLog<'_>) {
+    fn emit_route_selection_log(&self, log: &RouteSelectionLog<'_>) {
         eprintln!("{}", route_selection_log_line(self.log_format, log));
     }
 
-    pub(super) fn shutdown_receiver(&self) -> watch::Receiver<bool> {
+    fn shutdown_receiver(&self) -> watch::Receiver<bool> {
         self.shutdown_tx.subscribe()
     }
 
-    pub(super) fn effective(&self) -> Arc<EffectiveConfig> {
+    fn effective(&self) -> Arc<EffectiveConfig> {
         self.effective
             .read()
             .expect("effective config lock poisoned")
             .clone()
     }
 
-    pub(super) fn routing_accounts(&self) -> Vec<EffectiveAccount> {
+    fn routing_accounts(&self) -> Vec<EffectiveAccount> {
         self.effective().accounts.clone()
     }
 
-    pub(super) fn account_health_cell(&self, account_id: &str) -> Option<Arc<AccountHealthCell>> {
+    fn account_health_cell(&self, account_id: &str) -> Option<Arc<AccountHealthCell>> {
         self.account_health
             .read()
             .expect("account health lock poisoned")
@@ -295,7 +299,7 @@ impl AppState {
             .cloned()
     }
 
-    pub(super) fn store_account_health(&self, account_id: &str, health: AccountHealth) {
+    fn store_account_health(&self, account_id: &str, health: AccountHealth) {
         if let Some(cell) = self.account_health_cell(account_id) {
             match health {
                 AccountHealth::Open => cell.clear(),
@@ -328,7 +332,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn clear_account_health_if_not_auth_failed(&self, account_id: &str) {
+    fn clear_account_health_if_not_auth_failed(&self, account_id: &str) {
         if let Some(cell) = self.account_health_cell(account_id)
             && cell.state.load(Ordering::Acquire) != ACCOUNT_HEALTH_AUTH_FAILED
         {
@@ -336,7 +340,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn account_health_snapshot(&self) -> BTreeMap<String, AccountHealth> {
+    fn account_health_snapshot(&self) -> BTreeMap<String, AccountHealth> {
         self.account_health
             .read()
             .expect("account health lock poisoned")
@@ -352,24 +356,24 @@ impl AppState {
             .collect()
     }
 
-    pub(super) fn config_status(&self) -> ConfigStatus {
+    fn config_status(&self) -> ConfigStatus {
         self.config_status
             .read()
             .expect("config status lock poisoned")
             .clone()
     }
 
-    pub(super) fn config_overrides(&self) -> &[String] {
+    fn config_overrides(&self) -> &[String] {
         self.config_overrides.as_slice()
     }
 
-    pub(super) fn try_begin_reload(&self) -> bool {
+    fn try_begin_reload(&self) -> bool {
         self.reload_in_progress
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
-    pub(super) fn finish_reload(&self) {
+    fn finish_reload(&self) {
         self.reload_in_progress.store(false, Ordering::Release);
         let mut status = self
             .config_status
@@ -378,7 +382,7 @@ impl AppState {
         status.reload_in_progress = false;
     }
 
-    pub(super) fn set_reload_error(&self, error: String) {
+    fn set_reload_error(&self, error: String) {
         let mut status = self
             .config_status
             .write()
@@ -387,7 +391,7 @@ impl AppState {
         status.last_reload_error = Some(error);
     }
 
-    pub(super) fn set_reload_in_progress(&self) {
+    fn set_reload_in_progress(&self) {
         let mut status = self
             .config_status
             .write()
@@ -396,7 +400,7 @@ impl AppState {
         status.last_reload_error = None;
     }
 
-    pub(super) fn swap_effective(
+    fn swap_effective(
         &self,
         effective: EffectiveConfig,
         status: ConfigStatus,
@@ -440,7 +444,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(super) async fn account_for_request(&self, account: &EffectiveAccount) -> EffectiveAccount {
+    async fn account_for_request(&self, account: &EffectiveAccount) -> EffectiveAccount {
         let Some(cell) = self
             .chatgpt_auth
             .read()
@@ -456,7 +460,7 @@ impl AppState {
         )
     }
 
-    pub(super) async fn recover_chatgpt_unauthorized(
+    async fn recover_chatgpt_unauthorized(
         &self,
         account: &EffectiveAccount,
     ) -> Result<Option<EffectiveAccount>, TokenproxyError> {
@@ -476,7 +480,7 @@ impl AppState {
         Ok(Some(apply_chatgpt_auth_snapshot(account, snapshot)))
     }
 
-    pub(super) fn chatgpt_bearer_authorized(&self, actual: &str) -> bool {
+    fn chatgpt_bearer_authorized(&self, actual: &str) -> bool {
         self.chatgpt_auth
             .read()
             .expect("chatgpt auth lock poisoned")
@@ -505,21 +509,22 @@ fn apply_chatgpt_auth_snapshot(
 }
 
 #[cfg(test)]
-pub mod tests {
-    use super::*;
+impl AppState {
+    fn new(effective: EffectiveConfig) -> Result<Self, TokenproxyError> {
+        let (shutdown_tx, _) = watch::channel(false);
+        Self::new_with_log_format_and_shutdown(effective, LogFormat::Text, shutdown_tx)
+    }
 
-    impl AppState {
-        pub fn new(effective: EffectiveConfig) -> Result<Self, TokenproxyError> {
-            let (shutdown_tx, _) = watch::channel(false);
-            Self::new_with_log_format_and_shutdown(effective, LogFormat::Text, shutdown_tx)
-        }
-
-        pub fn clear_account_health(&self, account_id: &str) {
-            if let Some(cell) = self.account_health_cell(account_id) {
-                cell.clear();
-            }
+    fn clear_account_health(&self, account_id: &str) {
+        if let Some(cell) = self.account_health_cell(account_id) {
+            cell.clear();
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn should_reset_transient_failure_count_after_quiet_window() {

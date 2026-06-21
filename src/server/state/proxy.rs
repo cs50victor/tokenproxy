@@ -70,7 +70,7 @@ use crate::usage::{
     usage_windows_from_usage_limit_error_value,
 };
 
-use super::state::{AppState, ConfigStatus};
+use super::{AppState, ConfigStatus};
 
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type DownstreamWebSocketSink = SplitSink<WebSocket, DownstreamMessage>;
