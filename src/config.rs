@@ -11,6 +11,7 @@ use crate::error::TokenproxyError;
 
 pub const CONFIG_UPDATE_ENDPOINT_ENV_VAR: &str = "TOKENPROXY_CONFIG_UPDATE_ENDPOINT";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -427,7 +428,8 @@ pub fn load_effective_config(
     env: &impl EnvProvider,
     files: &impl FileProvider,
 ) -> Result<EffectiveConfig, TokenproxyError> {
-    let config = expand_config_paths(config, env)?;
+    let mut config = expand_config_paths(config, env)?;
+    apply_account_kind_defaults(&mut config);
     validate_static_config(&config)?;
     let downstream_token = env_value(env, &config.downstream_auth.token_env)?;
     let config_update_endpoint = config_update_endpoint(&config, env)?;
@@ -532,6 +534,16 @@ pub fn load_effective_config(
         downstream_token,
         accounts: enabled_accounts,
     })
+}
+
+fn apply_account_kind_defaults(config: &mut Config) {
+    for account in &mut config.accounts {
+        if matches!(account.kind, AccountKind::ChatgptCodexAuthJson)
+            && account.base_url == DEFAULT_OPENAI_BASE_URL
+        {
+            account.base_url = DEFAULT_CHATGPT_CODEX_BASE_URL.to_string();
+        }
+    }
 }
 
 fn optional_env_value(env: &impl EnvProvider, key: &str) -> Option<String> {
@@ -1392,7 +1404,6 @@ mod tests {
             id = "chatgpt"
             kind = "chatgpt_codex_auth_json"
             auth_json_path = "{auth_json_path}"
-            base_url = "https://chatgpt.com/backend-api/codex"
             models = ["gpt-5.3-codex"]
             supports_responses = true
             supports_responses_ws = true
@@ -1695,6 +1706,44 @@ mod tests {
                 .service_tiers
                 .iter()
                 .any(|tier| tier == "priority")
+        );
+    }
+
+    #[test]
+    fn should_default_chatgpt_codex_base_url_by_account_kind() {
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-default-base-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.base_url = AccountConfig::default().base_url;
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config_with_account(account), &env(), &files)
+            .expect("ChatGPT Codex account loads with provider default base_url");
+
+        assert_eq!(
+            effective.accounts[0].config.base_url,
+            DEFAULT_CHATGPT_CODEX_BASE_URL
+        );
+    }
+
+    #[test]
+    fn should_preserve_explicit_chatgpt_codex_base_url() {
+        let path = PathBuf::from("/tmp/tokenproxy-chatgpt-explicit-base-auth.json");
+        let mut account = valid_chatgpt_account("chatgpt", path.clone());
+        account.base_url = "https://chatgpt.example.test/backend-api/codex".to_string();
+        let files = MemoryFiles(BTreeMap::from([(
+            path,
+            r#"{"tokens":{"access_token":"chatgpt-access"}}"#.to_string(),
+        )]));
+
+        let effective = load_effective_config(config_with_account(account), &env(), &files)
+            .expect("ChatGPT Codex account preserves explicit base_url");
+
+        assert_eq!(
+            effective.accounts[0].config.base_url,
+            "https://chatgpt.example.test/backend-api/codex"
         );
     }
 
