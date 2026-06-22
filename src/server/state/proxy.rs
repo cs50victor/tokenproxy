@@ -4048,6 +4048,18 @@ async fn record_account_http_status(
     }
 
     let health = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        if is_html_auth_status_response(status, headers) {
+            // CONTEXT: ChatGPT edge/WAF/VPN blocks can return 401/403 with an
+            // HTML interstitial even when the account's token is still valid.
+            // This function only sees response metadata, not the body, so the
+            // content type is the least invasive signal available here. Treat
+            // those edge blocks as transient upstream reachability failures:
+            // the account cools down, but a later successful response can put
+            // it back into rotation instead of leaving it permanently
+            // AuthFailed until an operator resets runtime health.
+            record_account_transient_failure(state, account, headers);
+            return;
+        }
         Some(AccountHealth::AuthFailed)
     } else if matches!(
         status,
@@ -4068,6 +4080,27 @@ async fn record_account_http_status(
     } else {
         state.clear_account_health_if_not_auth_failed(&account.config.id);
     }
+}
+
+fn is_html_auth_status_response(status: StatusCode, headers: &HeaderMap) -> bool {
+    if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return false;
+    }
+
+    let Some(content_type) = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+
+    // CONTEXT: OpenAI/ChatGPT API auth failures are JSON. Browser-facing
+    // network blocks, proxy warnings, and CDN interstitials are usually HTML
+    // and can be triggered by the egress network rather than account state.
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/html"))
 }
 
 fn record_usage_limited_health_from_windows(
@@ -7323,6 +7356,73 @@ data: {"type":"response.custom.future_event"}
 
         record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None)
             .await;
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::AuthFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn should_back_off_html_forbidden_without_permanent_auth_failure() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective().accounts[0].clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/html; charset=utf-8".parse().unwrap());
+
+        record_account_http_status(&state, &selected, StatusCode::FORBIDDEN, &headers, None).await;
+
+        let AccountHealth::Throttled { next_retry_at_ms } =
+            state.account_health_cell("primary").unwrap().load()
+        else {
+            panic!("expected transient throttle for an HTML edge block");
+        };
+        assert!(next_retry_at_ms > now_unix_ms());
+    }
+
+    #[tokio::test]
+    async fn should_clear_html_forbidden_cooldown_after_successful_http_response() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective().accounts[0].clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/html".parse().unwrap());
+        record_account_http_status(&state, &selected, StatusCode::FORBIDDEN, &headers, None).await;
+
+        record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None)
+            .await;
+
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
+        );
+    }
+
+    #[tokio::test]
+    async fn should_keep_json_forbidden_as_auth_failure() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective().accounts[0].clone();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        record_account_http_status(&state, &selected, StatusCode::FORBIDDEN, &headers, None).await;
+
         assert_eq!(
             state.account_health_cell("primary").unwrap().load(),
             AccountHealth::AuthFailed
