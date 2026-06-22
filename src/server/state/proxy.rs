@@ -2069,6 +2069,9 @@ async fn ensure_upstream_session(
     Ok(false)
 }
 
+const DEFAULT_CODEX_USER_AGENT: &str = "codex-cli";
+const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
+const DEFAULT_CODEX_OPENAI_BETA: &str = "responses_websockets=2026-02-06";
 const CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
     "keep-alive",
@@ -2079,9 +2082,6 @@ const CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
-const DEFAULT_CODEX_USER_AGENT: &str = "codex-cli";
-const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
-const DEFAULT_CODEX_OPENAI_BETA: &str = "responses_websockets=2026-02-06";
 
 fn codex_upstream_websocket_headers(inbound: &HeaderMap) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -2094,25 +2094,39 @@ fn codex_upstream_websocket_headers(inbound: &HeaderMap) -> HeaderMap {
 
 fn copy_codex_upstream_headers(target: &mut HeaderMap, source: &HeaderMap) {
     for (name, value) in source {
-        if should_skip_codex_upstream_header(name.as_str()) {
-            continue;
+        if should_forward_codex_upstream_header(name.as_str()) {
+            target.append(name.clone(), value.clone());
         }
-        target.append(name.clone(), value.clone());
     }
 }
 
-fn should_skip_codex_upstream_header(name: &str) -> bool {
-    name == "authorization"
-        || name == "host"
-        || name == "content-length"
-        || name == "accept-encoding"
-        || name == "cookie"
-        || name == "x-api-key"
-        || name == "api-key"
-        || name == "openai-organization"
-        || name == "openai-project"
-        || name.starts_with("sec-websocket-")
-        || CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS.contains(&name)
+fn should_forward_codex_upstream_header(name: &str) -> bool {
+    // Keep the explicit hop-by-hop guard visible even though the allow-list
+    // below would also reject these names. WebSocket clients generate their own
+    // handshake headers, so caller-supplied hop-by-hop values must not cross.
+    if CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS.contains(&name) {
+        return false;
+    }
+    // Match the Codex/CLIProxyAPI model: carry the Codex turn/session metadata
+    // needed for sticky routing and observability, then let the WebSocket client
+    // synthesize protocol headers. The live WebSocket capture for this change
+    // verified that CF, Mainroom, browser, OpenAI-org, and x-api-key headers did
+    // not reach the fake upstream handshake.
+    matches!(
+        name,
+        "accept"
+            | "content-type"
+            | "user-agent"
+            | "originator"
+            | "openai-beta"
+            | "x-client-request-id"
+            | "x-responsesapi-include-timing-metrics"
+            | "version"
+            | "session-id"
+            | "session_id"
+            | "thread-id"
+            | "conversation_id"
+    ) || name.starts_with("x-codex-")
 }
 
 fn apply_chatgpt_codex_default_websocket_headers(headers: &mut HeaderMap, request_id: &str) {
@@ -5525,11 +5539,24 @@ supports_responses = true
         upstream_headers.insert("session-id", "session-1".parse().unwrap());
         upstream_headers.insert("thread-id", "thread-1".parse().unwrap());
         upstream_headers.insert("x-codex-window-id", "thread-1:0".parse().unwrap());
-        upstream_headers.insert("x-new-codex-feature", "forward-me".parse().unwrap());
         upstream_headers.insert("authorization", "Bearer downstream".parse().unwrap());
         upstream_headers.insert("openai-organization", "org_client".parse().unwrap());
-        upstream_headers.insert("connection", "upgrade".parse().unwrap());
+        // The live WebSocket capture exercises this same mix: valid Codex
+        // headers plus caller-supplied hop-by-hop, edge, and browser headers.
+        upstream_headers.insert("connection", "close".parse().unwrap());
+        upstream_headers.insert("keep-alive", "timeout=5".parse().unwrap());
+        upstream_headers.insert("proxy-authenticate", "Basic".parse().unwrap());
+        upstream_headers.insert("proxy-authorization", "Bearer proxy".parse().unwrap());
+        upstream_headers.insert("te", "trailers".parse().unwrap());
+        upstream_headers.insert("trailer", "x-trailer".parse().unwrap());
+        upstream_headers.insert("transfer-encoding", "chunked".parse().unwrap());
+        upstream_headers.insert("upgrade", "h2c".parse().unwrap());
         upstream_headers.insert("sec-websocket-key", "client-key".parse().unwrap());
+        upstream_headers.insert("cf-connecting-ip", "203.0.113.1".parse().unwrap());
+        upstream_headers.insert("x-forwarded-host", "victor.mainroom.sh".parse().unwrap());
+        upstream_headers.insert("x-mainroom-host", "victor.mainroom.sh".parse().unwrap());
+        upstream_headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        upstream_headers.insert("referer", "https://victor.mainroom.sh/".parse().unwrap());
 
         ensure_upstream_session(
             &state,
@@ -5554,7 +5581,6 @@ supports_responses = true
         assert_eq!(headers[0]["session-id"], "session-1");
         assert_eq!(headers[0]["thread-id"], "thread-1");
         assert_eq!(headers[0]["x-codex-window-id"], "thread-1:0");
-        assert_eq!(headers[0]["x-new-codex-feature"], "forward-me");
         assert_eq!(
             headers[0]["x-tokenproxy-request-id"],
             "req_0000000000000043"
@@ -5562,7 +5588,34 @@ supports_responses = true
         assert_eq!(headers[0]["authorization"], "Bearer upstream-token");
         assert_eq!(headers[0]["chatgpt-account-id"], "acct_123");
         assert!(!headers[0].contains_key("openai-organization"));
+        assert_ne!(headers[0]["connection"], "close");
+        assert_ne!(headers[0]["upgrade"], "h2c");
+        for name in [
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+        ] {
+            assert!(!headers[0].contains_key(name), "{name} should be stripped");
+        }
         assert_ne!(headers[0]["sec-websocket-key"], "client-key");
+        assert!(!headers[0].contains_key("cf-connecting-ip"));
+        assert!(!headers[0].contains_key("x-forwarded-host"));
+        assert!(!headers[0].contains_key("x-mainroom-host"));
+        assert!(!headers[0].contains_key("sec-fetch-site"));
+        assert!(!headers[0].contains_key("referer"));
+    }
+
+    #[test]
+    fn should_reject_codex_websocket_hop_by_hop_headers_before_allowlist() {
+        for name in CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS {
+            assert!(
+                !should_forward_codex_upstream_header(name),
+                "{name} should be stripped"
+            );
+        }
     }
 
     #[tokio::test]
