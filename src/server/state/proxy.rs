@@ -2107,6 +2107,11 @@ fn should_forward_codex_upstream_header(name: &str) -> bool {
     if CODEX_UPSTREAM_WEBSOCKET_HOP_BY_HOP_HEADERS.contains(&name) {
         return false;
     }
+    // Match the Codex/CLIProxyAPI model: carry the Codex turn/session metadata
+    // needed for sticky routing and observability, then let the WebSocket client
+    // synthesize protocol headers. The live WebSocket capture for this change
+    // verified that CF, Mainroom, browser, OpenAI-org, and x-api-key headers did
+    // not reach the fake upstream handshake.
     matches!(
         name,
         "accept"

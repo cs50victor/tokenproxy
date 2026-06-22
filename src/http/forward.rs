@@ -102,9 +102,13 @@ fn should_forward_inbound_header(
     auth: UpstreamAuth,
     allow_openai_headers: bool,
 ) -> bool {
+    // Keep upstream requests synthesized by provider kind. CLIProxyAPI's Codex
+    // executors build provider-native requests from scratch and only copy known
+    // Codex headers; its generic scrubber also removes proxy, browser, referer,
+    // client-identity, and encoding fingerprints. Local capture experiments for
+    // this change sent those noisy headers through each account kind and asserted
+    // that only this allow-list reached the fake upstream.
     match auth {
-        // Upstream providers should see provider-native client headers, not the
-        // Cloudflare/Mainroom/browser headers that happened to reach tokenproxy.
         UpstreamAuth::ChatGptBearer => is_common_payload_header(lower) || is_codex_header(lower),
         UpstreamAuth::OpenAiBearer => {
             is_common_payload_header(lower)
@@ -126,6 +130,9 @@ fn is_common_payload_header(lower: &str) -> bool {
 }
 
 fn is_codex_header(lower: &str) -> bool {
+    // Codex client sources name the x-codex turn/session headers and
+    // ChatGPT-account auth path that need to survive proxying; everything else
+    // from the edge request is treated as downstream-only context.
     matches!(
         lower,
         "user-agent"
