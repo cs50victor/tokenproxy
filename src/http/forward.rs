@@ -1,6 +1,4 @@
-use axum::http::header::{
-    AUTHORIZATION, CONTENT_LENGTH, HOST, HeaderName, HeaderValue, USER_AGENT,
-};
+use axum::http::header::{AUTHORIZATION, HOST, HeaderName, HeaderValue, USER_AGENT};
 use axum::http::{HeaderMap, StatusCode};
 
 use crate::error::{ErrorCode, TokenproxyError};
@@ -41,27 +39,9 @@ pub fn build_upstream_headers(
     let mut output = HeaderMap::new();
 
     for (name, value) in inbound {
-        let lower = name.as_str();
-        let forward_openai_header =
-            allow_openai_headers && matches!(lower, "openai-organization" | "openai-project");
-        let forward_codex_openai_beta =
-            matches!(auth, UpstreamAuth::ChatGptBearer) && lower == "openai-beta";
-        let forward_inbound_authorization =
-            matches!(auth, UpstreamAuth::ForwardInboundBearer) && lower == AUTHORIZATION.as_str();
-        if (!forward_inbound_authorization && lower == AUTHORIZATION.as_str())
-            || lower == HOST.as_str()
-            || lower == CONTENT_LENGTH.as_str()
-            || HOP_BY_HOP.contains(&lower)
-            || lower == "x-api-key"
-            || lower == "api-key"
-            // reqwest is built without decompression features and tokenproxy strips
-            // Content-Encoding from responses, so force identity upstream encoding.
-            || lower == "accept-encoding"
-            || (lower.starts_with("openai-") && !forward_openai_header && !forward_codex_openai_beta)
-        {
-            continue;
+        if should_forward_inbound_header(name.as_str(), auth, allow_openai_headers) {
+            output.append(name.clone(), value.clone());
         }
-        output.append(name.clone(), value.clone());
     }
 
     output.insert(HOST, header_value(upstream_host, "upstream host")?);
@@ -115,6 +95,50 @@ pub fn build_upstream_headers(
     );
 
     Ok(output)
+}
+
+fn should_forward_inbound_header(
+    lower: &str,
+    auth: UpstreamAuth,
+    allow_openai_headers: bool,
+) -> bool {
+    match auth {
+        // Upstream providers should see provider-native client headers, not the
+        // Cloudflare/Mainroom/browser headers that happened to reach tokenproxy.
+        UpstreamAuth::ChatGptBearer => is_common_payload_header(lower) || is_codex_header(lower),
+        UpstreamAuth::OpenAiBearer => {
+            is_common_payload_header(lower)
+                || (allow_openai_headers
+                    && matches!(lower, "openai-organization" | "openai-project"))
+        }
+        UpstreamAuth::AnthropicApiKey => {
+            is_common_payload_header(lower)
+                || matches!(lower, "anthropic-version" | "anthropic-beta")
+        }
+        UpstreamAuth::ForwardInboundBearer => {
+            lower == AUTHORIZATION.as_str() || is_common_payload_header(lower)
+        }
+    }
+}
+
+fn is_common_payload_header(lower: &str) -> bool {
+    matches!(lower, "accept" | "content-type")
+}
+
+fn is_codex_header(lower: &str) -> bool {
+    matches!(
+        lower,
+        "user-agent"
+            | "originator"
+            | "openai-beta"
+            | "x-client-request-id"
+            | "x-responsesapi-include-timing-metrics"
+            | "version"
+            | "session-id"
+            | "session_id"
+            | "thread-id"
+            | "conversation_id"
+    ) || lower.starts_with("x-codex-")
 }
 
 fn apply_chatgpt_codex_default_headers(headers: &mut HeaderMap, tokenproxy_request_id: &str) {
@@ -229,6 +253,103 @@ mod tests {
         assert_eq!(headers["openai-project"], "proj_client");
         assert!(!headers.contains_key("openai-unknown"));
         assert!(!headers.contains_key("user-agent"));
+    }
+
+    #[test]
+    fn should_forward_only_provider_native_headers() {
+        let mut inbound = HeaderMap::new();
+        // This fixture mirrors the local live-capture experiment: one request
+        // carries valid Codex headers plus edge/proxy/browser fingerprint noise.
+        inbound.insert("content-type", "application/json".parse().unwrap());
+        inbound.insert("accept", "text/event-stream".parse().unwrap());
+        inbound.insert("user-agent", "codex_exec/0.141.0 test".parse().unwrap());
+        inbound.insert("originator", "codex_exec".parse().unwrap());
+        inbound.insert(
+            "openai-beta",
+            "responses_websockets=2026-02-06".parse().unwrap(),
+        );
+        inbound.insert("x-client-request-id", "client-req".parse().unwrap());
+        inbound.insert("x-codex-window-id", "thread-1:0".parse().unwrap());
+        inbound.insert("session-id", "session-1".parse().unwrap());
+        inbound.insert("thread-id", "thread-1".parse().unwrap());
+        inbound.insert("version", "0.141.0".parse().unwrap());
+        inbound.insert("cf-connecting-ip", "203.0.113.1".parse().unwrap());
+        inbound.insert("cf-ipcountry", "US".parse().unwrap());
+        inbound.insert("cf-ray", "ray-ewr".parse().unwrap());
+        inbound.insert("cf-visitor", r#"{"scheme":"https"}"#.parse().unwrap());
+        inbound.insert("cdn-loop", "cloudflare".parse().unwrap());
+        inbound.insert("forwarded", "for=203.0.113.1".parse().unwrap());
+        inbound.insert("via", "1.1 proxy".parse().unwrap());
+        inbound.insert("true-client-ip", "203.0.113.1".parse().unwrap());
+        inbound.insert("x-real-ip", "203.0.113.1".parse().unwrap());
+        inbound.insert("x-client-ip", "203.0.113.1".parse().unwrap());
+        inbound.insert("x-cluster-client-ip", "203.0.113.1".parse().unwrap());
+        inbound.insert("x-forwarded-host", "victor.mainroom.sh".parse().unwrap());
+        inbound.insert("x-forwarded-proto", "https".parse().unwrap());
+        inbound.insert("x-mainroom-host", "victor.mainroom.sh".parse().unwrap());
+        inbound.insert("x-mainroom-cf-colo", "EWR".parse().unwrap());
+        inbound.insert("x-vercel-id", "iad1::test".parse().unwrap());
+        inbound.insert("fastly-client-ip", "203.0.113.1".parse().unwrap());
+        inbound.insert("x-amzn-trace-id", "Root=1-test".parse().unwrap());
+        inbound.insert("sec-ch-ua", r#""Chromium";v="130""#.parse().unwrap());
+        inbound.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        inbound.insert("priority", "u=1, i".parse().unwrap());
+        inbound.insert("referer", "https://victor.mainroom.sh/".parse().unwrap());
+        inbound.insert("x-stainless-lang", "js".parse().unwrap());
+        inbound.insert("accept-encoding", "gzip, br, zstd".parse().unwrap());
+
+        let headers = build_upstream_headers(
+            &inbound,
+            "chatgpt.com",
+            "upstream",
+            Some("acct_123"),
+            "req_1",
+            UpstreamAuth::ChatGptBearer,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(headers["content-type"], "application/json");
+        assert_eq!(headers["accept"], "text/event-stream");
+        assert_eq!(headers["user-agent"], "codex_exec/0.141.0 test");
+        assert_eq!(headers["originator"], "codex_exec");
+        assert_eq!(headers["openai-beta"], "responses_websockets=2026-02-06");
+        assert_eq!(headers["x-client-request-id"], "client-req");
+        assert_eq!(headers["x-codex-window-id"], "thread-1:0");
+        assert_eq!(headers["session-id"], "session-1");
+        assert_eq!(headers["thread-id"], "thread-1");
+        assert_eq!(headers["version"], "0.141.0");
+        assert_eq!(headers["authorization"], "Bearer upstream");
+        assert_eq!(headers["host"], "chatgpt.com");
+        assert_eq!(headers["chatgpt-account-id"], "acct_123");
+        for name in [
+            "cf-connecting-ip",
+            "cf-ipcountry",
+            "cf-ray",
+            "cf-visitor",
+            "cdn-loop",
+            "forwarded",
+            "via",
+            "true-client-ip",
+            "x-real-ip",
+            "x-client-ip",
+            "x-cluster-client-ip",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-mainroom-host",
+            "x-mainroom-cf-colo",
+            "x-vercel-id",
+            "fastly-client-ip",
+            "x-amzn-trace-id",
+            "sec-ch-ua",
+            "sec-fetch-site",
+            "priority",
+            "referer",
+            "x-stainless-lang",
+            "accept-encoding",
+        ] {
+            assert!(!headers.contains_key(name), "{name} should be stripped");
+        }
     }
 
     #[test]
