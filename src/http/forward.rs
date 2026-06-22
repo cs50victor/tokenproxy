@@ -108,25 +108,19 @@ fn should_forward_inbound_header(
     // client-identity, and encoding fingerprints. Local capture experiments for
     // this change sent those noisy headers through each account kind and asserted
     // that only this allow-list reached the fake upstream.
+    let is_payload_header = matches!(lower, "accept" | "content-type");
     match auth {
-        UpstreamAuth::ChatGptBearer => is_common_payload_header(lower) || is_codex_header(lower),
+        UpstreamAuth::ChatGptBearer => is_payload_header || is_codex_header(lower),
         UpstreamAuth::OpenAiBearer => {
-            is_common_payload_header(lower)
+            is_payload_header
                 || (allow_openai_headers
                     && matches!(lower, "openai-organization" | "openai-project"))
         }
         UpstreamAuth::AnthropicApiKey => {
-            is_common_payload_header(lower)
-                || matches!(lower, "anthropic-version" | "anthropic-beta")
+            is_payload_header || matches!(lower, "anthropic-version" | "anthropic-beta")
         }
-        UpstreamAuth::ForwardInboundBearer => {
-            lower == AUTHORIZATION.as_str() || is_common_payload_header(lower)
-        }
+        UpstreamAuth::ForwardInboundBearer => lower == AUTHORIZATION.as_str() || is_payload_header,
     }
-}
-
-fn is_common_payload_header(lower: &str) -> bool {
-    matches!(lower, "accept" | "content-type")
 }
 
 fn is_codex_header(lower: &str) -> bool {
