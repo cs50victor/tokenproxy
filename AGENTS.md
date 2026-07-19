@@ -2,7 +2,7 @@
 
 Tokenproxy is a single-binary Rust server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages behind one endpoint, and spreads traffic across a pool of upstream accounts (OpenAI API keys, Anthropic API keys, ChatGPT Codex `auth.json` credentials). When an account hits a usage limit, gets throttled, or fails auth, routing shifts to healthy accounts.
 
-The implementation lives in `src/`. `CLAUDE.md` is a symlink to this file, so this map is also the project instruction set for coding agents; the earlier spec-writing-stage instructions this file used to hold live in git history.
+The implementation lives in `src/`. `CLAUDE.md` is a symlink to this file, so this map is also the project instruction set for coding agents.
 
 ## Read in this order
 
@@ -21,7 +21,7 @@ Stop as soon as you have what you need.
 | `src/` | The entire implementation (one crate, binary + lib). |
 | `.github/workflows/ci.yml` | Format, build, test on push and PR. |
 | `.github/workflows/release.yml` | Tag `v*` push: builds 9 targets, publishes a GitHub release, triggers the Homebrew tap update. |
-| `stage_one_evidence/` | Measurement artifacts from the spec stage. |
+| `stage_one_evidence/` | Captured measurement and probe artifacts. |
 | `CLAUDE.md` | Symlink to this file. |
 | `CLIProxyAPI/`, `codex/`, `iggy/`, `monoio/`, `pingora/`, `quiche/`, `ripgrep/`, `rust-sdks/`, `s2n-quic/`, `uv/` | Local reference clones for studying mature implementations. Git-ignored, not tracked, not submodules. Never edit them. |
 
@@ -65,4 +65,4 @@ Client request → router (`proxy.rs`) → downstream auth check → request cla
 
 ## Keep this file current
 
-Update this file in the same change that alters the repo's structure or core behavior: adding, moving, or removing modules, directories, endpoints, or workflows, and changes to routing, account health, auth, streaming, or config semantics. A stale map misleads the next reader; fixing it costs one table row now.
+Update this file in the same change that alters the repo's structure or core behavior: adding, moving, or removing modules, directories, endpoints, or workflows, and changes to routing, account health, auth, streaming, or config semantics.
