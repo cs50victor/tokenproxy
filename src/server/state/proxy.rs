@@ -4063,10 +4063,15 @@ async fn record_account_http_status(
         Some(AccountHealth::AuthFailed)
     } else if matches!(
         status,
-        StatusCode::TOO_MANY_REQUESTS
+        StatusCode::PAYMENT_REQUIRED
+            | StatusCode::TOO_MANY_REQUESTS
             | StatusCode::INTERNAL_SERVER_ERROR
             | StatusCode::SERVICE_UNAVAILABLE
     ) {
+        // CONTEXT: 402 is a billing signal, not an auth failure. OpenRouter
+        // returns it when an account runs out of credits; the account must
+        // rejoin rotation automatically after a top-up, so it gets the same
+        // escalating cooldown as throttling instead of a permanent state.
         record_account_transient_failure(state, account, headers);
         return;
     } else if status.is_success() {
@@ -7426,6 +7431,62 @@ data: {"type":"response.custom.future_event"}
         assert_eq!(
             state.account_health_cell("primary").unwrap().load(),
             AccountHealth::AuthFailed
+        );
+    }
+
+    #[tokio::test]
+    async fn should_back_off_payment_required_as_transient_failure() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective().accounts[0].clone();
+
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::PAYMENT_REQUIRED,
+            &HeaderMap::new(),
+            None,
+        )
+        .await;
+
+        let AccountHealth::Throttled { next_retry_at_ms } =
+            state.account_health_cell("primary").unwrap().load()
+        else {
+            panic!("expected transient throttle for an out-of-credits response");
+        };
+        assert!(next_retry_at_ms > now_unix_ms());
+    }
+
+    #[tokio::test]
+    async fn should_clear_payment_required_cooldown_after_successful_http_response() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let selected = state.effective().accounts[0].clone();
+        record_account_http_status(
+            &state,
+            &selected,
+            StatusCode::PAYMENT_REQUIRED,
+            &HeaderMap::new(),
+            None,
+        )
+        .await;
+
+        record_account_http_status(&state, &selected, StatusCode::OK, &HeaderMap::new(), None)
+            .await;
+
+        assert_eq!(
+            state.account_health_cell("primary").unwrap().load(),
+            AccountHealth::Open
         );
     }
 
