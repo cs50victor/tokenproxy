@@ -1,123 +1,68 @@
-# Tokenproxy Stage One
+# Tokenproxy Agent Guide
 
-We are in stage one of this repository.
+Tokenproxy is a single-binary Rust server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages behind one endpoint, and spreads traffic across a pool of upstream accounts (OpenAI API keys, Anthropic API keys, ChatGPT Codex `auth.json` credentials). When an account hits a usage limit, gets throttled, or fails auth, routing shifts to healthy accounts.
 
-Tokenproxy is a minified Rust port of the CLIProxyAPI project. It only supports the OpenAI Chat Completions API and the OpenAI Responses API, with special focus on Codex usage and WebSocket support.
+The implementation lives in `src/`. `CLAUDE.md` is a symlink to this file, so this map is also the project instruction set for coding agents; the earlier spec-writing-stage instructions this file used to hold live in git history.
 
-Like CLIProxyAPI, tokenproxy is intended to let users sign in to multiple ChatGPT accounts and route requests across them. Its primary design goal is very low latency with high uptime and availability at all costs.
+## Read in this order
 
-The project goal is to write a system design spec for the next stage, which is coding tokenproxy. The spec should describe how tokenproxy becomes a small, fast Rust proxy for OpenAI-compatible agent traffic. It should guide architecture, crate choices, data paths, concurrency choices, failure behavior, and benchmark targets.
+Stop as soon as you have what you need.
 
-Optimize design decisions for benchmarkability and concise code. Prefer choices that can be measured with small Rust experiments, passive network measurements, and short source snippets. Avoid complex designs unless a benchmark, source citation, network trace, or failure-mode analysis justifies the added code.
+1. `README.md` — what the server does, install, inline config examples.
+2. This file — the map below.
+3. `src/main.rs` — CLI parsing, config assembly, startup and shutdown.
+4. `src/server/state/proxy.rs` — the router and the whole request hot path. By far the largest file and home to most tests. Read the `app()` function first; it lists every route.
+5. The module you actually need, via the map below.
 
-OpenAI's WebSockets work is important context for this goal. Treat WebSocket support as a first-class design target for Codex and agentic workflows because persistent Responses API connections can avoid repeated per-request work, reuse previous response state, cache reusable context, process only new input, and keep the API shape close to `response.create` plus `previous_response_id`.
+## Repo map
 
-In the report, call out API and orchestration choices that affect latency and reliability: `previous_response_id`, returned output item replay for stateless flows, assistant `phase` preservation, prompt caching, reasoning effort, verbosity controls, tool preambles, and state compaction.
+| Path | What it is |
+|------|------------|
+| `src/` | The entire implementation (one crate, binary + lib). |
+| `.github/workflows/ci.yml` | Format, build, test on push and PR. |
+| `.github/workflows/release.yml` | Tag `v*` push: builds 9 targets, publishes a GitHub release, triggers the Homebrew tap update. |
+| `stage_one_evidence/` | Measurement artifacts from the spec stage. |
+| `CLAUDE.md` | Symlink to this file. |
+| `CLIProxyAPI/`, `codex/`, `iggy/`, `monoio/`, `pingora/`, `quiche/`, `ripgrep/`, `rust-sdks/`, `s2n-quic/`, `uv/` | Local reference clones for studying mature implementations. Git-ignored, not tracked, not submodules. Never edit them. |
 
-Latency and response quality require more than Rust benchmarking. Stage one should include passive network and API-path investigation:
+## Source modules
 
-- Identify which OpenAI and ChatGPT endpoints matter for tokenproxy, including Chat Completions, Responses, Codex-oriented Responses traffic, and WebSocket transport.
-- Use OpenAI status data, especially `https://status.openai.com/`, as operational context for uptime and incident-aware routing.
-- Measure DNS resolution, resolved IPs, TLS negotiation, HTTP protocol selection, time to connect, time to first byte, total response time, and stream/WebSocket stability from relevant client networks.
-- Compare endpoint behavior with `curl`, `dig`, traceroute-style tools, and small Rust probes where useful.
-- Investigate whether endpoint, protocol, connection reuse, request shape, service tier, prompt caching, `prompt_cache_key`, headers, or account selection changes latency, cache hit rate, or reliability.
-- Treat OpenAI region, edge, route, and server-IP findings as measured observations, not stable facts, unless repeated measurements prove stability.
+| Module | Role |
+|--------|------|
+| `main.rs` | CLI entry: flag parsing, config load, server startup, shutdown signals. |
+| `config.rs` | Config schema and parsing: `Config`, `AccountConfig`, `AccountKind`, timeouts, retries, downstream auth, admin auth; resolves to `EffectiveConfig`. |
+| `auth.rs` | ChatGPT Codex `auth.json` handling: token snapshots per account, bearer checks, refresh after upstream 401 (`ChatGptAuthCell`). |
+| `server/state.rs` | `AppState`: runtime account-health store and persistence across reloads. |
+| `server/state/proxy.rs` | The hot path: axum router, request handlers, upstream orchestration, SSE and WebSocket streaming, retry/failover, health recording, metrics emission. |
+| `routing/select.rs` | Account selection: health-based exclusion, scoring, priority, stable hashing. |
+| `routing/health.rs` | `AccountHealth` enum: `Open`, `Unknown`, `Throttled`, `UsageLimited`, `AuthFailed`. |
+| `routing/account.rs` | Routing-facing types: `AccountState`, `RouteRequest`, endpoint/transport capabilities, model family labels. |
+| `http/forward.rs` | Upstream request construction and the provider header allowlist. |
+| `http/classify.rs` | Maps incoming path and body to a `ClassifiedRequest` (endpoint, request shape). |
+| `http/sse_repair.rs` | Repairs partial SSE frames from upstream streams. |
+| `responses/replay.rs` | Responses API output-item replay for stateless clients. |
+| `responses/state.rs` | `ReplayState`: request template, `previous_response_id` bookkeeping, compaction reset. |
+| `responses/websocket.rs` | WebSocket message framing between client and upstream. |
+| `usage.rs` | Usage windows and limit interpretation. |
+| `metrics.rs` | Metrics registry behind `/metrics`. |
+| `observability.rs` | Request-body dump records and hashing for debugging. |
+| `logging.rs`, `error.rs`, `time_parse.rs` | Structured logging, error-to-response mapping, timestamp parsing. |
 
-Stage one is writing the technical report and system design spec for tokenproxy. The report file must be named `very_detailed_tokenproxy_spec.html`. It should be a plain black and white single `.html` file, visually similar in restraint and readability to `https://burntsushi.net/ripgrep/`.
+## HTTP surface
 
-All code blocks in `very_detailed_tokenproxy_spec.html` must use native HTML code markup: wrap block snippets in `<pre><code>...</code></pre>` and use `<code>...</code>` only for inline tokens. Do not use Markdown fenced code blocks, screenshots of code, or non-code containers to represent code snippets.
+Defined in `app()` in `src/server/state/proxy.rs`: `/healthz`, `/metrics`, `/usage`, `/admin/config/status`, `/admin/config/reload`, `/v1/models`, `/v1/chat/completions`, `/v1/messages`, `/v1/responses` (POST for HTTP, GET upgrades to WebSocket), `/v1/responses/compact`, and a fallback that passes unknown paths through to the upstream.
 
-Use Tailwind CSS Typography-style prose defaults for the whole report body. Follow the Tailwind Typography pattern by placing report content inside a `prose max-w-none` container, using `not-prose` only for diagrams or controls that need independent layout, and defining the required `prose`, `not-prose`, and `max-w-none` utilities in the self-contained HTML header when no Tailwind build output is present. Keep an outer page wrapper with an explicit max width and `width: 100%`, and ensure tables, code, links, SVGs, and long inline tokens wrap or scroll inside their containers instead of forcing the document wider than the body.
+## Request hot path
 
-Treat `very_detailed_tokenproxy_spec.html` as the project's single self-contained implementation authority. Any engineer should be able to read that file and implement tokenproxy from start to finish. Do not leave unresolved assumptions, "likely" statements, TODO-style placeholders, open questions, or design claims that depend on unstated context. When evidence is missing, run source review, passive network probes, small Rust experiments, or workflow measurements to close the knowledge gap before writing the claim. If a gap cannot be closed because credentials, network policy, missing tooling, platform limits, or absent product code block the work, remove the affected design claim or narrow it to what the evidence supports. Do not leave unanswered questions in the HTML report.
+Client request → router (`proxy.rs`) → downstream auth check → request classification (`http/classify.rs`) → account selection (`routing/select.rs`) → auth snapshot (`auth.rs`) → upstream request (`http/forward.rs`) → streamed response with SSE repair or WebSocket relay → health and metrics recording (`server/state.rs`, `metrics.rs`).
 
-On every new initial read of `very_detailed_tokenproxy_spec.html`, review it as a research-paper critic. Do not trust a statement because it already appears in the file. Check citations against the cited source, check experiments against their commands and artifacts, and rerun reproducible experiments when the claim depends on current behavior. Under the same documented conditions, repeated runs must produce the same or very similar outputs with a very low error margin. If they do not, narrow or remove the claim and record the mismatch in the performance-review attestation.
+## Working in this repo
 
-Make simplicity a primary design claim. The point of repeated experiments is to discard unneeded complexity. Every new abstraction, primitive, dependency, state machine, queue, cache, retry rule, or background task in the `.html` file must earn its place with strong cited evidence, a completed experiment, a source-backed failure analysis, or a measured downstream effect. Complexity is accepted only when the report proves the simpler design fails, loses reliability, or costs measurable latency under the same conditions. The target is an extremely simple system without avoidable performance tradeoffs.
+- `cargo check` before building; `cargo test --lib --bin tokenproxy` runs the full suite (~300 tests, under a minute); `cargo fmt --check` before pushing.
+- Tests are inline `#[cfg(test)]` modules next to the code they cover; most live in `server/state/proxy.rs`.
+- Releases: bump `version` in `Cargo.toml` and `Cargo.lock` in one commit on main, tag it `vX.Y.Z`, push the tag. `release.yml` does the rest.
+- Finding things: routes are in `app()`; config keys are the struct fields in `config.rs`; account-health transitions are the `AccountHealth` writes in `proxy.rs` and reads in `routing/select.rs`.
 
-Treat every line of future tokenproxy code as a maintenance and reliability liability. When comparing multiple solutions, show all experiments run, the exact conditions, and the result distribution, then prefer the simpler solution or abstraction when performance and reliability are equal or nearly equal. Do not add layers because they feel conventional. Most accidental complexity comes from not reading and understanding the APIs, protocols, and components already in the system; the `.html` file must explain the relevant APIs deeply enough that the simpler design is justified.
+## Keep this file current
 
-Research high-performance computing fundamentals before deciding core primitives. For data structures, algorithms, memory layout, queueing, scheduling, I/O, TCP, TLS, HTTP, WebSocket, filesystem, kernel, and runtime choices, inspect mature implementations and papers where relevant, then connect that research to local experiments. Review choices for global optimality across the whole system: total code size, latency distribution, failure behavior, operational load, and downstream effects. Put pressure on every hot code path so one simplification or optimization can improve later paths instead of moving cost elsewhere.
-
-Write the report like a technical research paper. Define the method, cite every external claim inline, and include an APA-style References section after the graphical user-experience section. Place the performance-review attestation after References as the final substantive section. That attestation is an evidence audit, not a narrative summary. Then add a bottom-most Review Log section after the attestation. The Review Log is audit metadata, not substantive design evidence.
-
-Graphical user-experience section requirements:
-
-- Add a very detailed, visual-first user-experience section immediately before References. This section must show what operators and agent clients see when tokenproxy behaves correctly.
-- Keep the section inside the single self-contained HTML file. Use inline HTML, Tailwind classes already available from the document header, inline SVG, CSS-only controls, `<details>` disclosures, tables, and small embedded scripts only when interaction materially improves comprehension. Do not add external assets, package dependencies, build tooling, or generated binary media.
-- Keep the black-and-white, ripgrep-like restraint. Visuals should be dense, legible, and technical: thin borders, monospace labels where useful, clear axis labels, compact legends, and no decorative gradients, color-heavy dashboards, stock imagery, or marketing layout.
-- Place each visual next to the design decision it explains. Each diagram, chart, graph, or UI mock must have a caption that states the implementation behavior it supports and cites measured or source-backed evidence.
-- Include an operator-facing dashboard mock that shows account pool state, upstream health, route selection, open WebSocket sessions, prompt-cache status, rate-limit pressure, in-flight requests, retry/failover state, and current incident signals from OpenAI status context.
-- Include an agent-client view that shows the developer-facing request lifecycle for Chat Completions, Responses, and persistent WebSocket Responses traffic: request admission, account choice, connection reuse, `previous_response_id`, output item replay, assistant `phase` preservation, tool preambles, compaction, streaming, and error return paths.
-- Include an interactive architecture map that lets the reader expand the hot path from client request to upstream OpenAI/ChatGPT endpoint and back. It must distinguish synchronous request work, background health probes, account/session bookkeeping, credential storage boundaries, telemetry emission, and failure handling.
-- Include a latency and reliability visual pack: request timeline, connection reuse comparison, cache-hit path versus cold path, retry/failover state machine, backpressure queue behavior, and p50/p95/p99 measurement summary cards sourced from completed local probes. If a measurement is missing, run the experiment or omit the measured value.
-- Include endpoint and transport visuals for DNS resolution, TLS negotiation, HTTP protocol choice, SSE streaming, and WebSocket stability. Use measured artifact paths, commands, timestamps, and sample counts when those visuals contain measured results.
-- Include account routing visuals that show how multiple ChatGPT accounts are selected, cooled down, quarantined, restored, and excluded from traffic. The visuals must separate authenticated user intent from proxy-internal routing state.
-- Include failure-mode visuals for upstream outage, account throttling, WebSocket drop, partial SSE frame, malformed upstream response, local overload, credential expiration, and status-page incident detection. Each visual must identify the user-visible response and the internal recovery action.
-- Include a compact "correct system at a glance" board that a stage-two engineer can use as a build checklist. It must map UI-visible behavior to concrete implementation modules, data structures, metrics, tests, and evidence artifacts.
-- Source every visual. For each visual that shows performance, correctness, endpoint behavior, or upstream behavior, cite the supporting report section, source line range, benchmark artifact, or network probe artifact.
-- Preserve this final ordering: graphical user-experience section, References, performance-review attestation, Review Log.
-
-Performance-review attestation requirements:
-
-- Re-read `very_detailed_tokenproxy_spec.html` before editing the attestation. Do not preserve old attestation claims unless the current checkout still proves them.
-- Run `git submodule status --recursive` and account for every listed submodule. For each initialized submodule, record its commit and the exact source files reviewed. For each uninitialized submodule, record the `git submodule status` line and do not use it to support a design choice.
-- Source review must inspect implementation files, benchmark harnesses, or tests, not README prose alone. Cite exact file paths and line ranges for each performance-relevant fact: pooling, retry boundaries, backpressure, runtime model, parser choice, event-loop design, WebSocket/SSE flow, benchmark method, or telemetry.
-- The attestation table must include, for each submodule: commit, source paths with line ranges, verified source fact, implementation decision supported, and any benchmark or probe artifact that supports the decision.
-- Run actual measurements before making any performance claim. This includes passive network probes, tiny Rust experiments, Rust performance experiments, or workflow benchmarks appropriate to the claim. Include command, timestamp, environment, sample count, raw artifact path, and summary statistics such as p50, p95, p99, errors, and outliers.
-- Do not replace benchmarks with instructions for how to run benchmarks. A section may describe reproducibility, but every accepted performance decision must also point to a completed local run or a captured upstream artifact that was reviewed.
-- If credentials, network policy, missing tooling, platform limits, or absent product code prevent a benchmark, state that exact blocker and include the failed or skipped command in the attestation. Remove or narrow the related performance claim. Do not convert blocked measurements into design facts or leave them as open questions.
-- Do not write phrases such as "benchmark-backed", "measured", "validated", "reviewed", or "performance-proven" unless the report includes the source line references and benchmark/probe artifacts that justify the word.
-- The attestation must be the final substantive section of the HTML file and must map measured results back to concrete stage-two implementation decisions. If no actual performance experiments were run, the attestation must say so plainly and must not endorse latency-sensitive choices beyond source-backed correctness or complexity observations. A bottom-most Review Log section must follow the attestation and must contain review metadata only.
-
-Review Log requirements:
-
-- `very_detailed_tokenproxy_spec.html` must end with a Review Log section after the performance-review attestation.
-- The Review Log must use a simple HTML `<table>` with one row per review entry.
-- Each review row must use plain cells for date/time and one-line summary. Add more columns only when they reduce ambiguity.
-- Every new review pass must add one entry dated `YYYY-MM-DD h:MM AM/PM TZ` with a one-line review summary. The timestamp must include hour, minute, and AM or PM, not only the calendar date or a 24-hour time, and must be current within the last five minutes at edit time.
-- Each entry must name what was reviewed and the main result, such as citation drift found, experiment reproduced, claim narrowed, or no material mismatch found.
-- Do not use the Review Log as evidence for a design claim. Cite the source, command, artifact, or attestation row that proves the claim.
-
-Integration-test evidence requirements:
-
-- Do not stop at a required test matrix. If the report says an integration behavior is validated, include the actual test command, timestamp, environment, fixture or server used, pass/fail result, and artifact path or captured output.
-- If product code does not exist yet, state that integration tests could not run because there is no implementation under test. Keep those cases in a future test matrix, not in the measured-results or attestation sections.
-- Do not use integration-test language such as "validated", "verified", "passes", "covered", or "ready" for fake-server, SSE, WebSocket, failover, or metrics behavior unless a real test was executed in the current checkout.
-- Every integration-test claim must name the boundary tested: direct upstream probe, local fake OpenAI server, generated Rust experiment, or future stage-two implementation. Do not blur planned tests with completed tests.
-
-Comparative design-section requirements:
-
-- Comparative sections that argue for or against a framework, runtime, protocol stack, parser, transport, pooling strategy, scheduler model, or other performance-sensitive dependency must be evidence sections, not deferrals. They must cite source lines for complexity claims and include actual local measurements or reviewed upstream benchmark artifacts for performance claims.
-- Do not write final design rules that say only "measure first", "until a benchmark shows", "after a local implementation has a measured bottleneck", "Tokenproxy should measure", or equivalent future-tense gates. Replace them with a measured decision that names the command, artifact, sample count, and result. If evidence is blocked, remove or narrow the decision and record the blocker in the attestation.
-- A decision to avoid any performance-motivated dependency or advanced implementation path must state whether the decision rests on measured performance, source-backed complexity, ecosystem compatibility, operational risk, maintainability, or absent product code. Do not imply a performance result when the real evidence is only complexity, compatibility, or scope control.
-- If the report recommends any latency-sensitive default, it must show the local comparison that was run. Without local comparison, remove or narrow the recommendation.
-
-Use the ripgrep article as the structural model:
-
-- State the claims the spec will defend.
-- Explain the anatomy of the proxy before presenting benchmarks.
-- Describe the benchmark methodology and environment.
-- Use end-user workflows as benchmark cases.
-- For each result, explain the system design choice behind it.
-- Include tradeoffs, anti-pitch notes, and cases where a simpler design wins.
-- End by mapping measured results back to concrete implementation decisions.
-
-Use basic Tailwind CSS from the HTML header when styling the report.
-
-The submodules are reference material for high-performance Rust projects. Use them to study system design choices, implementation decisions, and performance-oriented tradeoffs that can inform the tokenproxy report.
-
-Do not write product or application code in this stage. Work should be limited to:
-
-- Running tiny Rust experiments.
-- Running Rust performance experiments.
-- Running passive network traversal and endpoint latency experiments.
-- Capturing reproducible measurements.
-- Evaluating crate and package choices.
-- Explaining the reasoning behind each code decision planned for stage two.
-- Adding citations.
-- Adding relevant code snippets to the `.html` report.
-
-Keep the report evidence-led. Claims should be backed by measurements, citations, or directly quoted source snippets.
-
-Write plainly. Use active voice, concrete claims, short paragraphs, and no promotional language. Omit needless words.
+Update this file in the same change that alters the repo's structure or core behavior: adding, moving, or removing modules, directories, endpoints, or workflows, and changes to routing, account health, auth, streaming, or config semantics. A stale map misleads the next reader; fixing it costs one table row now.
