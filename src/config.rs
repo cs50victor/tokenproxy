@@ -635,8 +635,17 @@ async fn fetch_account_models(
 
     let status = response.status();
     if !status.is_success() {
+        // CONTEXT: some versioned base paths have no models route at all, e.g.
+        // OpenRouter's https://openrouter.ai/api/v1/cursor serves chat
+        // completions but returns 404 for /api/v1/cursor/models. Explicit
+        // models are the only way to run such an account.
+        let hint = if matches!(status.as_u16(), 404 | 405) {
+            "; the base_url has no models endpoint, set models=[...] explicitly"
+        } else {
+            ""
+        };
         return Err(TokenproxyError::invalid_config(format!(
-            "model discovery for account {} failed with HTTP {status}",
+            "model discovery for account {} failed with HTTP {status}{hint}",
             account.config.id
         )));
     }
@@ -1842,6 +1851,45 @@ mod tests {
         assert_eq!(
             effective.accounts[0].config.models,
             vec!["gpt-5.4", "gpt-5.5"]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_hint_explicit_models_when_discovery_endpoint_is_missing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request.starts_with("GET /api/v1/cursor/models HTTP/1.1"),
+                "{request}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let mut config = config_with_account(AccountConfig {
+            base_url: format!("http://localhost:{port}/api/v1/cursor"),
+            models: Vec::new(),
+            ..valid_openai_account()
+        });
+        config.server.allow_insecure_upstream = true;
+
+        let effective =
+            load_effective_config(config, &env(), &MemoryFiles(BTreeMap::new())).unwrap();
+        let error = discover_account_models(effective)
+            .await
+            .expect_err("discovery against a missing models route must fail");
+
+        assert!(error.message.contains("HTTP 404"), "{}", error.message);
+        assert!(
+            error.message.contains("set models=[...] explicitly"),
+            "{}",
+            error.message
         );
     }
 
