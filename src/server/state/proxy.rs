@@ -2465,12 +2465,16 @@ fn append_path_and_query(
     public_query: Option<&str>,
 ) -> Result<Url, TokenproxyError> {
     let base_path = base_url.path().trim_end_matches('/');
-    let upstream_path =
-        if public_path.starts_with("/v1/") && (base_path == "/v1" || base_path.ends_with("/v1")) {
-            format!("{base_path}/{}", public_path.trim_start_matches("/v1/"))
-        } else {
-            format!("{base_path}{}", public_path)
-        };
+    // CONTEXT: a base path with a /v1 segment already carries the API version,
+    // even when the version is not the final segment. OpenRouter's Cursor base
+    // https://openrouter.ai/api/v1/cursor serves /api/v1/cursor/chat/completions,
+    // while the doubled /api/v1/cursor/v1/chat/completions is a probed 404.
+    let base_is_versioned = base_path.split('/').any(|segment| segment == "v1");
+    let upstream_path = if public_path.starts_with("/v1/") && base_is_versioned {
+        format!("{base_path}/{}", public_path.trim_start_matches("/v1/"))
+    } else {
+        format!("{base_path}{}", public_path)
+    };
     base_url.set_path(&upstream_path);
     base_url.set_query(public_query);
     Ok(base_url)
@@ -5933,6 +5937,129 @@ supports_responses = true
             "https://api.openai.com/v1/embeddings?encoding_format=float"
         );
         assert_eq!(websocket.as_str(), "wss://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn should_dedupe_v1_prefix_when_base_path_contains_v1_segment() {
+        let cursor = account(
+            "openrouter-cursor",
+            "https://openrouter.ai/api/v1/cursor".to_string(),
+            "upstream-token",
+            100,
+        );
+
+        let chat = upstream_url_for_path(&cursor, "/v1/chat/completions").unwrap();
+        let responses = upstream_url_for_path(&cursor, "/v1/responses").unwrap();
+        let with_query = upstream_url_for_path(&cursor, "/v1/models?limit=5").unwrap();
+        let websocket = websocket_upstream_url_for_account(&cursor).unwrap();
+
+        assert_eq!(
+            chat.as_str(),
+            "https://openrouter.ai/api/v1/cursor/chat/completions"
+        );
+        assert_eq!(
+            responses.as_str(),
+            "https://openrouter.ai/api/v1/cursor/responses"
+        );
+        assert_eq!(
+            with_query.as_str(),
+            "https://openrouter.ai/api/v1/cursor/models?limit=5"
+        );
+        assert_eq!(
+            websocket.as_str(),
+            "wss://openrouter.ai/api/v1/cursor/responses"
+        );
+    }
+
+    #[test]
+    fn should_dedupe_v1_prefix_for_trailing_slash_and_repeated_v1_bases() {
+        let trailing = account(
+            "trailing",
+            "https://openrouter.ai/api/v1/cursor/".to_string(),
+            "upstream-token",
+            100,
+        );
+        let repeated = account(
+            "repeated",
+            "https://gateway.example.com/v1/tenant/v1".to_string(),
+            "upstream-token",
+            100,
+        );
+
+        let trailing_chat = upstream_url_for_path(&trailing, "/v1/chat/completions").unwrap();
+        let repeated_chat = upstream_url_for_path(&repeated, "/v1/chat/completions").unwrap();
+
+        assert_eq!(
+            trailing_chat.as_str(),
+            "https://openrouter.ai/api/v1/cursor/chat/completions"
+        );
+        assert_eq!(
+            repeated_chat.as_str(),
+            "https://gateway.example.com/v1/tenant/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn should_append_full_v1_path_for_unversioned_base_paths() {
+        let gateway = account(
+            "gateway",
+            "https://gateway.example.com/openai".to_string(),
+            "upstream-token",
+            100,
+        );
+        let root = account(
+            "root",
+            "https://openrouter.ai".to_string(),
+            "upstream-token",
+            100,
+        );
+
+        let gateway_chat = upstream_url_for_path(&gateway, "/v1/chat/completions").unwrap();
+        let root_chat = upstream_url_for_path(&root, "/v1/chat/completions").unwrap();
+
+        assert_eq!(
+            gateway_chat.as_str(),
+            "https://gateway.example.com/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            root_chat.as_str(),
+            "https://openrouter.ai/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn should_not_treat_similar_base_segments_as_v1() {
+        for base in [
+            "https://gateway.example.com/v1beta",
+            "https://gateway.example.com/av1",
+            "https://gateway.example.com/team-v1",
+            "https://gateway.example.com/V1",
+        ] {
+            let similar = account("similar", base.to_string(), "upstream-token", 100);
+            let chat = upstream_url_for_path(&similar, "/v1/chat/completions").unwrap();
+            assert_eq!(
+                chat.as_str(),
+                format!("{base}/v1/chat/completions"),
+                "segment in {base} must not count as an API version"
+            );
+        }
+    }
+
+    #[test]
+    fn should_append_non_v1_public_paths_verbatim_to_versioned_bases() {
+        let cursor = account(
+            "openrouter-cursor",
+            "https://openrouter.ai/api/v1/cursor".to_string(),
+            "upstream-token",
+            100,
+        );
+
+        let bare = upstream_url_for_path(&cursor, "/custom/endpoint?x=y").unwrap();
+
+        assert_eq!(
+            bare.as_str(),
+            "https://openrouter.ai/api/v1/cursor/custom/endpoint?x=y"
+        );
     }
 
     #[test]
