@@ -33,6 +33,7 @@ Stop as soon as you have what you need.
 | `config.rs` | Config schema and parsing: `Config`, `AccountConfig`, `AccountKind`, timeouts, retries, downstream auth, admin auth; resolves to `EffectiveConfig`. |
 | `auth.rs` | ChatGPT Codex `auth.json` handling: token snapshots per account, bearer checks, refresh after upstream 401 (`ChatGptAuthCell`). |
 | `server/state.rs` | `AppState`: runtime account-health store and persistence across reloads. |
+| `server/state/reset.rs` | Opt-in ChatGPT reset redemption, per-identity coordination, idempotency, and reset API mocks. |
 | `server/state/proxy.rs` | The hot path: axum router, request handlers, upstream orchestration, SSE and WebSocket streaming, retry/failover, health recording, metrics emission. |
 | `routing/select.rs` | Account selection: health-based exclusion, scoring, priority, stable hashing. |
 | `routing/health.rs` | `AccountHealth` enum: `Open`, `Unknown`, `Throttled`, `UsageLimited`, `AuthFailed`. |
@@ -44,6 +45,7 @@ Stop as soon as you have what you need.
 | `responses/state.rs` | `ReplayState`: request template, `previous_response_id` bookkeeping, compaction reset. |
 | `responses/websocket.rs` | WebSocket message framing between client and upstream. |
 | `usage.rs` | Usage windows and limit interpretation. |
+| `tests/auto_use_reset.rs` | Local HTTP/SSE/WebSocket experiments for automatic reset recovery and failure behavior. |
 | `metrics.rs` | Metrics registry behind `/metrics`. |
 | `observability.rs` | Request-body dump records and hashing for debugging. |
 | `logging.rs`, `error.rs`, `time_parse.rs` | Structured logging, error-to-response mapping, timestamp parsing. |
@@ -56,10 +58,13 @@ Defined in `app()` in `src/server/state/proxy.rs`: `/healthz`, `/metrics`, `/usa
 
 Client request → router (`proxy.rs`) → downstream auth check → request classification (`http/classify.rs`) → account selection (`routing/select.rs`) → auth snapshot (`auth.rs`) → upstream request (`http/forward.rs`) → streamed response with SSE repair or WebSocket relay → health and metrics recording (`server/state.rs`, `metrics.rs`).
 
+ChatGPT accounts may opt into `auto_use_reset` (default false). Explicit usage exhaustion attempts a banked reset through the Codex backend and permits one same-account retry before downstream output. After output, the error is forwarded and reset recovery benefits future requests. Per-backend/account coordination retains ambiguous redemption keys across config reloads; selection can reconcile an exhausted account when no ordinary account is eligible. Generic throttling never consumes a reset.
+
 ## Working in this repo
 
 - `cargo check` before building; `cargo test --lib --bin tokenproxy` runs the full suite (~300 tests, under a minute); `cargo fmt --check` before pushing.
 - Tests are inline `#[cfg(test)]` modules next to the code they cover; most live in `server/state/proxy.rs`.
+- Run `cargo test --test auto_use_reset` for the local backend API and streaming experiments, in addition to the library and binary suite.
 - Releases: bump `version` in `Cargo.toml` and `Cargo.lock` in one commit on main, tag it `vX.Y.Z`, push the tag. `release.yml` does the rest.
 - Finding things: routes are in `app()`; config keys are the struct fields in `config.rs`; account-health transitions are the `AccountHealth` writes in `proxy.rs` and reads in `routing/select.rs`.
 
