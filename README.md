@@ -38,6 +38,28 @@ Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `ser
 
 Each request first filters the account pool: disabled, auth-failed, usage-limited, cooling-down, and capability-mismatched accounts (endpoint, model, service tier, WebSocket) are excluded. The rest are ranked by continuation affinity (stay on the account that holds the `previous_response_id` state), health, configured priority, smoothed connect and first-event latency, and recent failure count. The best-ranked account gets the request, and failures feed back into health so traffic shifts automatically.
 
+## Automatic usage resets
+
+Set `auto_use_reset = true` on a ChatGPT account to redeem a banked usage-limit reset when that account returns `usage_limit_reached`:
+
+```toml
+[[accounts]]
+id = "chatgpt"
+kind = "chatgpt_codex_auth_json"
+auth_json_path = "~/.codex/auth.json"
+supports_responses = true
+supports_responses_ws = true
+auto_use_reset = true
+```
+
+The option defaults to `false` and is supported only for ChatGPT accounts with a base URL ending in `/codex`. It uses the account's existing credentials with the same backend reset API as Codex `/usage`; the backend selects the next available reset. Ordinary request throttling does not redeem a reset.
+
+After a successful redemption, Tokenproxy clears cached quota health and retries the same account once, even when `retry.max_precommit_retries = 0`. HTTP 429 responses, the first SSE quota-error event, WebSocket handshakes, and WebSocket quota-error events before downstream output can recover transparently. A quota error after stream output attempts recovery for future requests and forwards the error without replaying output. Failed or unavailable resets retain normal failure and failover behavior.
+
+Redemptions are serialized per backend and ChatGPT account identity, with a 30-second cooldown and a total timeout capped at 10 seconds by `timeouts.request_header_ms`. Ambiguous failures retain the same redemption key across retries and config reloads; when no account is eligible, a later request can reconcile the pending redemption after the cooldown. This coordination is local to one process and does not survive restart. Reloading config can enable or disable the option.
+
+See [validation and upstream API references](docs/auto-use-reset-validation.md) for the mock experiments.
+
 ## Credits
 
 Tokenproxy is a minified Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), narrowed to OpenAI and Anthropic agent traffic with a focus on latency and Codex workflows.

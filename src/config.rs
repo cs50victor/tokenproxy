@@ -171,6 +171,7 @@ pub struct AccountConfig {
     pub service_tiers: Vec<String>,
     pub prompt_cache_key_seed_env: Option<String>,
     pub codex_client_version: Option<String>,
+    pub auto_use_reset: bool,
     #[serde(flatten)]
     pub extra_fields: BTreeMap<String, TomlValue>,
 }
@@ -196,6 +197,7 @@ impl Default for AccountConfig {
             service_tiers: vec!["auto".to_string(), "default".to_string()],
             prompt_cache_key_seed_env: None,
             codex_client_version: None,
+            auto_use_reset: false,
             extra_fields: BTreeMap::new(),
         }
     }
@@ -1099,6 +1101,20 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
     }
 
     for account in &config.accounts {
+        if account.auto_use_reset {
+            if account.kind != AccountKind::ChatgptCodexAuthJson {
+                return Err(TokenproxyError::invalid_config(
+                    "auto_use_reset requires a chatgpt_codex_auth_json account",
+                ));
+            }
+            if !reqwest::Url::parse(&account.base_url)
+                .is_ok_and(|url| url.path().trim_end_matches('/').ends_with("/codex"))
+            {
+                return Err(TokenproxyError::invalid_config(
+                    "auto_use_reset requires a ChatGPT base_url ending in /codex",
+                ));
+            }
+        }
         if account.enabled && !account.supports_any_route() {
             return Err(TokenproxyError::invalid_config(format!(
                 "enabled account {} must support at least one tokenproxy route",
@@ -1419,6 +1435,51 @@ mod tests {
             "#
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn auto_use_reset_defaults_off_and_parses_from_inline_accounts() {
+        assert!(!AccountConfig::default().auto_use_reset);
+        let config = parse_config_with_cli_overrides(None, &[
+            r#"accounts=[{id="chatgpt",kind="chatgpt_codex_auth_json",auto_use_reset=true,supports_responses=true}]"#.into(),
+        ]).unwrap();
+        assert!(config.accounts[0].auto_use_reset);
+    }
+
+    #[test]
+    fn auto_use_reset_rejects_api_keys_and_ambiguous_backend_paths() {
+        for (kind, base_url) in [
+            (AccountKind::OpenAiApiKey, "https://api.openai.com/v1"),
+            (AccountKind::AnthropicApiKey, "https://api.anthropic.com/v1"),
+            (AccountKind::MainroomPeer, "https://peer.example/v1"),
+            (
+                AccountKind::ChatgptCodexAuthJson,
+                "https://chatgpt.com/backend-api",
+            ),
+        ] {
+            let config = config_with_account(AccountConfig {
+                id: "test".into(),
+                kind,
+                base_url: base_url.into(),
+                auto_use_reset: true,
+                supports_responses: true,
+                ..AccountConfig::default()
+            });
+            assert!(
+                validate_static_config(&config)
+                    .unwrap_err()
+                    .message
+                    .contains("auto_use_reset")
+            );
+        }
+    }
+
+    #[test]
+    fn auto_use_reset_accepts_default_chatgpt_backend_after_normalization() {
+        let mut config = chatgpt_config("auth.json");
+        config.accounts[0].auto_use_reset = true;
+        apply_account_kind_defaults(&mut config);
+        validate_static_config(&config).unwrap();
     }
 
     #[test]

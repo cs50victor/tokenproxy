@@ -71,6 +71,7 @@ use crate::usage::{
     usage_windows_from_usage_limit_error_value,
 };
 
+use super::reset::ResetContext;
 use super::{AppState, ConfigStatus};
 
 type UpstreamWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -91,6 +92,7 @@ struct HttpProxyAttempt {
     compact_request_body: Option<Bytes>,
 }
 
+#[derive(Clone)]
 struct UpstreamForward<'a> {
     request_id: &'a str,
     method: Method,
@@ -104,6 +106,7 @@ struct UpstreamForward<'a> {
 }
 
 struct SseFirstEvent<'a, S> {
+    reset: Option<ResetContext>,
     status: StatusCode,
     headers: HeaderMap,
     stream: S,
@@ -1279,9 +1282,11 @@ async fn relay_single_websocket_create(
     let max_attempts = usize::from(state.effective().config.retry.max_precommit_retries) + 1;
     let mut attempted_ids = Vec::new();
     let mut last_retryable_error = None;
+    let mut reset_retry_account = None;
+    let mut reset_attempted = false;
 
     'attempts: loop {
-        let route_request = if attempted_ids.is_empty() {
+        let route_request = if attempted_ids.is_empty() || reset_retry_account.is_some() {
             initial_route_request.clone()
         } else {
             let mut retry = initial_route_request.clone();
@@ -1289,11 +1294,19 @@ async fn relay_single_websocket_create(
             retry.requires_incremental_previous_response_id = false;
             retry
         };
-        let account = match select_next_account(state, &route_request, &attempted_ids).await {
-            Ok(account) => account,
-            Err(error) => return Err(last_retryable_error.unwrap_or(error)),
+        let account = match reset_retry_account.take() {
+            Some(account) => account,
+            None => {
+                let account = match select_next_account(state, &route_request, &attempted_ids).await
+                {
+                    Ok(account) => account,
+                    Err(error) => return Err(last_retryable_error.unwrap_or(error)),
+                };
+                attempted_ids.push(account.config.id.clone());
+                account
+            }
         };
-        attempted_ids.push(account.config.id.clone());
+        let reset = ResetContext::new(state, &account);
         *replay_state = base_replay_state.clone();
 
         let reused_upstream_previous_response = match ensure_upstream_session(
@@ -1351,6 +1364,7 @@ async fn relay_single_websocket_create(
         // previous-response state, the previous_response_not_found path recovers.
         let mut reuse_retry_available = reused_upstream_previous_response;
         let mut first_event_seen = false;
+        let mut downstream_committed = false;
         if let Err(error) = upstream_session
             .as_mut()
             .expect("ensure_upstream_session creates session")
@@ -1451,6 +1465,19 @@ async fn relay_single_websocket_create(
                                     );
                                     record_account_websocket_event_health(state, &account, event);
                                     record_websocket_usage_limit_error_event(state, &account, event).await;
+                                    if !usage_windows_from_usage_limit_error_value(event, &now_rfc3339()).is_empty() {
+                                        if !reset_attempted && let Some(reset) = reset.as_ref() {
+                                            reset_attempted = true;
+                                            if reset.recover().await && !downstream_committed {
+                                                reset_retry_account = Some(account.clone());
+                                                replay_state.in_flight = false;
+                                                close_idle_upstream_session(&state.metrics, upstream_session).await;
+                                                continue 'attempts;
+                                            }
+                                        }
+                                        replay_state.in_flight = false;
+                                        replay_state.pending_output_items.clear();
+                                    }
                                 }
                                 if !recorded_first_event {
                                     let first_event_duration_ms =
@@ -1514,6 +1541,7 @@ async fn relay_single_websocket_create(
                                     idle_timeout,
                                 )
                                 .await?;
+                                downstream_committed = true;
                                 if !replay_state.in_flight {
                                     break 'relay;
                                 }
@@ -1944,6 +1972,8 @@ async fn ensure_upstream_session(
 
     let mut account = state.account_for_request(account).await;
     let mut recovered_unauthorized = false;
+    let reset = ResetContext::new(state, &account);
+    let mut reset_attempted = false;
     let (socket, _) = loop {
         let ws_url = websocket_upstream_url_for_account(&account)?;
         let origin = websocket_origin(&account.config.base_url);
@@ -2041,6 +2071,27 @@ async fn ensure_upstream_session(
                 recovered_unauthorized = true;
             }
             Ok(Err(error)) => {
+                if let WebSocketError::Http(response) = &error
+                    && response.status() == StatusCode::TOO_MANY_REQUESTS
+                    && let Some(body) = response.body().as_ref()
+                    && let Ok(event) = serde_json::from_slice::<Value>(body)
+                    && !usage_windows_from_usage_limit_error_value(&event, &now_rfc3339())
+                        .is_empty()
+                {
+                    record_websocket_usage_limit_error_event(state, &account, &event).await;
+                    if !reset_attempted && let Some(reset) = reset.as_ref() {
+                        reset_attempted = true;
+                        if reset.recover().await {
+                            account = state.account_for_request(&account).await;
+                            continue;
+                        }
+                    }
+                    return Err(TokenproxyError::new(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        ErrorCode::UpstreamFailure,
+                        "upstream WebSocket usage limit reached",
+                    ));
+                }
                 record_account_transient_failure(state, &account, &HeaderMap::new());
                 return Err(TokenproxyError::new(
                     StatusCode::BAD_GATEWAY,
@@ -2508,6 +2559,31 @@ async fn forward_to_upstream(
     account: &EffectiveAccount,
     forward: UpstreamForward<'_>,
 ) -> Result<Response, TokenproxyError> {
+    let response = forward_to_upstream_once(state, account, forward.clone(), true).await?;
+    if response.extensions().get::<UsageResetRecovered>().is_some() {
+        let account = state.account_for_request(account).await;
+        let forward = UpstreamForward {
+            retry_phase: "retry",
+            ..forward
+        };
+        return forward_to_upstream_once(state, &account, forward, false).await;
+    }
+    Ok(response)
+}
+
+#[derive(Clone)]
+struct UsageResetRecovered;
+
+async fn forward_to_upstream_once(
+    state: &AppState,
+    account: &EffectiveAccount,
+    forward: UpstreamForward<'_>,
+    allow_reset: bool,
+) -> Result<Response, TokenproxyError> {
+    let reset = ResetContext::new(state, account).map(|mut context| {
+        context.allow_recovery = allow_reset;
+        context
+    });
     let account_id_hash = account_id_hash(&account.config.id, &state.effective().account_hash_key);
     let method_name = forward.method.as_str().to_string();
     let upstream_url = upstream_url_for_path(account, forward.path_and_query)?;
@@ -2639,7 +2715,9 @@ async fn forward_to_upstream(
                 format!("failed to read upstream error body: {error}"),
             )
         })?;
-        usage_windows.extend(usage_windows_from_error_body(status, &body, &observed_at));
+        let error_windows = usage_windows_from_error_body(status, &body, &observed_at);
+        let exhausted = !error_windows.is_empty();
+        usage_windows.extend(error_windows);
         let usage_limited_health = usage_limited_health_from_windows(&usage_windows);
         record_account_http_status(
             state,
@@ -2669,7 +2747,15 @@ async fn forward_to_upstream(
             .await?;
         }
 
-        let response = response_with_headers(status, headers, Body::from(body))?;
+        let recovered = if exhausted && let Some(reset) = reset.as_ref() {
+            reset.recover().await
+        } else {
+            false
+        };
+        let mut response = response_with_headers(status, headers, Body::from(body))?;
+        if recovered {
+            response.extensions_mut().insert(UsageResetRecovered);
+        }
         return Ok(response_with_log_context(response, log_context));
     }
     record_account_http_status(state, account, status, &response_headers, None).await;
@@ -2703,6 +2789,7 @@ async fn forward_to_upstream(
     }
     if repair_sse {
         let (response, stream_metadata) = sse_response_after_first_event(SseFirstEvent {
+            reset,
             status,
             headers,
             stream: response.bytes_stream(),
@@ -3211,6 +3298,7 @@ type BoxedSseEventStream<S> = Pin<Box<EventStream<PendingLimitedSseStream<S>>>>;
 const MAX_PENDING_SSE_BYTES: usize = 16 * 1024 * 1024;
 
 struct SseStreamState<S> {
+    reset: Option<ResetContext>,
     stream: BoxedSseEventStream<S>,
     repair: SseRepair,
     pending: VecDeque<Bytes>,
@@ -3339,6 +3427,18 @@ impl Drop for SseClientCancellation {
     }
 }
 
+fn sse_usage_limit(data: &str) -> bool {
+    serde_json::from_str::<Value>(data).is_ok_and(|event| {
+        !usage_windows_from_usage_limit_error_value(&event, &now_rfc3339()).is_empty()
+    })
+}
+
+async fn record_reset_stream_exhaustion(reset: &ResetContext, data: &str) {
+    if let Ok(event) = serde_json::from_str::<Value>(data) {
+        record_websocket_usage_limit_error_event(&reset.state, &reset.account, &event).await;
+    }
+}
+
 async fn sse_response_after_first_event<S, E>(
     args: SseFirstEvent<'_, S>,
 ) -> Result<(Response, StreamResponseMetadata), TokenproxyError>
@@ -3352,6 +3452,13 @@ where
     match tokio::time::timeout(args.idle_timeout, stream.as_mut().next()).await {
         Ok(Some(Ok(event))) => {
             pending_bytes.store(0, Ordering::Relaxed);
+            let exhausted = args.reset.is_some() && sse_usage_limit(&event.data);
+            let recovered = if exhausted && let Some(reset) = args.reset.as_ref() {
+                record_reset_stream_exhaustion(reset, &event.data).await;
+                reset.recover().await
+            } else {
+                false
+            };
             let frames = vec![repair.observe_event(event)?];
 
             let first_event_duration_ms =
@@ -3374,6 +3481,7 @@ where
                 first_event_duration_ms: Some(first_event_duration_ms),
             };
             let body = Body::from_stream(repair_sse_stream_from_state(SseStreamState {
+                reset: if exhausted { None } else { args.reset },
                 stream,
                 repair,
                 pending: VecDeque::from(frames),
@@ -3386,7 +3494,11 @@ where
                 pending_bytes,
             }));
             let mut response = response_with_headers(args.status, args.headers, body)?;
-            response.extensions_mut().insert(SseFirstFrameObserved);
+            if recovered {
+                response.extensions_mut().insert(UsageResetRecovered);
+            } else {
+                response.extensions_mut().insert(SseFirstFrameObserved);
+            }
             Ok((response, metadata))
         }
         Ok(Some(Err(error))) => Err(TokenproxyError::new(
@@ -3427,6 +3539,13 @@ where
             match tokio::time::timeout(state.idle_timeout, state.stream.as_mut().next()).await {
                 Ok(Some(Ok(event))) => {
                     state.pending_bytes.store(0, Ordering::Relaxed);
+                    if state.reset.is_some()
+                        && sse_usage_limit(&event.data)
+                        && let Some(reset) = state.reset.take()
+                    {
+                        record_reset_stream_exhaustion(&reset, &event.data).await;
+                        reset.recover().await;
+                    }
                     match state.repair.observe_event(event) {
                         Ok(frame) => {
                             if let Some(metrics) = state.cancellation.metrics() {
@@ -4223,6 +4342,52 @@ fn deterministic_backoff_jitter_ms(account_id: &str, now_ms: u64, jitter_cap_ms:
 }
 
 async fn select_next_account(
+    state: &AppState,
+    route_request: &RouteRequest,
+    attempted_ids: &[String],
+) -> Result<EffectiveAccount, TokenproxyError> {
+    let result = select_next_account_once(state, route_request, attempted_ids).await;
+    if result.is_ok() {
+        return result;
+    }
+    // An ambiguous redemption or a newly enabled option must be reachable even
+    // while ordinary routing excludes the account until its quota reset time.
+    let exhausted = {
+        let windows = state.usage_windows.lock().await;
+        let health = state.account_health_snapshot();
+        state
+            .routing_accounts()
+            .into_iter()
+            .filter(|account| {
+                !attempted_ids.contains(&account.config.id)
+                    && account.config.auto_use_reset
+                    && account_static_compatible(
+                        &routing_account_state(account, AccountHealth::Open, 0, 0, 0),
+                        route_request,
+                    )
+                    && !matches!(
+                        health.get(&account.config.id),
+                        Some(AccountHealth::AuthFailed)
+                    )
+                    && windows.get(&account.config.id).is_some_and(|windows| {
+                        windows.iter().any(|window| {
+                            window.limited && window.source == "usage_limit_reached_error"
+                        })
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    for account in exhausted {
+        if let Some(reset) = ResetContext::new(state, &account)
+            && reset.recover().await
+        {
+            return select_next_account_once(state, route_request, attempted_ids).await;
+        }
+    }
+    result
+}
+
+async fn select_next_account_once(
     state: &AppState,
     route_request: &RouteRequest,
     attempted_ids: &[String],
@@ -6515,6 +6680,7 @@ data: {"type":"response.created","response":{"id":"resp_1","service_tier":"defau
     {
         let (stream, pending_bytes) = bounded_eventsource_stream(stream);
         repair_sse_stream_from_state(SseStreamState {
+            reset: None,
             stream,
             repair: SseRepair::default(),
             pending: VecDeque::new(),
@@ -6606,6 +6772,7 @@ data: {"type":"response.custom.future_event"}
         let metrics = Metrics::default();
 
         let error = sse_response_after_first_event(SseFirstEvent {
+            reset: None,
             status: StatusCode::OK,
             headers: HeaderMap::new(),
             stream,
@@ -6659,6 +6826,7 @@ data: {"type":"response.custom.future_event"}
         let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
         let (stream, pending_bytes) = bounded_eventsource_stream(stream);
         let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
+            reset: None,
             stream,
             repair: SseRepair::default(),
             pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),
@@ -6699,6 +6867,7 @@ data: {"type":"response.custom.future_event"}
         ))]);
         let (stream, pending_bytes) = bounded_eventsource_stream(stream);
         let mut repaired = Box::pin(repair_sse_stream_from_state(SseStreamState {
+            reset: None,
             stream,
             repair: SseRepair::default(),
             pending: VecDeque::from([Bytes::from_static(b"event: response.created\n\n")]),

@@ -122,17 +122,29 @@ pub fn usage_windows_from_usage_limit_error_value(
 ) -> Vec<UsageWindow> {
     use serde_json::Value;
 
-    if value.pointer("/error/code").and_then(Value::as_str) != Some("usage_limit_reached") {
+    let error = value
+        .pointer("/error")
+        .or_else(|| value.pointer("/response/error"));
+    let Some(error) = error else {
+        return Vec::new();
+    };
+    if error.get("code").and_then(Value::as_str) != Some("usage_limit_reached")
+        && error.get("type").and_then(Value::as_str) != Some("usage_limit_reached")
+    {
         return Vec::new();
     }
-    let reset_seconds = value
-        .pointer("/error/resets_in_seconds")
+    let reset_seconds = error
+        .get("resets_in_seconds")
         .and_then(Value::as_f64)
         .filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
-    let reset_at = value
-        .pointer("/error/resets_at")
+    let reset_at = error
+        .get("resets_at")
         .and_then(Value::as_str)
         .and_then(normalize_rfc3339)
+        .or_else(|| {
+            let seconds = error.get("resets_at")?.as_u64()?;
+            crate::time_parse::rfc3339_from_unix_ms(seconds.checked_mul(1000)?)
+        })
         .or_else(|| rfc3339_after_seconds(observed_at, reset_seconds?));
 
     vec![UsageWindow {
@@ -279,6 +291,44 @@ pub fn account_id_hash(account_id: &str, hash_key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_codex_http_type_and_numeric_reset_timestamp() {
+        let windows = super::usage_windows_from_usage_limit_error_value(
+            &serde_json::json!({"error":{"type":"usage_limit_reached","resets_at":1704067242}}),
+            "2024-01-01T00:00:00Z",
+        );
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].reset_at.as_deref(), Some("2024-01-01T00:00:42Z"));
+    }
+
+    #[test]
+    fn parses_nested_usage_error_but_excludes_temporary_stream_throttling() {
+        let event =
+            |code| serde_json::json!({"type":"response.failed","response":{"error":{"code":code}}});
+        assert_eq!(
+            super::usage_windows_from_usage_limit_error_value(
+                &event("usage_limit_reached"),
+                "2024-01-01T00:00:00Z"
+            )
+            .len(),
+            1
+        );
+        assert!(
+            super::usage_windows_from_usage_limit_error_value(
+                &event("rate_limit_exceeded"),
+                "2024-01-01T00:00:00Z"
+            )
+            .is_empty()
+        );
+        assert!(
+            super::usage_windows_from_usage_limit_error_value(
+                &event("insufficient_quota"),
+                "2024-01-01T00:00:00Z"
+            )
+            .is_empty()
+        );
+    }
+
     use super::*;
     use crate::config::AccountConfig;
     use crate::time_parse::now_rfc3339;
