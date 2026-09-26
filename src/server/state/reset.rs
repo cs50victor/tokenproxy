@@ -198,7 +198,7 @@ impl ResetContext {
             }
             let mut request = self
                 .state
-                .reset_client
+                .control_client
                 .request(method.clone(), url.clone())
                 .bearer_auth(&account.bearer_token)
                 .header("user-agent", "codex-cli")

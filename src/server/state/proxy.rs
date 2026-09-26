@@ -140,12 +140,12 @@ struct WebSocketRouteContext {
     model_family: String,
 }
 
-struct ActiveWebSocketSessionGuard {
+pub(super) struct ActiveWebSocketSessionGuard {
     metrics: Metrics,
 }
 
 impl ActiveWebSocketSessionGuard {
-    fn new(metrics: &Metrics) -> Self {
+    pub(super) fn new(metrics: &Metrics) -> Self {
         metrics.increment_active_websocket_sessions();
         Self {
             metrics: metrics.clone(),
@@ -237,6 +237,14 @@ pub fn app(state: AppState) -> Router {
             post(proxy_http)
                 .get(responses_compact_get)
                 .fallback(authenticated_method_not_allowed),
+        )
+        .route(
+            "/backend-api/codex/realtime/calls",
+            post(super::realtime::create_call).fallback(authenticated_method_not_allowed),
+        )
+        .route(
+            "/v1/live/{call_id}",
+            get(super::realtime::join_call).fallback(authenticated_method_not_allowed),
         )
         .fallback(proxy_passthrough)
         .with_state(state)
@@ -2900,7 +2908,7 @@ fn response_with_headers(
     })
 }
 
-async fn response_body_with_limit(
+pub(super) async fn response_body_with_limit(
     response: reqwest::Response,
     max_body_bytes: usize,
     label: &str,
@@ -3879,7 +3887,7 @@ async fn all_compatible_accounts_usage_limited_error(
     ))
 }
 
-fn account_selection_health(
+pub(super) fn account_selection_health(
     state: &AppState,
     account: &EffectiveAccount,
     usage_windows: Option<&[UsageWindow]>,
@@ -4158,7 +4166,7 @@ fn mainroom_peer_passthrough_matches_path(account: &EffectiveAccount, path: &str
     openai_api_key_passthrough_matches_path(account, path)
 }
 
-async fn record_account_http_status(
+pub(super) async fn record_account_http_status(
     state: &AppState,
     account: &EffectiveAccount,
     status: StatusCode,
@@ -4544,7 +4552,7 @@ fn record_websocket_request_metrics(
     );
 }
 
-fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
+pub(super) fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
     let bearer_authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())

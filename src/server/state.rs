@@ -19,6 +19,7 @@ use crate::routing::AccountHealth;
 use crate::usage::UsageWindow;
 
 mod proxy;
+mod realtime;
 mod reset;
 
 pub use proxy::app;
@@ -35,7 +36,8 @@ pub struct AppState {
     account_health: Arc<RwLock<BTreeMap<String, Arc<AccountHealthCell>>>>,
     chatgpt_auth: Arc<RwLock<BTreeMap<String, Arc<ChatGptAuthCell>>>>,
     reset_attempts: Arc<Mutex<BTreeMap<String, Arc<Mutex<reset::ResetAttempt>>>>>,
-    reset_client: reqwest::Client,
+    control_client: reqwest::Client,
+    realtime_calls: Arc<realtime::Calls>,
     config_status: Arc<RwLock<ConfigStatus>>,
     reload_in_progress: Arc<AtomicBool>,
     config_overrides: Arc<Vec<String>>,
@@ -246,11 +248,11 @@ impl AppState {
                 )
             })?;
         let account_health = account_health_cells(&effective);
-        let reset_client = reqwest::Client::builder()
+        let control_client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_millis(effective.config.timeouts.connect_ms))
             .build()
-            .map_err(|_| TokenproxyError::invalid_config("failed to build reset HTTP client"))?;
+            .map_err(|_| TokenproxyError::invalid_config("failed to build control HTTP client"))?;
         let chatgpt_auth = chatgpt_auth_cells(&effective)?;
         let metrics_enabled = effective.config.observability.metrics;
         let effective = Arc::new(effective);
@@ -264,7 +266,8 @@ impl AppState {
             account_health: Arc::new(RwLock::new(account_health)),
             chatgpt_auth: Arc::new(RwLock::new(chatgpt_auth)),
             reset_attempts: Arc::new(Mutex::new(BTreeMap::new())),
-            reset_client,
+            control_client,
+            realtime_calls: Arc::new(realtime::Calls::default()),
             config_status: Arc::new(RwLock::new(config_status)),
             reload_in_progress: Arc::new(AtomicBool::new(false)),
             config_overrides: Arc::new(config_overrides),

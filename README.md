@@ -60,6 +60,35 @@ Redemptions are serialized per backend and ChatGPT account identity, with a 30-s
 
 See [validation and upstream API references](docs/auto-use-reset-validation.md) for the mock experiments.
 
+## Codex Live voice
+
+Enable subscription voice on a ChatGPT account:
+
+```toml
+[[accounts]]
+id = "chatgpt"
+kind = "chatgpt_codex_auth_json"
+auth_json_path = "~/.codex/auth.json"
+supports_responses = true
+supports_responses_ws = true
+supports_realtime = true
+```
+
+For Codex CLI v0.157.1, put these overrides at the root of its `config.toml`, before any table, while retaining your existing Tokenproxy provider and client credential:
+
+```toml
+experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:8787/backend-api/codex"
+experimental_realtime_ws_base_url = "ws://127.0.0.1:8787/v1/live"
+```
+
+Tokenproxy forwards JSON call setup and the continuous control WebSocket using the same ChatGPT account. WebRTC audio travels directly between Codex and OpenAI. Native `/voice` uses V3; programmatic app-server clients must initialize with `experimentalApi = true` and explicitly request `version = "v3"` with a WebRTC SDP offer. Access still depends on the upstream account's voice entitlement.
+
+Voice is opt-in and independent of the text-model discovery allowlist. New calls choose the highest-priority eligible voice account. A call never fails over or replays: only an explicit 401 can trigger one same-account credential refresh and retry. Voice 403 responses do not disable otherwise-working text credentials. Call ownership survives sideband disconnects for five minutes, allowing reconnection to the original account; config changes that remove that account or change its identity/backend block reconnection. Restarting Tokenproxy loses call bindings.
+
+The process admits at most 1,024 pending or connected calls, including in-flight setup requests. Expired disconnected bindings are removed on subsequent call operations. Setup bodies and WebSocket messages are limited to the smaller of `server.max_body_bytes` and 1 MiB. Setup and handshake use the existing request/connection timeouts; `websocket_idle_ms` bounds stalled writes, while quiet control connections remain open because audio uses WebRTC. Only one sideband can attach to a call at a time.
+
+The default upstream sideband is `wss://api.openai.com/v1/live`; an account can override `realtime_ws_base_url` for a compatible backend. The upstream `Location` supplies only the call ID, never the connection destination. See [implementation choices, protocol references, and validation](docs/realtime-validation.md).
+
 ## Credits
 
 Tokenproxy is a minified Rust port of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI), narrowed to OpenAI and Anthropic agent traffic with a focus on latency and Codex workflows.
