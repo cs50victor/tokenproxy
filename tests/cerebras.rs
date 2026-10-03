@@ -247,6 +247,75 @@ async fn should_complete_streamed_tool_roundtrip_with_fragmented_network_frames(
 }
 
 #[tokio::test]
+async fn should_run_and_follow_up_a_codex_tui_child_without_call_ids() {
+    let mut stream = frame(json!({"choices":[{"index":0,"delta":{"tool_calls":[
+        {"index":0,"id":"probe_1","function":{"name":"run","arguments":"{}"}}
+    ]},"finish_reason":"tool_calls"}]}));
+    stream += "data: [DONE]\n\n";
+    let (upstream, captured) = upstream(vec![sse_reply(stream), json_reply()]).await;
+    let proxy = proxy(vec![account(
+        &upstream,
+        "cerebras",
+        0,
+        AccountKind::CerebrasApiKey,
+    )])
+    .await;
+    let task = "<codex_delegation>\n  <source_thread_id>parent</source_thread_id>\n  <input>Run &lt;probe&gt; &amp; report</input>\n</codex_delegation>";
+    let context = json!({"role":"user", "content":"<environment_context>Working directory: /tmp</environment_context>"});
+    let mut body = request_body();
+    body["input"] = json!([context, {"type":"function_call_output", "name":"create_thread", "namespace":"codex_tui", "output":task}]);
+    body["tools"] = json!([{"type":"function", "name":"run", "parameters":{"type":"object"}}]);
+    body["stream"] = json!(true);
+    let response = request(&proxy, "/v1/responses", body.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = response.text().await.unwrap();
+    let events: Vec<Value> = stream
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let completed = &events.last().unwrap()["response"];
+    assert_eq!(completed["status"], "completed");
+    let call = &completed["output"][0];
+    assert_eq!(call["call_id"], "probe_1");
+    body["input"].as_array_mut().unwrap().extend([
+        call.clone(),
+        json!({"type":"function_call_output", "call_id":"probe_1", "output":"PROBE_OK"}),
+        json!({"type":"function_call_output", "call_id":null, "name":"send_message_to_thread", "namespace":"codex_tui", "output":"Report the result"}),
+    ]);
+    body["stream"] = json!(false);
+    let response = request(&proxy, "/v1/responses", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["output"][0]["content"][0]["text"],
+        "OK"
+    );
+    let requests = captured.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].1["messages"],
+        json!([
+            context,
+            {"role":"assistant", "content":format!("Tool output from codex_tui.create_thread:\n{task}")}
+        ])
+    );
+    assert_eq!(requests[1].1["messages"][0], requests[0].1["messages"][0]);
+    assert_eq!(requests[1].1["messages"][1], requests[0].1["messages"][1]);
+    assert_eq!(
+        requests[1].1["messages"][2]["tool_calls"][0]["id"],
+        "probe_1"
+    );
+    assert_eq!(
+        requests[1].1["messages"][3],
+        json!({"role":"tool", "tool_call_id":"probe_1", "content":"PROBE_OK"})
+    );
+    assert_eq!(
+        requests[1].1["messages"][4],
+        json!({"role":"assistant", "content":"Tool output from codex_tui.send_message_to_thread:\nReport the result"})
+    );
+}
+
+#[tokio::test]
 async fn should_roundtrip_plaintext_collaboration_and_reject_encrypted_tasks() {
     let mut stream = frame(json!({"choices":[{"index":0,"delta":{"tool_calls":[
         {"index":0,"id":"task_1","function":{"name":"collaboration__spawn_agent","arguments":"{\"message\":\"Run the probe\"}"}}
