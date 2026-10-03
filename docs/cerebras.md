@@ -61,6 +61,7 @@ Account service-tier filtering runs before translation. Cerebras defaults to `au
 | User/assistant text and user image URLs | Preserve message order and convert content-part shapes; image support depends on the model |
 | Function definitions and namespaces | Flatten names with collision checks and deterministic aliases for provider name limits; restore original names and namespaces on output |
 | Function calls and outputs | Preserve call IDs and arguments; combine adjacent assistant calls for parallel tool-result history |
+| Plaintext agent messages | Preserve sender, recipient, and text in a separate assistant message; native collaboration calls explicitly mark their task arguments as plaintext |
 | Plaintext reasoning history | Prefer full content, fall back to summary, and attach it to its assistant turn |
 | Reasoning effort | Forward as `reasoning_effort`; Cerebras validates model-specific values |
 | Output budget | Map `max_output_tokens` to `max_completion_tokens` |
@@ -73,6 +74,8 @@ Account service-tier filtering runs before translation. Cerebras defaults to `au
 Metadata, storage-disabled hints, reasoning-summary preference, verbosity, cache-retention hints, safety identifiers, and OpenAI service tiers are not sent upstream. Generated plaintext reasoning is represented as a separate Responses reasoning item, rather than assistant answer text.
 
 Unsupported semantic features return a clear 400: stored continuations (`previous_response_id` or `conversation`), `store=true`, background requests, automatic truncation, tool-call limits, item references, encrypted-only reasoning, file/audio inputs, hosted tools, and custom/freeform grammar tools. Nontext instructions or tool outputs are also rejected. The adapter does not implement remote compaction or retain response history; clients send the full conversation. Unexpected upstream refusal payloads return an upstream error rather than an empty successful answer.
+
+Codex v2 collaboration can pass plaintext tasks from Cerebras parents to fresh subagents. OpenAI parents can produce encrypted task messages, which Cerebras cannot decrypt. Those messages are rejected explicitly. A shared provider and model catalog do not make encrypted cross-provider delegation compatible; use a Cerebras parent or a client workflow that sends plaintext tasks.
 
 ## Streaming and failure behavior
 

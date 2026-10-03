@@ -308,6 +308,14 @@ impl ResponseConverter {
             if let Some(namespace) = &original.namespace {
                 self.output[index]["namespace"] = json!(namespace);
             }
+            if original.namespace.as_deref() == Some("collaboration")
+                && matches!(
+                    original.name.as_str(),
+                    "spawn_agent" | "send_message" | "followup_task"
+                )
+            {
+                self.output[index]["encrypted_function_args"] = json!([]);
+            }
         }
         let sent = self.announced_tools.entry(tool_index).or_insert_with(|| {
             let mut item = self.output[index].clone();
@@ -439,6 +447,28 @@ mod tests {
                 .unwrap()
             })
             .collect()
+    }
+
+    #[test]
+    fn should_mark_collaboration_messages_as_plaintext() {
+        for name in ["spawn_agent", "send_message", "followup_task"] {
+            let mut c = ResponseConverter::new(prepare(json!({"model":"qwen","input":"hi", "tools":[
+                {"type":"namespace","name":"collaboration","tools":[{"type":"function","name":name}]}
+            ]})).unwrap(), 65536);
+            let all = events(
+                &mut c,
+                json!({"choices":[{"index":0,"delta":{"tool_calls":[
+                {"index":0,"id":"a","function":{"name":format!("collaboration__{name}"),"arguments":"{\"message\":\"hello\"}"}}
+            ]},"finish_reason":"tool_calls"}]}),
+            );
+            let added = all
+                .iter()
+                .find(|event| event["type"] == "response.output_item.added")
+                .unwrap();
+            assert_eq!(added["item"]["encrypted_function_args"], json!([]));
+            c.event("[DONE]").unwrap();
+            assert_eq!(c.output[0]["encrypted_function_args"], json!([]));
+        }
     }
 
     #[test]

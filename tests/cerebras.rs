@@ -247,6 +247,66 @@ async fn should_complete_streamed_tool_roundtrip_with_fragmented_network_frames(
 }
 
 #[tokio::test]
+async fn should_roundtrip_plaintext_collaboration_and_reject_encrypted_tasks() {
+    let mut stream = frame(json!({"choices":[{"index":0,"delta":{"tool_calls":[
+        {"index":0,"id":"task_1","function":{"name":"collaboration__spawn_agent","arguments":"{\"message\":\"Run the probe\"}"}}
+    ]},"finish_reason":"tool_calls"}]}));
+    stream += "data: [DONE]\n\n";
+    let (upstream, captured) = upstream(vec![sse_reply(stream), json_reply()]).await;
+    let proxy = proxy(vec![account(
+        &upstream,
+        "cerebras",
+        0,
+        AccountKind::CerebrasApiKey,
+    )])
+    .await;
+    let mut body = request_body();
+    body["stream"] = json!(true);
+    body["tools"] = json!([{"type":"namespace","name":"collaboration","tools":[
+        {"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+    ]}]);
+    let response = request(&proxy, "/v1/responses", body.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = response.text().await.unwrap();
+    let events: Vec<Value> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect();
+    let call = &events.last().unwrap()["response"]["output"][0];
+    assert_eq!(call["namespace"], "collaboration");
+    assert_eq!(call["encrypted_function_args"], json!([]));
+    body["stream"] = json!(false);
+    body["input"] = json!([
+        {"role":"user","content":"Run a child"}, call,
+        {"type":"function_call_output","call_id":"task_1","output":"/root/child"},
+        {"type":"reasoning","summary":[{"type":"summary_text","text":"Waiting"}]},
+        {"type":"agent_message","author":"/root/child","recipient":"/root",
+         "content":[{"type":"input_text","text":"Probe succeeded"}]}
+    ]);
+    let response = request(&proxy, "/v1/responses", body.clone()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["output"][0]["content"][0]["text"],
+        "OK"
+    );
+    body["input"][4]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type":"encrypted_content","encrypted_content":"ciphertext"}));
+    let response = request(&proxy, "/v1/responses", body).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let requests = captured.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].1["messages"][3]["reasoning"], "Waiting");
+    assert_eq!(
+        requests[1].1["messages"][4]["content"],
+        "Message from /root/child to /root:\nProbe succeeded"
+    );
+    assert!(requests[1].1["messages"][4].get("reasoning").is_none());
+}
+
+#[tokio::test]
 async fn should_fail_over_on_429_or_invalid_first_stream_event() {
     for reply in [
         (

@@ -153,8 +153,31 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
     match object.get("input") {
         Some(Value::String(input)) => messages.push(json!({"role":"user", "content":input})),
         Some(Value::Array(input)) => {
+            let mut agent_message_boundary = false;
             for item in input {
+                let follows_agent_message = agent_message_boundary;
                 match item["type"].as_str().unwrap_or("message") {
+                    "agent_message" => {
+                        if !reasoning.is_empty() {
+                            messages.push(json!({"role":"assistant", "content":"", "reasoning":std::mem::take(&mut reasoning)}));
+                        }
+                        let author = string(item, "author")?;
+                        let recipient = string(item, "recipient")?;
+                        let content = item["content"]
+                            .as_array()
+                            .ok_or_else(|| invalid("agent message content must be an array"))?
+                            .iter()
+                            .map(|part| {
+                                if part["type"] != "input_text" {
+                                    return Err(invalid("Cerebras requires plaintext agent messages; encrypted task messages cannot cross providers"));
+                                }
+                                string(part, "text")
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                            .join("\n");
+                        messages.push(json!({"role":"assistant", "content":format!("Message from {author} to {recipient}:\n{content}")}));
+                        agent_message_boundary = true;
+                    }
                     "message" => {
                         let role = string(item, "role")?;
                         if matches!(role, "system" | "developer") {
@@ -175,8 +198,10 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                             message["reasoning"] = Value::String(std::mem::take(&mut reasoning));
                         }
                         messages.push(message);
+                        agent_message_boundary = false;
                     }
                     "function_call" => {
+                        agent_message_boundary = false;
                         let name = resolve_alias(
                             string(item, "name")?,
                             item["namespace"].as_str(),
@@ -187,7 +212,8 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                             "name":name, "arguments":string(item, "arguments")?
                         }});
                         if let Some(previous) = messages.last_mut().filter(|m| {
-                            m["role"] == "assistant"
+                            !follows_agent_message
+                                && m["role"] == "assistant"
                                 && (reasoning.is_empty() || m.get("reasoning").is_none())
                         }) {
                             if !reasoning.is_empty() {
@@ -211,6 +237,7 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                         }
                     }
                     "function_call_output" => {
+                        agent_message_boundary = false;
                         if !reasoning.is_empty() {
                             return Err(invalid(
                                 "reasoning must precede an assistant message or function call",
@@ -508,6 +535,53 @@ mod tests {
                 .extend(extra.as_object().unwrap().clone());
             assert!(prepare(request.clone()).is_err(), "accepted {request}");
         }
+    }
+
+    #[test]
+    fn should_preserve_plaintext_agent_messages_between_tool_turns() {
+        let converted = prepare(json!({"model":"qwen", "input":[
+            {"type":"agent_message","author":"/root","recipient":"/root/child",
+             "content":[{"type":"input_text","text":"Message Type: NEW_TASK"},{"type":"input_text","text":"Run the probe."}]},
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"Run it now"}]},
+            {"type":"function_call","name":"run","call_id":"a","arguments":"{}"},
+            {"type":"function_call_output","call_id":"a","output":"OK"}
+        ]})).unwrap();
+        let messages = &converted.body["messages"];
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(
+            messages[0]["content"],
+            "Message from /root to /root/child:\nMessage Type: NEW_TASK\nRun the probe."
+        );
+        assert!(messages[0].get("tool_calls").is_none());
+        assert!(messages[0].get("reasoning").is_none());
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "a");
+        assert_eq!(messages[1]["reasoning"], "Run it now");
+        assert_eq!(messages[2]["content"], "OK");
+    }
+
+    #[test]
+    fn should_preserve_reasoning_interrupted_by_an_agent_message() {
+        let converted = prepare(json!({"model":"qwen", "input":[
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"Waiting"}]},
+            {"type":"agent_message","author":"/root/child","recipient":"/root",
+             "content":[{"type":"input_text","text":"Probe succeeded"}]}
+        ]}))
+        .unwrap();
+        assert_eq!(converted.body["messages"][0]["reasoning"], "Waiting");
+        assert!(converted.body["messages"][1].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn should_reject_encrypted_agent_messages_without_dropping_content() {
+        assert!(
+            prepare(json!({"model":"qwen", "input":[
+                {"type":"agent_message","author":"/root","recipient":"/root/child", "content":[
+                    {"type":"input_text","text":"Header"},
+                    {"type":"encrypted_content","encrypted_content":"ciphertext"}
+                ]}
+            ]}))
+            .is_err()
+        );
     }
 
     #[test]
