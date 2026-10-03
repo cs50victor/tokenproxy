@@ -3762,7 +3762,7 @@ async fn forward_with_precommit_failover(
     attempt: HttpProxyAttempt,
 ) -> Result<Response, TokenproxyError> {
     let mut attempted_ids = Vec::new();
-    let mut last_retryable_error = None;
+    let mut last_retryable_failure = None;
     let max_attempts = usize::from(state.effective().config.retry.max_precommit_retries) + 1;
 
     for _ in 0..max_attempts {
@@ -3774,7 +3774,7 @@ async fn forward_with_precommit_failover(
         let selected = match select_next_account(state, route_request, &attempted_ids).await {
             Ok(selected) => selected,
             Err(error) => {
-                return Err(last_retryable_error.unwrap_or(error));
+                return last_retryable_failure.unwrap_or(Err(error));
             }
         };
         attempted_ids.push(selected.config.id.clone());
@@ -3801,7 +3801,7 @@ async fn forward_with_precommit_failover(
             Err(error)
                 if should_retry_precommit_error(&error) && attempted_ids.len() < max_attempts =>
             {
-                last_retryable_error = Some(error);
+                last_retryable_failure = Some(Err(error));
                 continue;
             }
             Err(error) => return Err(error),
@@ -3831,7 +3831,7 @@ async fn forward_with_precommit_failover(
                     if should_retry_precommit_error(&error)
                         && attempted_ids.len() < max_attempts =>
                 {
-                    last_retryable_error = Some(error);
+                    last_retryable_failure = Some(Err(error));
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -3859,14 +3859,8 @@ async fn forward_with_precommit_failover(
         });
 
         if should_retry_precommit_response(&response) && attempted_ids.len() < max_attempts {
+            last_retryable_failure = Some(Ok(response));
             continue;
-        }
-
-        if response.status() == StatusCode::TOO_MANY_REQUESTS
-            && let Some(error) =
-                all_compatible_accounts_usage_limited_error(state, route_request).await
-        {
-            return Err(error);
         }
 
         return Ok(response);
@@ -3884,7 +3878,7 @@ async fn forward_passthrough_with_precommit_failover(
     attempt: HttpProxyAttempt,
 ) -> Result<Response, TokenproxyError> {
     let mut attempted_ids = Vec::new();
-    let mut last_retryable_error = None;
+    let mut last_retryable_failure = None;
     let max_attempts = usize::from(state.effective().config.retry.max_precommit_retries) + 1;
 
     for _ in 0..max_attempts {
@@ -3896,7 +3890,7 @@ async fn forward_passthrough_with_precommit_failover(
         let selected =
             match select_next_passthrough_account(state, &attempt.path, &attempted_ids).await {
                 Ok(selected) => selected,
-                Err(error) => return Err(last_retryable_error.unwrap_or(error)),
+                Err(error) => return last_retryable_failure.unwrap_or(Err(error)),
             };
         attempted_ids.push(selected.config.id.clone());
         let selected = state.account_for_request(&selected).await;
@@ -3922,7 +3916,7 @@ async fn forward_passthrough_with_precommit_failover(
             Err(error)
                 if should_retry_precommit_error(&error) && attempted_ids.len() < max_attempts =>
             {
-                last_retryable_error = Some(error);
+                last_retryable_failure = Some(Err(error));
                 continue;
             }
             Err(error) => return Err(error),
@@ -3952,7 +3946,7 @@ async fn forward_passthrough_with_precommit_failover(
                     if should_retry_precommit_error(&error)
                         && attempted_ids.len() < max_attempts =>
                 {
-                    last_retryable_error = Some(error);
+                    last_retryable_failure = Some(Err(error));
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -3960,6 +3954,7 @@ async fn forward_passthrough_with_precommit_failover(
         }
 
         if should_retry_precommit_response(&response) && attempted_ids.len() < max_attempts {
+            last_retryable_failure = Some(Ok(response));
             continue;
         }
 
@@ -3970,55 +3965,6 @@ async fn forward_passthrough_with_precommit_failover(
         StatusCode::BAD_GATEWAY,
         ErrorCode::UpstreamFailure,
         "all pre-commit upstream passthrough attempts failed",
-    ))
-}
-
-async fn all_compatible_accounts_usage_limited_error(
-    state: &AppState,
-    route_request: &RouteRequest,
-) -> Option<TokenproxyError> {
-    let usage_windows = state.usage_windows.lock().await;
-    let now_ms = now_unix_ms();
-    let mut compatible_count = 0usize;
-    let mut usage_limited_count = 0usize;
-    let mut earliest_reset_at_ms = u64::MAX;
-
-    let accounts = state.routing_accounts();
-    for account in accounts.iter() {
-        let routing_account = routing_account_state(account, AccountHealth::Open, 0, 0, 0);
-        if !account_static_compatible(&routing_account, route_request) {
-            continue;
-        }
-        compatible_count += 1;
-
-        let AccountHealth::UsageLimited { reset_at_ms } = account_selection_health(
-            state,
-            account,
-            usage_windows.get(&account.config.id).map(Vec::as_slice),
-        ) else {
-            continue;
-        };
-        if now_ms >= reset_at_ms {
-            continue;
-        }
-
-        usage_limited_count += 1;
-        earliest_reset_at_ms = earliest_reset_at_ms.min(reset_at_ms);
-    }
-
-    if compatible_count == 0 || compatible_count != usage_limited_count {
-        return None;
-    }
-
-    let reset = if earliest_reset_at_ms == u64::MAX {
-        "unknown reset deadline".to_string()
-    } else {
-        format!("earliest reset at unix_ms={earliest_reset_at_ms}")
-    };
-    Some(TokenproxyError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        ErrorCode::NoEligibleAccount,
-        format!("no eligible upstream account: all compatible accounts are usage-limited; {reset}"),
     ))
 }
 
@@ -4239,30 +4185,83 @@ async fn select_next_passthrough_account(
     attempted_ids: &[String],
 ) -> Result<EffectiveAccount, TokenproxyError> {
     let usage_windows = state.usage_windows.lock().await;
-    state
-        .routing_accounts()
-        .iter()
-        .filter(|account| !attempted_ids.contains(&account.config.id))
-        .filter(|account| passthrough_account_matches_path(account, path))
-        .filter(|account| {
-            matches!(
-                account_selection_health(
-                    state,
-                    account,
-                    usage_windows.get(&account.config.id).map(Vec::as_slice),
-                ),
-                AccountHealth::Open | AccountHealth::Unknown
-            )
-        })
-        .max_by_key(|account| account.config.priority)
-        .cloned()
-        .ok_or_else(|| {
-            TokenproxyError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                ErrorCode::NoEligibleAccount,
-                "no eligible upstream account for passthrough request",
-            )
-        })
+    let accounts = state.routing_accounts();
+    let now_ms = now_unix_ms();
+    let mut selected: Option<&EffectiveAccount> = None;
+    let mut reasons = Vec::new();
+    let mut earliest_retry = None;
+    for account in accounts.iter().filter(|account| {
+        !attempted_ids.contains(&account.config.id)
+            && passthrough_account_matches_path(account, path)
+    }) {
+        let health = account_selection_health(
+            state,
+            account,
+            usage_windows.get(&account.config.id).map(Vec::as_slice),
+        );
+        let reason = match health {
+            AccountHealth::Open | AccountHealth::Unknown => None,
+            AccountHealth::Throttled { next_retry_at_ms } if now_ms >= next_retry_at_ms => None,
+            AccountHealth::UsageLimited { reset_at_ms } if now_ms >= reset_at_ms => None,
+            AccountHealth::Throttled { .. } => Some("throttled_cooldown"),
+            AccountHealth::UsageLimited { .. } => Some("usage_limited"),
+            AccountHealth::AuthFailed => Some("auth_failed"),
+        };
+        if let Some(reason) = reason {
+            reasons.push(reason);
+            if let Some(deadline) = health_retry_deadline(&health, now_ms) {
+                earliest_retry =
+                    Some(earliest_retry.map_or(deadline, |current: u64| current.min(deadline)));
+            }
+            continue;
+        }
+        if selected.is_none_or(|current| account.config.priority >= current.config.priority) {
+            selected = Some(account);
+        }
+    }
+    selected.cloned().ok_or_else(|| {
+        no_eligible_account_error(
+            "no eligible upstream account for passthrough request",
+            reasons,
+            earliest_retry,
+        )
+    })
+}
+
+fn health_retry_deadline(health: &AccountHealth, now_ms: u64) -> Option<u64> {
+    let deadline = match health {
+        AccountHealth::Throttled { next_retry_at_ms } => next_retry_at_ms,
+        AccountHealth::UsageLimited { reset_at_ms } => reset_at_ms,
+        _ => return None,
+    };
+    (*deadline > now_ms).then_some(*deadline)
+}
+
+fn no_eligible_account_error(
+    prefix: &str,
+    reasons: impl IntoIterator<Item = &'static str>,
+    earliest_retry: Option<u64>,
+) -> TokenproxyError {
+    let mut unique_reasons = Vec::new();
+    for reason in reasons {
+        if !unique_reasons.contains(&reason) {
+            unique_reasons.push(reason);
+        }
+    }
+    let reasons = if unique_reasons.is_empty() {
+        "no compatible unattempted account".to_string()
+    } else {
+        unique_reasons.join(", ")
+    };
+    let mut message = format!("{prefix}: {reasons}");
+    if let Some(deadline) = earliest_retry {
+        message.push_str(&format!("; earliest retry at unix_ms={deadline}"));
+    }
+    TokenproxyError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::NoEligibleAccount,
+        message,
+    )
 }
 
 fn passthrough_account_matches_path(account: &EffectiveAccount, path: &str) -> bool {
@@ -4572,19 +4571,15 @@ async fn select_next_account_once(
             )
         })
         .collect::<Vec<_>>();
-    let selection = select_account(&routing_accounts, route_request, now_unix_ms());
+    let now_ms = now_unix_ms();
+    let selection = select_account(&routing_accounts, route_request, now_ms);
     for (_, reason) in &selection.excluded {
         state.metrics.increment_route_exclusion(reason.as_str());
     }
-    let selected_id = selection.selected.ok_or_else(|| {
-        TokenproxyError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            ErrorCode::NoEligibleAccount,
-            "no eligible upstream account",
-        )
-    })?;
-    let selected_account_id_hash =
-        account_id_hash(&selected_id, &state.effective().account_hash_key);
+    let selected_account_id_hash = selection.selected.as_deref().map_or_else(
+        || "none".to_string(),
+        |id| account_id_hash(id, &state.effective().account_hash_key),
+    );
     let timestamps = now_timestamp_pair();
     for (excluded_account_id, reason) in &selection.excluded {
         let excluded_account_id_hash =
@@ -4609,6 +4604,19 @@ async fn select_next_account_once(
             excluded_reason: reason.as_str(),
         });
     }
+
+    let selected_id = selection.selected.ok_or_else(|| {
+        let earliest_retry = routing_accounts
+            .iter()
+            .filter(|account| account_static_compatible(account, route_request))
+            .filter_map(|account| health_retry_deadline(&account.health, now_ms))
+            .min();
+        no_eligible_account_error(
+            "no eligible upstream account",
+            selection.excluded.iter().map(|(_, reason)| reason.as_str()),
+            earliest_retry,
+        )
+    })?;
 
     accounts
         .iter()
@@ -7599,6 +7607,101 @@ data: {"type":"response.custom.future_event"}
             require_auth(&state, &headers).unwrap_err().status,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn passthrough_should_accept_expired_health_deadlines() {
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            "http://127.0.0.1:1/v1".to_string(),
+            "token",
+            100,
+        )]))
+        .unwrap();
+        for health in [
+            AccountHealth::Throttled {
+                next_retry_at_ms: now_unix_ms() + 60_000,
+            },
+            AccountHealth::UsageLimited {
+                reset_at_ms: now_unix_ms() + 60_000,
+            },
+            AccountHealth::AuthFailed,
+        ] {
+            state.store_account_health("primary", health);
+            assert!(
+                select_next_passthrough_account(&state, "/v1/files", &[])
+                    .await
+                    .is_err()
+            );
+        }
+        for health in [
+            AccountHealth::Throttled {
+                next_retry_at_ms: 1,
+            },
+            AccountHealth::UsageLimited { reset_at_ms: 1 },
+        ] {
+            state.store_account_health("primary", health);
+            let selected = select_next_passthrough_account(&state, "/v1/files", &[])
+                .await
+                .unwrap();
+            assert_eq!(selected.config.id, "primary");
+            assert!(
+                select_next_passthrough_account(&state, "/v1/files", &["primary".into()])
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_retry_deadline_should_ignore_incompatible_accounts() {
+        let mut incompatible =
+            account("incompatible", "http://127.0.0.1:2/v1".into(), "token", 100);
+        incompatible.config.models = vec!["different-model".into()];
+        let state = AppState::new(effective_config(vec![
+            account("primary", "http://127.0.0.1:1/v1".into(), "token", 100),
+            incompatible,
+        ]))
+        .unwrap();
+        let deadline = now_unix_ms() + 120_000;
+        state.store_account_health(
+            "primary",
+            AccountHealth::UsageLimited {
+                reset_at_ms: deadline,
+            },
+        );
+        state.store_account_health(
+            "incompatible",
+            AccountHealth::Throttled {
+                next_retry_at_ms: deadline - 60_000,
+            },
+        );
+        let request = RouteRequest {
+            endpoint: Endpoint::Responses,
+            transport: Transport::Http,
+            model: "gpt-5.5".into(),
+            service_tier: None,
+            pinned_account_id: None,
+            requires_incremental_previous_response_id: false,
+            model_family: "gpt-5".into(),
+            stream: false,
+        };
+        let error = select_next_account(&state, &request, &[])
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .message
+                .contains(&format!("earliest retry at unix_ms={deadline}")),
+            "{}",
+            error.message
+        );
+        state.store_account_health("primary", AccountHealth::AuthFailed);
+        let error = select_next_account(&state, &request, &[])
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("auth_failed"));
+        assert!(!error.message.contains("earliest retry"));
     }
 
     #[tokio::test]

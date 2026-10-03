@@ -38,6 +38,8 @@ Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `ser
 
 HTTP request bodies have no configured size cap by default, including decoded zstd requests and passthrough routes. Providers enforce their own request limits, and their HTTP 413 status and error body are forwarded to the client.
 
+If account failover cannot succeed, Tokenproxy preserves the last provider HTTP error status, body, and allowed response headers, including `Retry-After` and `x-request-id`. Provider quota errors remain HTTP 429. Later requests rejected locally because no account is eligible return HTTP 503 with the exclusion reasons and earliest applicable cooldown or quota deadline. These local rejections do not contact the provider or replay a previous request's error. Expired deadlines permit routing again, including passthrough requests.
+
 To impose a local cap, set `server.max_body_bytes` in bytes:
 
 ```toml
