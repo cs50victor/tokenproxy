@@ -2458,6 +2458,19 @@ fn upstream_url_for_path(
     let (public_path, public_query) = split_path_and_query(public_path_and_query);
 
     match account.config.kind {
+        AccountKind::CerebrasApiKey => {
+            let path = match public_path {
+                "/v1/responses" | "/v1/chat/completions" => "/v1/chat/completions",
+                _ => {
+                    return Err(TokenproxyError::new(
+                        StatusCode::BAD_REQUEST,
+                        ErrorCode::UnsupportedRoute,
+                        "Cerebras supports only chat completions and HTTP Responses",
+                    ));
+                }
+            };
+            append_path_and_query(base_url, path, public_query)
+        }
         AccountKind::OpenAiApiKey | AccountKind::MainroomPeer => {
             append_path_and_query(base_url, public_path, public_query)
         }
@@ -2580,6 +2593,31 @@ async fn forward_to_upstream_once(
     forward: UpstreamForward<'_>,
     allow_reset: bool,
 ) -> Result<Response, TokenproxyError> {
+    let (body, mut cerebras) =
+        if account.config.kind == AccountKind::CerebrasApiKey && forward.path == "/v1/responses" {
+            let request = serde_json::from_slice(&forward.body).map_err(|_| {
+                TokenproxyError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidJson,
+                    "invalid Cerebras Responses request",
+                )
+            })?;
+            let prepared = crate::cerebras::prepare(request)?;
+            let body = Bytes::from(serde_json::to_vec(&prepared.body).map_err(|_| {
+                TokenproxyError::new(
+                    StatusCode::BAD_REQUEST,
+                    ErrorCode::InvalidJson,
+                    "failed to serialize Cerebras request",
+                )
+            })?);
+            let converter = crate::cerebras::ResponseConverter::new(
+                prepared,
+                state.effective().config.server.max_body_bytes,
+            );
+            (body, Some(converter))
+        } else {
+            (forward.body.clone(), None)
+        };
     let reset = ResetContext::new(state, account).map(|mut context| {
         context.allow_recovery = allow_reset;
         context
@@ -2604,6 +2642,7 @@ async fn forward_to_upstream_once(
         match account.config.kind {
             AccountKind::AnthropicApiKey => UpstreamAuth::AnthropicApiKey,
             AccountKind::OpenAiApiKey => UpstreamAuth::OpenAiBearer,
+            AccountKind::CerebrasApiKey => UpstreamAuth::CerebrasBearer,
             AccountKind::ChatgptCodexAuthJson => UpstreamAuth::ChatGptBearer,
             AccountKind::MainroomPeer => UpstreamAuth::ForwardInboundBearer,
         },
@@ -2615,7 +2654,7 @@ async fn forward_to_upstream_once(
         .upstream_client
         .request(forward.method, upstream_url)
         .headers(headers)
-        .body(forward.body);
+        .body(body);
     let response = match tokio::time::timeout(
         Duration::from_millis(state.effective().config.timeouts.request_header_ms),
         upstream_request.send(),
@@ -2788,11 +2827,28 @@ async fn forward_to_upstream_once(
         return Ok(response_with_log_context(response, log_context));
     }
     if repair_sse {
+        let stream: Pin<
+            Box<dyn futures_util::Stream<Item = Result<Bytes, TokenproxyError>> + Send>,
+        > = if status.is_success()
+            && let Some(converter) = cerebras.take()
+        {
+            Box::pin(cerebras_response_stream(response.bytes_stream(), converter))
+        } else {
+            Box::pin(response.bytes_stream().map(|result| {
+                result.map_err(|error| {
+                    TokenproxyError::new(
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCode::UpstreamFailure,
+                        format!("upstream stream failed: {error}"),
+                    )
+                })
+            }))
+        };
         let (response, stream_metadata) = sse_response_after_first_event(SseFirstEvent {
             reset,
             status,
             headers,
-            stream: response.bytes_stream(),
+            stream,
             metrics: &state.metrics,
             endpoint: forward.path,
             model_family: forward.model_family,
@@ -2826,7 +2882,24 @@ async fn forward_to_upstream_once(
         .await?;
         let mut log_context = log_context;
         // Parse the JSON body once; usage metadata and service tier share it.
-        let value: Option<Value> = serde_json::from_slice(&body).ok();
+        let mut value: Option<Value> = serde_json::from_slice(&body).ok();
+        let body = if status.is_success()
+            && let Some(converter) = cerebras.take()
+        {
+            let upstream = value.take().ok_or_else(|| {
+                TokenproxyError::new(
+                    StatusCode::BAD_GATEWAY,
+                    ErrorCode::UpstreamFailure,
+                    "invalid Cerebras response JSON",
+                )
+            })?;
+            let converted = converter.json(upstream)?;
+            let body = Bytes::from(converted.to_string());
+            value = Some(converted);
+            body
+        } else {
+            body
+        };
         let metadata = value
             .as_ref()
             .map(usage_metadata_from_value)
@@ -2843,6 +2916,13 @@ async fn forward_to_upstream_once(
         log_context.actual_service_tier = value.as_ref().and_then(actual_service_tier_from_value);
         let response = response_with_headers(status, headers, Body::from(body))?;
         return Ok(response_with_log_context(response, log_context));
+    }
+    if status.is_success() && cerebras.is_some() {
+        return Err(TokenproxyError::new(
+            StatusCode::BAD_GATEWAY,
+            ErrorCode::UpstreamFailure,
+            "Cerebras returned an unsupported response content type",
+        ));
     }
     let body = Body::from_stream(response.bytes_stream());
 
@@ -3437,6 +3517,61 @@ async fn record_reset_stream_exhaustion(reset: &ResetContext, data: &str) {
     if let Ok(event) = serde_json::from_str::<Value>(data) {
         record_websocket_usage_limit_error_event(&reset.state, &reset.account, &event).await;
     }
+}
+
+fn cerebras_response_stream<S, E>(
+    stream: S,
+    converter: crate::cerebras::ResponseConverter,
+) -> impl futures_util::Stream<Item = Result<Bytes, TokenproxyError>>
+where
+    S: futures_util::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Error + Send + Sync + 'static,
+{
+    let (stream, pending_bytes) = bounded_eventsource_stream(stream);
+    futures_util::stream::unfold(
+        (stream, converter, VecDeque::new(), false, pending_bytes),
+        |(mut stream, mut converter, mut pending, mut finished, pending_bytes)| async move {
+            loop {
+                if let Some(frame) = pending.pop_front() {
+                    return Some((
+                        Ok(frame),
+                        (stream, converter, pending, finished, pending_bytes),
+                    ));
+                }
+                if finished {
+                    return None;
+                }
+                let result = match stream.as_mut().next().await {
+                    Some(Ok(event)) => {
+                        pending_bytes.store(0, Ordering::Relaxed);
+                        converter.event(&event.data)
+                    }
+                    Some(Err(error)) => Err(TokenproxyError::new(
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCode::UpstreamFailure,
+                        format!("invalid Cerebras stream: {error}"),
+                    )),
+                    None => Err(TokenproxyError::new(
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCode::UpstreamFailure,
+                        "Cerebras stream ended before [DONE]",
+                    )),
+                };
+                match result {
+                    Ok(frames) => {
+                        pending.extend(frames);
+                        finished = converter.is_finished();
+                    }
+                    Err(error) => {
+                        return Some((
+                            Err(error),
+                            (stream, converter, pending, true, pending_bytes),
+                        ));
+                    }
+                }
+            }
+        },
+    )
 }
 
 async fn sse_response_after_first_event<S, E>(
@@ -4124,6 +4259,11 @@ async fn select_next_passthrough_account(
 
 fn passthrough_account_matches_path(account: &EffectiveAccount, path: &str) -> bool {
     match account.config.kind {
+        AccountKind::CerebrasApiKey => match path {
+            "/v1/chat/completions" => account.config.supports_chat_completions,
+            "/v1/responses" => account.config.supports_responses,
+            _ => false,
+        },
         AccountKind::OpenAiApiKey => openai_api_key_passthrough_matches_path(account, path),
         AccountKind::MainroomPeer => mainroom_peer_passthrough_matches_path(account, path),
         AccountKind::AnthropicApiKey => path == "/v1/messages",

@@ -1,6 +1,6 @@
 # Tokenproxy Agent Guide
 
-Tokenproxy is a single-binary Rust server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages behind one endpoint, and spreads traffic across a pool of upstream accounts (OpenAI API keys, Anthropic API keys, ChatGPT Codex `auth.json` credentials). When an account hits a usage limit, gets throttled, or fails auth, routing shifts to healthy accounts.
+Tokenproxy is a single-binary Rust server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages behind one endpoint, and spreads traffic across a pool of upstream accounts (OpenAI API keys, Cerebras API keys, Anthropic API keys, ChatGPT Codex `auth.json` credentials). When an account hits a usage limit, gets throttled, or fails auth, routing shifts to healthy accounts.
 
 The implementation lives in `src/`. `CLAUDE.md` is a symlink to this file, so this map is also the project instruction set for coding agents.
 
@@ -31,6 +31,8 @@ Stop as soon as you have what you need.
 |--------|------|
 | `main.rs` | CLI entry: flag parsing, config load, server startup, shutdown signals. |
 | `config.rs` | Config schema and parsing: `Config`, `AccountConfig`, `AccountKind`, timeouts, retries, downstream auth, admin auth; resolves to `EffectiveConfig`. |
+| `cerebras/request.rs` | Stateless Responses-to-Cerebras Chat translation, instruction normalization, function namespaces, and compatibility validation. |
+| `cerebras/response.rs` | Chat-to-Responses JSON and SSE conversion, stable item identities, tool deltas, usage, and terminal status. |
 | `auth.rs` | ChatGPT Codex `auth.json` handling: token snapshots per account, bearer checks, refresh after upstream 401 (`ChatGptAuthCell`). |
 | `server/state.rs` | `AppState`: runtime account-health store and persistence across reloads. |
 | `server/state/reset.rs` | Opt-in ChatGPT reset redemption, per-identity coordination, idempotency, and reset API mocks. |
@@ -58,6 +60,8 @@ Defined in `app()` in `src/server/state/proxy.rs`: `/healthz`, `/metrics`, `/usa
 
 Client request → router (`proxy.rs`) → downstream auth check → request classification (`http/classify.rs`) → account selection (`routing/select.rs`) → auth snapshot (`auth.rs`) → upstream request (`http/forward.rs`) → streamed response with SSE repair or WebSocket relay → health and metrics recording (`server/state.rs`, `metrics.rs`).
 
+Cerebras accounts use `cerebras_api_key`, API-key bearer authentication, and the default `https://api.cerebras.ai/v1` upstream. Only HTTP Chat Completions and HTTP Responses are supported; incremental continuations are disabled. Responses translate per selected account, preserving the original request for failover. System/developer instructions are consolidated into one initial system message. The adapter rejects unsupported semantic features, bounds raw SSE frames and accumulated output, and waits for upstream completion before announcing executable tool results. Incomplete tool calls never emit item-done events. See `docs/cerebras.md` for the supported subset and source references.
+
 ChatGPT accounts may opt into `auto_use_reset` (default false). Explicit usage exhaustion attempts a banked reset through the Codex backend and permits one same-account retry before downstream output. After output, the error is forwarded and reset recovery benefits future requests. Per-backend/account coordination retains ambiguous redemption keys across config reloads; selection can reconcile an exhausted account when no ordinary account is eligible. Generic throttling never consumes a reset.
 
 ## Working in this repo
@@ -65,6 +69,7 @@ ChatGPT accounts may opt into `auto_use_reset` (default false). Explicit usage e
 - `cargo check` before building; `cargo test --lib --bin tokenproxy` runs the full suite (~300 tests, under a minute); `cargo fmt --check` before pushing.
 - Tests are inline `#[cfg(test)]` modules next to the code they cover; most live in `server/state/proxy.rs`.
 - Run `cargo test --test auto_use_reset` for the local backend API and streaming experiments, in addition to the library and binary suite.
+- Run `cargo test --test cerebras` for native auth/routing, fragmented tool streams, two-turn tool history, and failure/commit behavior.
 - Releases: bump `version` in `Cargo.toml` and `Cargo.lock` in one commit on main, tag it `vX.Y.Z`, push the tag. `release.yml` does the rest.
 - Finding things: routes are in `app()`; config keys are the struct fields in `config.rs`; account-health transitions are the `AccountHealth` writes in `proxy.rs` and reads in `routing/select.rs`.
 
