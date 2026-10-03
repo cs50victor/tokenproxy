@@ -61,6 +61,7 @@ Account service-tier filtering runs before translation. Cerebras defaults to `au
 | User/assistant text and user image URLs | Preserve message order and convert content-part shapes; image support depends on the model |
 | Function definitions and namespaces | Flatten names with collision checks and deterministic aliases for provider name limits; restore original names and namespaces on output |
 | Function calls and outputs | Preserve call IDs and arguments; combine adjacent assistant calls for parallel tool-result history |
+| Named standalone function outputs (no call ID) | Preserve tool name, optional namespace, and text as a separate attributed assistant message, including Codex TUI child tasks and follow-ups |
 | Plaintext agent messages | Preserve sender, recipient, and text in a separate assistant message; native collaboration calls explicitly mark their task arguments as plaintext |
 | Plaintext reasoning history | Prefer full content, fall back to summary, and attach it to its assistant turn |
 | Reasoning effort | Forward as `reasoning_effort`; Cerebras validates model-specific values |
@@ -72,6 +73,8 @@ Account service-tier filtering runs before translation. Cerebras defaults to `au
 | Length/content-filter termination | Report `response.incomplete`; never announce an incomplete tool call as executable |
 
 Metadata, storage-disabled hints, reasoning-summary preference, verbosity, cache-retention hints, safety identifiers, and OpenAI service tiers are not sent upstream. Generated plaintext reasoning is represented as a separate Responses reasoning item, rather than assistant answer text.
+
+Chat Completions requires tool results to reference a matching call. For standalone outputs, the adapter uses assistant text with a `Tool output from namespace.name:` prefix. This preserves attribution and avoids fabricating a call or elevating tool content to user/system instructions, but cannot retain a distinct tool role. Missing or null call IDs use this translation only with a nonempty tool name; empty or wrongly typed IDs are rejected. Reasoning and later calls remain separate from the standalone output.
 
 Unsupported semantic features return a clear 400: stored continuations (`previous_response_id` or `conversation`), `store=true`, background requests, automatic truncation, tool-call limits, item references, encrypted-only reasoning, file/audio inputs, hosted tools, and custom/freeform grammar tools. Nontext instructions or tool outputs are also rejected. The adapter does not implement remote compaction or retain response history; clients send the full conversation. Unexpected upstream refusal payloads return an upstream error rather than an empty successful answer.
 
@@ -91,7 +94,7 @@ cargo test --locked --profile fast-build
 cargo fmt --check
 ```
 
-The focused integration suite is `cargo test --test cerebras`. It covers native authentication and path mapping, billing-error passthrough, rate-limit and precommit failover, fragmented network frames, a complete tool-call round trip, unsupported requests, and failures after downstream commitment. Inline tests cover config/discovery, namespaces and aliases, reasoning placement, item ordering, usage, and incomplete-tool suppression.
+The focused integration suite is `cargo test --test cerebras`. It covers native authentication and path mapping, billing-error passthrough, rate-limit and precommit failover, fragmented network frames, a complete tool-call round trip, standalone Codex TUI child tasks and follow-ups, unsupported requests, and failures after downstream commitment. Inline tests cover config/discovery, namespaces and aliases, reasoning placement, item ordering, usage, and incomplete-tool suppression.
 
 Live checks on October 3, 2026 used Codex CLI 0.160.0 and a separately bound development binary:
 

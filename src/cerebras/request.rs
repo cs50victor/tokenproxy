@@ -153,9 +153,9 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
     match object.get("input") {
         Some(Value::String(input)) => messages.push(json!({"role":"user", "content":input})),
         Some(Value::Array(input)) => {
-            let mut agent_message_boundary = false;
+            let mut external_message_boundary = false;
             for item in input {
-                let follows_agent_message = agent_message_boundary;
+                let follows_external_message = external_message_boundary;
                 match item["type"].as_str().unwrap_or("message") {
                     "agent_message" => {
                         if !reasoning.is_empty() {
@@ -176,7 +176,7 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                             .collect::<Result<Vec<_>, _>>()?
                             .join("\n");
                         messages.push(json!({"role":"assistant", "content":format!("Message from {author} to {recipient}:\n{content}")}));
-                        agent_message_boundary = true;
+                        external_message_boundary = true;
                     }
                     "message" => {
                         let role = string(item, "role")?;
@@ -198,10 +198,10 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                             message["reasoning"] = Value::String(std::mem::take(&mut reasoning));
                         }
                         messages.push(message);
-                        agent_message_boundary = false;
+                        external_message_boundary = false;
                     }
                     "function_call" => {
-                        agent_message_boundary = false;
+                        external_message_boundary = false;
                         let name = resolve_alias(
                             string(item, "name")?,
                             item["namespace"].as_str(),
@@ -212,7 +212,7 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                             "name":name, "arguments":string(item, "arguments")?
                         }});
                         if let Some(previous) = messages.last_mut().filter(|m| {
-                            !follows_agent_message
+                            !follows_external_message
                                 && m["role"] == "assistant"
                                 && (reasoning.is_empty() || m.get("reasoning").is_none())
                         }) {
@@ -237,7 +237,22 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                         }
                     }
                     "function_call_output" => {
-                        agent_message_boundary = false;
+                        if item["call_id"].is_null() {
+                            let name = string(item, "name")?;
+                            let source = if item["namespace"].is_null() {
+                                name.to_string()
+                            } else {
+                                format!("{}.{name}", string(item, "namespace")?)
+                            };
+                            let content = text_content(&item["output"])?;
+                            if !reasoning.is_empty() {
+                                messages.push(json!({"role":"assistant", "content":"", "reasoning":std::mem::take(&mut reasoning)}));
+                            }
+                            messages.push(json!({"role":"assistant", "content":format!("Tool output from {source}:\n{content}")}));
+                            external_message_boundary = true;
+                            continue;
+                        }
+                        external_message_boundary = false;
                         if !reasoning.is_empty() {
                             return Err(invalid(
                                 "reasoning must precede an assistant message or function call",
@@ -473,6 +488,109 @@ mod tests {
                 {"role":"tool", "tool_call_id":"a", "content":"one"},
                 {"role":"tool", "tool_call_id":"b", "content":"two"}
             ])
+        );
+    }
+
+    #[test]
+    fn should_preserve_named_standalone_tool_outputs() {
+        for call_id in [None, Some(Value::Null)] {
+            for namespace in [None, Some("codex_tui")] {
+                let mut output = json!({"type":"function_call_output", "name":"create_thread",
+                    "output":[{"type":"input_text","text":"<codex_delegation>\n"},
+                              {"type":"input_text","text":"Run &lt;probe&gt; &amp; report\n</codex_delegation>"}]});
+                if let Some(call_id) = &call_id {
+                    output["call_id"] = call_id.clone();
+                }
+                if let Some(namespace) = namespace {
+                    output["namespace"] = json!(namespace);
+                }
+                let converted = prepare(json!({"model":"qwen", "input":[output]})).unwrap();
+                let name = if namespace.is_some() {
+                    "codex_tui.create_thread"
+                } else {
+                    "create_thread"
+                };
+                assert_eq!(
+                    converted.body["messages"],
+                    json!([
+                        {"role":"assistant", "content":format!("Tool output from {name}:\n<codex_delegation>\nRun &lt;probe&gt; &amp; report\n</codex_delegation>")}
+                    ])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn should_keep_standalone_tool_output_separate_from_assistant_work() {
+        for next_reasoning in [
+            vec![],
+            vec![json!({"type":"reasoning", "summary":[{"type":"summary_text","text":"Run now"}]})],
+        ] {
+            let mut input = vec![
+                json!({"type":"reasoning", "summary":[{"type":"summary_text","text":"Waiting"}]}),
+                json!({"type":"function_call_output", "name":"send_message_to_thread", "namespace":"codex_tui", "output":"Run the probe"}),
+            ];
+            input.extend(next_reasoning.clone());
+            input.extend([
+                json!({"type":"function_call", "name":"run", "call_id":"a", "arguments":"{}"}),
+                json!({"type":"function_call_output", "call_id":"a", "output":"OK"}),
+            ]);
+            let converted = prepare(json!({"model":"qwen", "input":input})).unwrap();
+            let messages = &converted.body["messages"];
+            assert_eq!(
+                messages[0],
+                json!({"role":"assistant", "content":"", "reasoning":"Waiting"})
+            );
+            assert_eq!(
+                messages[1],
+                json!({"role":"assistant", "content":"Tool output from codex_tui.send_message_to_thread:\nRun the probe"})
+            );
+            assert_eq!(messages[2]["tool_calls"][0]["id"], "a");
+            assert_eq!(
+                messages[2]["reasoning"],
+                if next_reasoning.is_empty() {
+                    Value::Null
+                } else {
+                    json!("Run now")
+                }
+            );
+            assert_eq!(
+                messages[3],
+                json!({"role":"tool", "tool_call_id":"a", "content":"OK"})
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_malformed_standalone_tool_outputs() {
+        for extra in [
+            json!({"call_id":""}),
+            json!({"call_id":7}),
+            json!({"call_id":false}),
+            json!({"name":null}),
+            json!({"name":""}),
+            json!({"name":7}),
+            json!({"namespace":""}),
+            json!({"namespace":7}),
+            json!({"output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}),
+            json!({"output":[{"type":"encrypted_content","encrypted_content":"ciphertext"}]}),
+        ] {
+            let mut output =
+                json!({"type":"function_call_output", "name":"notifications", "output":"Hello"});
+            output
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(
+                prepare(json!({"model":"qwen", "input":[output.clone()]})).is_err(),
+                "accepted {output}"
+            );
+        }
+        assert!(
+            prepare(
+                json!({"model":"qwen", "input":[{"type":"function_call_output","output":"Hello"}]})
+            )
+            .is_err()
         );
     }
 
