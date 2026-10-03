@@ -22,6 +22,7 @@ const HOP_BY_HOP: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamAuth {
     OpenAiBearer,
+    CerebrasBearer,
     ChatGptBearer,
     AnthropicApiKey,
     ForwardInboundBearer,
@@ -46,11 +47,17 @@ pub fn build_upstream_headers(
 
     output.insert(HOST, header_value(upstream_host, "upstream host")?);
     match auth {
-        UpstreamAuth::OpenAiBearer | UpstreamAuth::ChatGptBearer => {
+        UpstreamAuth::OpenAiBearer | UpstreamAuth::ChatGptBearer | UpstreamAuth::CerebrasBearer => {
             let mut authorization =
                 header_value(&format!("Bearer {upstream_token}"), "authorization")?;
             authorization.set_sensitive(true);
             output.insert(AUTHORIZATION, authorization);
+            if auth == UpstreamAuth::CerebrasBearer {
+                output.insert(
+                    USER_AGENT,
+                    HeaderValue::from_static(concat!("tokenproxy/", env!("CARGO_PKG_VERSION"))),
+                );
+            }
             if matches!(auth, UpstreamAuth::ChatGptBearer) {
                 apply_chatgpt_codex_default_headers(&mut output, tokenproxy_request_id);
                 // ChatGPT Codex auth pairs the OAuth access-token bearer with the
@@ -111,6 +118,7 @@ fn should_forward_inbound_header(
     let is_payload_header = matches!(lower, "accept" | "content-type");
     match auth {
         UpstreamAuth::ChatGptBearer => is_payload_header || is_codex_header(lower),
+        UpstreamAuth::CerebrasBearer => is_payload_header,
         UpstreamAuth::OpenAiBearer => {
             is_payload_header
                 || (allow_openai_headers
