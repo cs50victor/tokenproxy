@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
@@ -154,6 +154,8 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
         Some(Value::String(input)) => messages.push(json!({"role":"user", "content":input})),
         Some(Value::Array(input)) => {
             let mut external_message_boundary = false;
+            let mut pending_tool_calls = BTreeSet::new();
+            let mut tool_images = Vec::new();
             for item in input {
                 let follows_external_message = external_message_boundary;
                 match item["type"].as_str().unwrap_or("message") {
@@ -202,6 +204,7 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                     }
                     "function_call" => {
                         external_message_boundary = false;
+                        pending_tool_calls.insert(string(item, "call_id")?);
                         let name = resolve_alias(
                             string(item, "name")?,
                             item["namespace"].as_str(),
@@ -258,7 +261,22 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                                 "reasoning must precede an assistant message or function call",
                             ));
                         }
-                        messages.push(json!({"role":"tool", "tool_call_id":string(item, "call_id")?, "content":text_content(&item["output"])?}));
+                        let call_id = string(item, "call_id")?;
+                        let (content, images) = tool_output_content(&item["output"])?;
+                        messages.push(
+                            json!({"role":"tool", "tool_call_id":call_id, "content":content}),
+                        );
+                        if !images.is_empty() {
+                            let mut content = vec![
+                                json!({"type":"text", "text":format!("Images returned by tool call {call_id}:")}),
+                            ];
+                            content.extend(images);
+                            tool_images.push(json!({"role":"user", "content":content}));
+                        }
+                        pending_tool_calls.remove(call_id);
+                        if pending_tool_calls.is_empty() {
+                            messages.append(&mut tool_images);
+                        }
                     }
                     "reasoning" => {
                         let content = item
@@ -296,6 +314,11 @@ pub(crate) fn prepare(request: Value) -> Result<PreparedRequest, TokenproxyError
                         return Err(invalid(format!("unsupported Cerebras input item: {kind}")));
                     }
                 }
+            }
+            if !tool_images.is_empty() {
+                return Err(invalid(
+                    "image tool outputs require all parallel tool results",
+                ));
             }
         }
         _ => return Err(invalid("Cerebras requires input as text or an array")),
@@ -421,21 +444,51 @@ fn text_content(content: &Value) -> Result<String, TokenproxyError> {
         .ok_or_else(|| invalid("expected text content"))?;
     let mut output = String::new();
     for part in parts {
-        if !matches!(
-            part["type"].as_str(),
-            Some("input_text" | "output_text" | "text" | "summary_text" | "reasoning_text")
-        ) {
-            return Err(invalid(
-                "unsupported non-text instruction, reasoning, or tool output",
-            ));
-        }
-        output.push_str(
-            part["text"]
-                .as_str()
-                .ok_or_else(|| invalid("text part requires text"))?,
-        );
+        output.push_str(text_part(part)?);
     }
     Ok(output)
+}
+
+fn text_part(part: &Value) -> Result<&str, TokenproxyError> {
+    if !matches!(
+        part["type"].as_str(),
+        Some("input_text" | "output_text" | "text" | "summary_text" | "reasoning_text")
+    ) {
+        return Err(invalid(
+            "unsupported non-text instruction, reasoning, or tool output",
+        ));
+    }
+    part["text"]
+        .as_str()
+        .ok_or_else(|| invalid("text part requires text"))
+}
+
+fn image_content(part: &Value) -> Result<Value, TokenproxyError> {
+    let mut image = json!({"url":string(part, "image_url")?});
+    if let Some(detail) = part.get("detail") {
+        image["detail"] = detail.clone();
+    }
+    Ok(json!({"type":"image_url", "image_url":image}))
+}
+
+fn tool_output_content(content: &Value) -> Result<(String, Vec<Value>), TokenproxyError> {
+    let Some(parts) = content.as_array() else {
+        return Ok((text_content(content)?, Vec::new()));
+    };
+    let mut text = String::new();
+    let mut images = Vec::new();
+    for part in parts {
+        if part["type"] == "input_image" {
+            images.push(image_content(part)?);
+            text.push_str(&format!(
+                "\n[Image {} attached in the following user message]\n",
+                images.len()
+            ));
+        } else {
+            text.push_str(text_part(part)?);
+        }
+    }
+    Ok((text, images))
 }
 
 fn message_content(content: &Value, allow_images: bool) -> Result<Value, TokenproxyError> {
@@ -450,9 +503,7 @@ fn message_content(content: &Value, allow_images: bool) -> Result<Value, Tokenpr
         match part["type"].as_str() {
             Some("input_text" | "output_text") => output.push(json!({"type":"text", "text":part["text"].as_str().ok_or_else(|| invalid("text part requires text"))?})),
             Some("input_image") if allow_images => {
-                let mut image = json!({"url":string(part, "image_url")?});
-                if let Some(detail) = part.get("detail") { image["detail"] = detail.clone(); }
-                output.push(json!({"type":"image_url", "image_url":image}));
+                output.push(image_content(part)?);
             }
             _ => return Err(invalid("Cerebras messages support text and user image URLs only")),
         }
@@ -463,6 +514,102 @@ fn message_content(content: &Value, allow_images: bool) -> Result<Value, Tokenpr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_preserve_image_tool_outputs_after_parallel_results() {
+        for image_first in [true, false] {
+            let image_output = json!({"type":"function_call_output", "call_id":"image", "output":[
+                {"type":"input_text","text":"Screenshot:"},
+                {"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"},
+                {"type":"input_image","image_url":"https://example.com/image.png"}
+            ]});
+            let text_output =
+                json!({"type":"function_call_output", "call_id":"text", "output":"OK"});
+            let mut input = vec![
+                json!({"type":"function_call","call_id":"image","name":"view_image","arguments":"{}"}),
+                json!({"type":"function_call","call_id":"text","name":"run","arguments":"{}"}),
+            ];
+            input.extend(if image_first {
+                [image_output, text_output]
+            } else {
+                [text_output, image_output]
+            });
+            input.push(json!({"role":"assistant","content":"Reviewed"}));
+            let result = prepare(json!({"model":"qwen", "input":input})).unwrap();
+            let messages = result.body["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 5);
+            assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
+            assert_eq!(messages[1]["role"], "tool");
+            assert_eq!(messages[2]["role"], "tool");
+            let image_index = if image_first { 1 } else { 2 };
+            assert!(
+                messages[image_index]["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Screenshot:")
+            );
+            assert_eq!(
+                messages[3],
+                json!({"role":"user","content":[
+                    {"type":"text","text":"Images returned by tool call image:"},
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"high"}},
+                    {"type":"image_url","image_url":{"url":"https://example.com/image.png"}}
+                ]})
+            );
+            assert_eq!(messages[4]["content"], "Reviewed");
+        }
+    }
+
+    #[test]
+    fn should_preserve_image_only_tool_outputs_across_turns() {
+        let mut input = Vec::new();
+        for call_id in ["first", "second"] {
+            input.extend([
+                json!({"type":"function_call","call_id":call_id,"name":"view_image","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":call_id,"output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}),
+            ]);
+        }
+        let result = prepare(json!({"model":"qwen","input":input})).unwrap();
+        let messages = result.body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 6);
+        for (offset, call_id) in [(0, "first"), (3, "second")] {
+            assert_eq!(messages[offset]["tool_calls"][0]["id"], call_id);
+            assert_eq!(messages[offset + 1]["tool_call_id"], call_id);
+            assert!(!messages[offset + 1]["content"].as_str().unwrap().is_empty());
+            assert_eq!(messages[offset + 2]["role"], "user");
+            assert_eq!(
+                messages[offset + 2]["content"][1]["image_url"]["url"],
+                "data:image/png;base64,AAAA"
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_unsupported_image_tool_output_parts() {
+        for part in [
+            json!({"type":"input_image","image_url":""}),
+            json!({"type":"input_image","file_id":"file_1"}),
+            json!({"type":"input_audio","data":"AAAA"}),
+            json!({"type":"input_file","file_id":"file_1"}),
+            json!({"type":"encrypted_content","encrypted_content":"ciphertext"}),
+        ] {
+            let result = prepare(json!({"model":"qwen","input":[
+                {"type":"function_call","call_id":"image","name":"view_image","arguments":"{}"},
+                {"type":"function_call_output","call_id":"image","output":[part]}
+            ]}));
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn should_reject_image_outputs_with_missing_parallel_results() {
+        let result = prepare(json!({"model":"qwen","input":[
+            {"type":"function_call","call_id":"image","name":"view_image","arguments":"{}"},
+            {"type":"function_call","call_id":"text","name":"run","arguments":"{}"},
+            {"type":"function_call_output","call_id":"image","output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}
+        ]}));
+        assert!(result.is_err());
+    }
 
     #[test]
     fn should_preserve_instructions_and_parallel_tool_history() {

@@ -61,6 +61,7 @@ Account service-tier filtering runs before translation. Cerebras defaults to `au
 | User/assistant text and user image URLs | Preserve message order and convert content-part shapes; image support depends on the model |
 | Function definitions and namespaces | Flatten names with collision checks and deterministic aliases for provider name limits; restore original names and namespaces on output |
 | Function calls and outputs | Preserve call IDs and arguments; combine adjacent assistant calls for parallel tool-result history |
+| Images in paired function outputs | Keep text and image markers in the tool result; attach attributed image URLs in user messages after every parallel tool result has arrived, preserving URL, detail, and image order |
 | Named standalone function outputs (no call ID) | Preserve tool name, optional namespace, and text as a separate attributed assistant message, including Codex TUI child tasks and follow-ups |
 | Plaintext agent messages | Preserve sender, recipient, and text in a separate assistant message; native collaboration calls explicitly mark their task arguments as plaintext |
 | Plaintext reasoning history | Prefer full content, fall back to summary, and attach it to its assistant turn |
@@ -76,7 +77,9 @@ Metadata, storage-disabled hints, reasoning-summary preference, verbosity, cache
 
 Chat Completions requires tool results to reference a matching call. For standalone outputs, the adapter uses assistant text with a `Tool output from namespace.name:` prefix. This preserves attribution and avoids fabricating a call or elevating tool content to user/system instructions, but cannot retain a distinct tool role. Missing or null call IDs use this translation only with a nonempty tool name; empty or wrongly typed IDs are rejected. Reasoning and later calls remain separate from the standalone output.
 
-Unsupported semantic features return a clear 400: stored continuations (`previous_response_id` or `conversation`), `store=true`, background requests, automatic truncation, tool-call limits, item references, encrypted-only reasoning, file/audio inputs, hosted tools, and custom/freeform grammar tools. Nontext instructions or tool outputs are also rejected. The adapter does not implement remote compaction or retain response history; clients send the full conversation. Unexpected upstream refusal payloads return an upstream error rather than an empty successful answer.
+Cerebras accepts images in user messages but requires text in tool messages. For image-bearing paired outputs such as Codex `view_image`, the adapter keeps the tool role and call ID with text and numbered image markers, then adds image-only content with call attribution in user messages. These attachments wait until all parallel calls have results. Image support depends on the selected model. Standalone outputs without call IDs remain text-only.
+
+Unsupported semantic features return a clear 400: stored continuations (`previous_response_id` or `conversation`), `store=true`, background requests, automatic truncation, tool-call limits, item references, encrypted-only reasoning, file/audio inputs, hosted tools, and custom/freeform grammar tools. Nontext instructions, nonimage tool output parts, and image outputs missing parallel tool results are also rejected. The adapter does not implement remote compaction or retain response history; clients send the full conversation. Unexpected upstream refusal payloads return an upstream error rather than an empty successful answer.
 
 Codex v2 collaboration can pass plaintext tasks from Cerebras parents to fresh subagents. OpenAI parents can produce encrypted task messages, which Cerebras cannot decrypt. Those messages are rejected explicitly. A shared provider and model catalog do not make encrypted cross-provider delegation compatible; use a Cerebras parent or a client workflow that sends plaintext tasks.
 
@@ -102,6 +105,7 @@ Live checks on October 3, 2026 used Codex CLI 0.160.0 and a separately bound dev
 - Codex executed `printf NATIVE_CEREBRAS_OK` through Qwen and returned its output with hosted web search disabled.
 - GPT-6 Astra returned `OPENAI_NATIVE_ROUTER_OK` through the same development router using the existing ChatGPT account.
 - Qwen 3.8 27B and GPT OSS 120B both returned a forced namespaced function call with the original namespace and member name restored.
+- Qwen 3.8 27B correctly identified an image returned by a function through buffered and streamed Responses, with image-first and image-last parallel results. A real Codex `view_image` turn completed successfully.
 
 ## References and implementation precedents
 
