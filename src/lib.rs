@@ -1,4 +1,5 @@
 pub mod auth;
+mod cerebras;
 pub mod config;
 pub mod error;
 pub mod http;

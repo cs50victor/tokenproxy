@@ -51,7 +51,7 @@ impl Default for ServerConfig {
             allow_non_loopback: false,
             allow_insecure_upstream: false,
             allow_openai_request_headers: false,
-            max_body_bytes: 10 * 1024 * 1024,
+            max_body_bytes: usize::MAX,
             shutdown_grace_ms: 30_000,
         }
     }
@@ -226,7 +226,9 @@ impl AccountConfig {
             && self.models.is_empty()
             && matches!(
                 self.kind,
-                AccountKind::OpenAiApiKey | AccountKind::ChatgptCodexAuthJson
+                AccountKind::OpenAiApiKey
+                    | AccountKind::ChatgptCodexAuthJson
+                    | AccountKind::CerebrasApiKey
             )
             && (self.supports_chat_completions
                 || self.supports_responses
@@ -239,6 +241,8 @@ pub enum AccountKind {
     #[serde(rename = "openai_api_key")]
     #[default]
     OpenAiApiKey,
+    #[serde(rename = "cerebras_api_key")]
+    CerebrasApiKey,
     #[serde(rename = "anthropic_api_key")]
     AnthropicApiKey,
     #[serde(rename = "chatgpt_codex_auth_json")]
@@ -447,7 +451,9 @@ pub fn load_effective_config(
 
     for account in config.accounts.iter().filter(|account| account.enabled) {
         let effective = match account.kind {
-            AccountKind::OpenAiApiKey | AccountKind::AnthropicApiKey => {
+            AccountKind::OpenAiApiKey
+            | AccountKind::AnthropicApiKey
+            | AccountKind::CerebrasApiKey => {
                 let token_env = account.token_env.as_deref().ok_or_else(|| {
                     TokenproxyError::invalid_config(format!(
                         "enabled account {} missing token_env",
@@ -545,6 +551,12 @@ pub fn load_effective_config(
 
 fn apply_account_kind_defaults(config: &mut Config) {
     for account in &mut config.accounts {
+        if account.kind == AccountKind::CerebrasApiKey {
+            if account.base_url == DEFAULT_OPENAI_BASE_URL {
+                account.base_url = "https://api.cerebras.ai/v1".to_string();
+            }
+            account.supports_incremental_previous_response_id = false;
+        }
         if matches!(account.kind, AccountKind::ChatgptCodexAuthJson)
             && account.base_url == DEFAULT_OPENAI_BASE_URL
         {
@@ -616,6 +628,12 @@ async fn fetch_account_models(
 ) -> Result<Vec<String>, TokenproxyError> {
     let url = model_discovery_url(account)?;
     let mut request = client.get(url).bearer_auth(&account.bearer_token);
+    if account.config.kind == AccountKind::CerebrasApiKey {
+        request = request.header(
+            reqwest::header::USER_AGENT,
+            concat!("tokenproxy/", env!("CARGO_PKG_VERSION")),
+        );
+    }
     if matches!(account.config.kind, AccountKind::ChatgptCodexAuthJson) {
         request = request
             .header(reqwest::header::USER_AGENT, "codex-cli")
@@ -1155,6 +1173,15 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
                 ));
             }
         }
+        if account.kind == AccountKind::CerebrasApiKey
+            && (account.supports_responses_ws
+                || account.supports_compact
+                || account.supports_anthropic_messages)
+        {
+            return Err(TokenproxyError::invalid_config(
+                "cerebras_api_key supports only HTTP chat completions and Responses; WebSocket, compact, and Anthropic routes are unavailable",
+            ));
+        }
         if account.enabled && !account.supports_any_route() {
             return Err(TokenproxyError::invalid_config(format!(
                 "enabled account {} must support at least one tokenproxy route",
@@ -1631,6 +1658,66 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         format!("http://localhost:{port}{base_path}")
+    }
+
+    #[test]
+    fn should_load_cerebras_defaults_and_reject_unsupported_capabilities() {
+        let config = parse_config(r#"accounts=[{id="cerebras",kind="cerebras_api_key",token_env="CEREBRAS_API_KEY",supports_responses=true}]"#).unwrap();
+        let env = BTreeMap::from([
+            ("TOKENPROXY_CLIENT_KEY".into(), "client".into()),
+            ("CEREBRAS_API_KEY".into(), "upstream".into()),
+        ]);
+        let files = MemoryFiles(BTreeMap::new());
+        let effective = load_effective_config(config.clone(), &env, &files).unwrap();
+        let account = &effective.accounts[0];
+        assert_eq!(account.config.base_url, "https://api.cerebras.ai/v1");
+        assert_eq!(account.bearer_token, "upstream");
+        assert!(!account.config.supports_incremental_previous_response_id);
+        assert!(account.config.should_discover_models());
+        for capability in [
+            "supports_responses_ws",
+            "supports_compact",
+            "supports_anthropic_messages",
+        ] {
+            let mut invalid = config.clone();
+            match capability {
+                "supports_responses_ws" => invalid.accounts[0].supports_responses_ws = true,
+                "supports_compact" => invalid.accounts[0].supports_compact = true,
+                _ => invalid.accounts[0].supports_anthropic_messages = true,
+            }
+            expect_config_error(invalid, &env, &files, "cerebras_api_key supports only HTTP");
+        }
+    }
+
+    #[tokio::test]
+    async fn should_discover_native_cerebras_models() {
+        let base_url = model_fixture_base_url(
+            "/v1",
+            "/v1/models",
+            "Bearer upstream",
+            None,
+            r#"{"data":[{"id":"qwen-3.8-27b"},{"id":"gpt-oss-120b"}]}"#,
+        )
+        .await;
+        let mut config = config_with_account(AccountConfig {
+            id: "cerebras".into(),
+            kind: AccountKind::CerebrasApiKey,
+            token_env: Some("CEREBRAS_API_KEY".into()),
+            base_url,
+            supports_responses: true,
+            ..Default::default()
+        });
+        config.server.allow_insecure_upstream = true;
+        let env = BTreeMap::from([
+            ("TOKENPROXY_CLIENT_KEY".into(), "client".into()),
+            ("CEREBRAS_API_KEY".into(), "upstream".into()),
+        ]);
+        let effective = load_effective_config(config, &env, &MemoryFiles(BTreeMap::new())).unwrap();
+        let discovered = discover_account_models(effective).await.unwrap();
+        assert_eq!(
+            discovered.accounts[0].config.models,
+            vec!["gpt-oss-120b", "qwen-3.8-27b"]
+        );
     }
 
     #[test]

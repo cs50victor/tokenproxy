@@ -1,8 +1,8 @@
 <h1 align="center">tokenproxy</h1>
 
-<p align="center">Small, fast Rust proxy for OpenAI and Anthropic agent traffic.</p>
+<p align="center">Small, fast Rust proxy for OpenAI, Cerebras, and Anthropic agent traffic.</p>
 
-Tokenproxy is a server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages with one endpoint and spreads the traffic across a pool of upstream accounts: OpenAI API keys, Anthropic API keys, and ChatGPT Codex `auth.json` credentials. When an account hits a usage limit, gets throttled, or fails auth, traffic shifts to the rest, so Codex and other agent clients keep working.
+Tokenproxy is a server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages with one endpoint and spreads the traffic across a pool of upstream accounts: OpenAI API keys, Cerebras API keys, Anthropic API keys, and ChatGPT Codex `auth.json` credentials. When an account hits a usage limit, gets throttled, or fails auth, traffic shifts to the rest, so Codex and other agent clients keep working.
 
 ## Install and run
 
@@ -33,6 +33,37 @@ Start it with inline config; no config file needed:
 ```
 
 Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `server.bind` and `server.allow_non_loopback = true`. OpenAI and ChatGPT accounts discover their available models at startup; an optional `models = [...]` list acts as an allowlist over discovered models, with unknown IDs ignored. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. Set `TOKENPROXY_CONFIG_UPDATE_ENDPOINT` only when refreshed ChatGPT auth JSON should be posted to a compatible config service; local `auth_json_path` files are still rewritten directly. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
+
+## HTTP body limits
+
+HTTP request bodies have no configured size cap by default, including decoded zstd requests and passthrough routes. Providers enforce their own request limits, and their HTTP 413 status and error body are forwarded to the client.
+
+To impose a local cap, set `server.max_body_bytes` in bytes:
+
+```toml
+[server]
+max_body_bytes = 67108864
+```
+
+This example sets a 64 MiB cap. Omit the setting to leave HTTP bodies unlimited. The setting also bounds buffered JSON and compact responses and accumulated Cerebras output. Bodies are still buffered in memory; Codex Live control-message limits are separate.
+
+## Cerebras and Codex
+
+Cerebras accounts accept native Chat Completions and translate HTTP Responses requests inside Tokenproxy, including streaming text, reasoning, and function-tool calls. No companion proxy or Python package is required.
+
+```toml
+[[accounts]]
+id = "cerebras"
+kind = "cerebras_api_key"
+token_env = "CEREBRAS_API_KEY"
+supports_chat_completions = true
+supports_responses = true
+models = ["qwen-3.8-27b", "gpt-oss-120b"]
+```
+
+The default upstream is `https://api.cerebras.ai/v1`; omit `models` to discover available IDs. Add this account alongside existing OpenAI or ChatGPT accounts to route both providers through one endpoint.
+
+Codex requires a matching model catalog for its `/model` picker, HTTP Responses transport, and hosted web search disabled for Cerebras sessions. WebSocket Responses, remote compaction, stored continuations, and custom grammar tools are not supported by this adapter. See [configuration, compatibility, and validation](docs/cerebras.md).
 
 ## Load balancing
 

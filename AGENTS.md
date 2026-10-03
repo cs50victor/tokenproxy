@@ -1,6 +1,6 @@
 # Tokenproxy Agent Guide
 
-Tokenproxy is a single-binary Rust server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages behind one endpoint, and spreads traffic across a pool of upstream accounts (OpenAI API keys, Anthropic API keys, ChatGPT Codex `auth.json` credentials). When an account hits a usage limit, gets throttled, or fails auth, routing shifts to healthy accounts.
+Tokenproxy is a single-binary Rust server that fronts OpenAI Chat Completions, Responses (HTTP and WebSocket), and Anthropic Messages behind one endpoint, and spreads traffic across a pool of upstream accounts (OpenAI API keys, Cerebras API keys, Anthropic API keys, ChatGPT Codex `auth.json` credentials). When an account hits a usage limit, gets throttled, or fails auth, routing shifts to healthy accounts.
 
 The implementation lives in `src/`. `CLAUDE.md` is a symlink to this file, so this map is also the project instruction set for coding agents.
 
@@ -31,6 +31,8 @@ Stop as soon as you have what you need.
 |--------|------|
 | `main.rs` | CLI entry: flag parsing, config load, server startup, shutdown signals. |
 | `config.rs` | Config schema and parsing: `Config`, `AccountConfig`, `AccountKind`, timeouts, retries, downstream auth, admin auth; resolves to `EffectiveConfig`. |
+| `cerebras/request.rs` | Stateless Responses-to-Cerebras Chat translation, instruction normalization, function namespaces, and compatibility validation. |
+| `cerebras/response.rs` | Chat-to-Responses JSON and SSE conversion, stable item identities, tool deltas, usage, and terminal status. |
 | `auth.rs` | ChatGPT Codex `auth.json` handling: token snapshots per account, bearer checks, refresh after upstream 401 (`ChatGptAuthCell`). |
 | `server/state.rs` | `AppState`: runtime account-health store and persistence across reloads. |
 | `server/state/reset.rs` | Opt-in ChatGPT reset redemption, per-identity coordination, idempotency, and reset API mocks. |
@@ -61,6 +63,10 @@ Defined in `app()` in `src/server/state/proxy.rs`: `/healthz`, `/metrics`, `/usa
 
 Client request → router (`proxy.rs`) → downstream auth check → request classification (`http/classify.rs`) → account selection (`routing/select.rs`) → auth snapshot (`auth.rs`) → upstream request (`http/forward.rs`) → streamed response with SSE repair or WebSocket relay → health and metrics recording (`server/state.rs`, `metrics.rs`).
 
+`server.max_body_bytes` defaults to `usize::MAX`, leaving general HTTP bodies unlimited so providers enforce request-size limits. Explicit byte values cap inbound and decoded request bodies, buffered JSON/compact responses, and accumulated Cerebras output. Provider HTTP 413 responses retain their status and body. Codex Live control messages retain their separate bounded limits.
+
+Cerebras accounts use `cerebras_api_key`, API-key bearer authentication, and the default `https://api.cerebras.ai/v1` upstream. Only HTTP Chat Completions and HTTP Responses are supported; incremental continuations are disabled. Responses translate per selected account, preserving the original request for failover. System/developer instructions are consolidated into one initial system message. Plaintext agent messages retain sender and recipient attribution; native collaboration calls mark task arguments as plaintext. Named standalone tool outputs without call IDs become separate assistant messages with tool attribution; ordinary paired outputs retain their tool role and ID. Paired image outputs retain text and image markers in the tool result, with attributed user-image attachments deferred until all parallel results arrive. Encrypted agent messages remain unsupported. The adapter rejects unsupported semantic features, bounds raw SSE frames, applies any configured accumulated-output cap, and waits for upstream completion before announcing executable tool results. Incomplete tool calls never emit item-done events. See `docs/cerebras.md` for the supported subset and source references.
+
 ChatGPT accounts may opt into `auto_use_reset` (default false). Explicit usage exhaustion attempts a banked reset through the Codex backend and permits one same-account retry before downstream output. After output, the error is forwarded and reset recovery benefits future requests. Per-backend/account coordination retains ambiguous redemption keys across config reloads; selection can reconcile an exhausted account when no ordinary account is eligible. Generic throttling never consumes a reset.
 
 ChatGPT accounts may separately opt into `supports_realtime`. Voice setup selects a healthy voice account; its call ID stays bound to that account/backend and authenticated caller across reconnects. Voice uses no Responses transformations, reset redemption, replay, or cross-account retry. The shared control HTTP client disables redirects for reset and voice requests. Call state is process-local, capped at 1,024 including setup reservations, with five-minute disconnected expiry and no eviction of active calls. WebRTC media bypasses Tokenproxy. Text-model discovery does not restrict the voice session model; upstream entitlement remains authoritative.
@@ -71,6 +77,7 @@ ChatGPT accounts may separately opt into `supports_realtime`. Voice setup select
 - Tests are inline `#[cfg(test)]` modules next to the code they cover; most live in `server/state/proxy.rs`.
 - Run `cargo test --test auto_use_reset` for the local backend API and streaming experiments, in addition to the library and binary suite.
 - Run `cargo test --test realtime` for voice integration experiments; `TOKENPROXY_STRESS_CALLS` and `TOKENPROXY_STRESS_MESSAGES` scale its concurrent relay test, as described in `docs/realtime-validation.md`.
+- Run `cargo test --test cerebras` for native auth/routing, fragmented tool streams, two-turn tool history, and failure/commit behavior.
 - Releases: bump `version` in `Cargo.toml` and `Cargo.lock` in one commit on main, tag it `vX.Y.Z`, push the tag. `release.yml` does the rest.
 - Finding things: routes are in `app()`; config keys are the struct fields in `config.rs`; account-health transitions are the `AccountHealth` writes in `proxy.rs` and reads in `routing/select.rs`.
 
