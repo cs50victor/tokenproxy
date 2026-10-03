@@ -200,6 +200,42 @@ async fn should_route_native_responses_with_cerebras_auth_and_instructions() {
 }
 
 #[tokio::test]
+async fn should_forward_image_tool_results_after_parallel_text_results() {
+    let (upstream, captured) = upstream(vec![json_reply()]).await;
+    let proxy = proxy(vec![account(
+        &upstream,
+        "cerebras",
+        0,
+        AccountKind::CerebrasApiKey,
+    )])
+    .await;
+    let mut body = request_body();
+    body["input"] = json!([
+        {"role":"user","content":"Review this screenshot and command output"},
+        {"type":"function_call","call_id":"image","name":"view_image","arguments":"{}"},
+        {"type":"function_call","call_id":"text","name":"run","arguments":"{}"},
+        {"type":"function_call_output","call_id":"image","output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"high"}]},
+        {"type":"function_call_output","call_id":"text","output":"OK"}
+    ]);
+    let response = request(&proxy, "/v1/responses", body).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(response["output"][0]["content"][0]["text"], "OK");
+    let requests = captured.requests.lock().unwrap();
+    let messages = requests[0].1["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[2]["tool_call_id"], "image");
+    assert_eq!(messages[3]["tool_call_id"], "text");
+    assert_eq!(
+        messages[4],
+        json!({"role":"user","content":[
+            {"type":"text","text":"Images returned by tool call image:"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"high"}}
+        ]})
+    );
+}
+
+#[tokio::test]
 async fn should_complete_streamed_tool_roundtrip_with_fragmented_network_frames() {
     let mut stream = frame(
         json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"run","arguments":"{\"command\":"}}]}}]}),
