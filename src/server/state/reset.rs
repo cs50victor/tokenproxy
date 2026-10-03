@@ -451,7 +451,7 @@ mod tests {
             ..Backend::default()
         });
         let fixture = fixture(backend.clone()).await;
-        assert_eq!(send(&fixture.state).await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(send(&fixture.state).await, StatusCode::TOO_MANY_REQUESTS);
         let effective = fixture.state.effective().as_ref().clone();
         fixture
             .state
@@ -531,7 +531,7 @@ mod tests {
             .state
             .swap_effective(disabled, Default::default())
             .unwrap();
-        assert_eq!(send(&fixture.state).await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(send(&fixture.state).await, StatusCode::TOO_MANY_REQUESTS);
         assert!(backend.keys.lock().await.is_empty());
         fixture
             .state

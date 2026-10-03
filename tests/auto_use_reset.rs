@@ -429,8 +429,8 @@ async fn disabled_option_never_looks_up_or_consumes_credits() {
     let upstream = upstream(state.clone()).await;
     let proxy = proxy(vec![account(&upstream, "primary", false, 100)], 0).await;
     let (status, body) = request(&proxy).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.contains("all compatible accounts are usage-limited"));
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(body.contains("usage_limit_reached"));
     assert!(state.requests_to(CREDITS).is_empty());
     assert!(state.requests_to(CONSUME).is_empty());
 }
@@ -542,7 +542,7 @@ async fn quota_persisting_after_reset_does_not_consume_repeatedly() {
     let state = Arc::new(MockState::new(Mode::AlwaysQuota));
     let upstream = upstream(state.clone()).await;
     let proxy = proxy(vec![account(&upstream, "primary", true, 100)], 0).await;
-    assert_eq!(request(&proxy).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(request(&proxy).await.0, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(state.attempts(), 2);
     assert_one_redemption(&state);
 }
@@ -675,7 +675,7 @@ async fn malformed_credit_inventory_never_authorizes_redemption() {
         let state = Arc::new(state);
         let upstream = upstream(state.clone()).await;
         let proxy = proxy(vec![account(&upstream, "primary", true, 100)], 0).await;
-        assert_eq!(request(&proxy).await.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(request(&proxy).await.0, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(state.attempts(), 1);
         assert_eq!(state.requests_to(CREDITS).len(), 1);
         assert!(state.requests_to(CONSUME).is_empty());
@@ -696,7 +696,7 @@ async fn malformed_consume_response_does_not_claim_success() {
         let state = Arc::new(state);
         let upstream = upstream(state.clone()).await;
         let proxy = proxy(vec![account(&upstream, "primary", true, 100)], 0).await;
-        assert_eq!(request(&proxy).await.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(request(&proxy).await.0, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(state.attempts(), 1);
         assert_one_redemption(&state);
     }
@@ -733,7 +733,7 @@ async fn reset_redirect_is_not_followed_to_another_origin() {
     let state = Arc::new(state);
     let upstream = upstream(state.clone()).await;
     let proxy = proxy(vec![account(&upstream, "primary", true, 100)], 0).await;
-    assert_eq!(request(&proxy).await.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(request(&proxy).await.0, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(state.attempts(), 1);
     assert_one_redemption(&state);
     assert!(redirect_state.requests.lock().unwrap().is_empty());
