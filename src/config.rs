@@ -51,7 +51,7 @@ impl Default for ServerConfig {
             allow_non_loopback: false,
             allow_insecure_upstream: false,
             allow_openai_request_headers: false,
-            max_body_bytes: 10 * 1024 * 1024,
+            max_body_bytes: usize::MAX,
             shutdown_grace_ms: 30_000,
         }
     }
@@ -165,6 +165,8 @@ pub struct AccountConfig {
     pub supports_chat_completions: bool,
     pub supports_responses: bool,
     pub supports_responses_ws: bool,
+    pub supports_realtime: bool,
+    pub realtime_ws_base_url: Option<String>,
     pub supports_incremental_previous_response_id: bool,
     pub supports_compact: bool,
     pub supports_anthropic_messages: bool,
@@ -191,6 +193,8 @@ impl Default for AccountConfig {
             supports_chat_completions: false,
             supports_responses: false,
             supports_responses_ws: false,
+            supports_realtime: false,
+            realtime_ws_base_url: None,
             supports_incremental_previous_response_id: true,
             supports_compact: false,
             supports_anthropic_messages: false,
@@ -208,6 +212,7 @@ impl AccountConfig {
         self.supports_chat_completions
             || self.supports_responses
             || self.supports_responses_ws
+            || self.supports_realtime
             || self.supports_compact
             || self.supports_anthropic_messages
     }
@@ -1119,6 +1124,41 @@ fn validate_static_config(config: &Config) -> Result<(), TokenproxyError> {
     }
 
     for account in &config.accounts {
+        if account.supports_realtime || account.realtime_ws_base_url.is_some() {
+            if account.kind != AccountKind::ChatgptCodexAuthJson {
+                return Err(TokenproxyError::invalid_config(
+                    "realtime requires a chatgpt_codex_auth_json account",
+                ));
+            }
+            if let Some(base) = &account.realtime_ws_base_url {
+                let mut url = reqwest::Url::parse(base)
+                    .map_err(|_| TokenproxyError::invalid_config("invalid realtime_ws_base_url"))?;
+                let scheme = match url.scheme() {
+                    "wss" => "https",
+                    "ws" => "http",
+                    _ => {
+                        return Err(TokenproxyError::invalid_config(
+                            "realtime_ws_base_url must use ws or wss",
+                        ));
+                    }
+                };
+                if !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err(TokenproxyError::invalid_config(
+                        "realtime_ws_base_url cannot contain credentials, a query, or a fragment",
+                    ));
+                }
+                url.set_scheme(scheme).map_err(|_| {
+                    TokenproxyError::invalid_config("invalid realtime WebSocket scheme")
+                })?;
+                let mut endpoint = account.clone();
+                endpoint.base_url = url.to_string();
+                validate_base_url(config, &endpoint)?;
+            }
+        }
         if account.auto_use_reset {
             if account.kind != AccountKind::ChatgptCodexAuthJson {
                 return Err(TokenproxyError::invalid_config(
@@ -1471,6 +1511,47 @@ mod tests {
             r#"accounts=[{id="chatgpt",kind="chatgpt_codex_auth_json",auto_use_reset=true,supports_responses=true}]"#.into(),
         ]).unwrap();
         assert!(config.accounts[0].auto_use_reset);
+    }
+
+    #[test]
+    fn realtime_only_accounts_do_not_require_text_model_discovery() {
+        let mut account = AccountConfig {
+            id: "voice".into(),
+            kind: AccountKind::ChatgptCodexAuthJson,
+            supports_realtime: true,
+            ..AccountConfig::default()
+        };
+        assert!(account.supports_any_route());
+        assert!(!account.should_discover_models());
+        assert!(!AccountConfig::default().supports_realtime);
+        assert!(validate_static_config(&config_with_account(account.clone())).is_ok());
+        account.kind = AccountKind::OpenAiApiKey;
+        assert!(validate_static_config(&config_with_account(account)).is_err());
+    }
+
+    #[test]
+    fn realtime_websocket_overrides_require_safe_explicit_urls() {
+        for (url, insecure, valid) in [
+            ("wss://api.openai.com/v1/live", false, true),
+            ("ws://localhost:1234/v1/live", true, true),
+            ("ws://localhost:1234/v1/live", false, false),
+            ("https://api.openai.com/v1/live", false, false),
+            ("wss://user:password@example.com/v1/live", false, false),
+            ("wss://example.com/v1/live?secret=yes", false, false),
+            ("wss://example.com/v1/live#fragment", false, false),
+            ("ws://127.0.0.1:1234/v1/live", true, false),
+        ] {
+            let account = AccountConfig {
+                id: "voice".into(),
+                kind: AccountKind::ChatgptCodexAuthJson,
+                supports_realtime: true,
+                realtime_ws_base_url: Some(url.into()),
+                ..AccountConfig::default()
+            };
+            let mut config = config_with_account(account);
+            config.server.allow_insecure_upstream = insecure;
+            assert_eq!(validate_static_config(&config).is_ok(), valid, "{url}");
+        }
     }
 
     #[test]

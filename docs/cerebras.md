@@ -87,7 +87,7 @@ Codex v2 collaboration can pass plaintext tasks from Cerebras parents to fresh s
 
 The converter waits for a valid upstream event before emitting `response.created`, so failures before the first event can use Tokenproxy's existing retry policy. Once downstream output starts, failures end the stream without replaying the request. An incomplete or malformed stream never becomes `response.completed`.
 
-Raw SSE parsing uses the existing pending-frame bound. Accumulated Cerebras SSE data is limited by `server.max_body_bytes`. Conversion remains incremental and follows existing idle timeouts, downstream backpressure, and cancellation. The final `[DONE]` marker is required after a valid finish reason; usage-only chunks before it are retained.
+Raw SSE parsing uses the existing pending-frame bound. Accumulated Cerebras SSE data has no configured size cap by default; an explicit `server.max_body_bytes` limits it. Conversion remains incremental and follows existing idle timeouts, downstream backpressure, and cancellation. The final `[DONE]` marker is required after a valid finish reason; usage-only chunks before it are retained.
 
 ## Validation
 

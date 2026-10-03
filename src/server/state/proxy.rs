@@ -140,12 +140,12 @@ struct WebSocketRouteContext {
     model_family: String,
 }
 
-struct ActiveWebSocketSessionGuard {
+pub(super) struct ActiveWebSocketSessionGuard {
     metrics: Metrics,
 }
 
 impl ActiveWebSocketSessionGuard {
-    fn new(metrics: &Metrics) -> Self {
+    pub(super) fn new(metrics: &Metrics) -> Self {
         metrics.increment_active_websocket_sessions();
         Self {
             metrics: metrics.clone(),
@@ -237,6 +237,14 @@ pub fn app(state: AppState) -> Router {
             post(proxy_http)
                 .get(responses_compact_get)
                 .fallback(authenticated_method_not_allowed),
+        )
+        .route(
+            "/backend-api/codex/realtime/calls",
+            post(super::realtime::create_call).fallback(authenticated_method_not_allowed),
+        )
+        .route(
+            "/v1/live/{call_id}",
+            get(super::realtime::join_call).fallback(authenticated_method_not_allowed),
         )
         .fallback(proxy_passthrough)
         .with_state(state)
@@ -2980,7 +2988,7 @@ fn response_with_headers(
     })
 }
 
-async fn response_body_with_limit(
+pub(super) async fn response_body_with_limit(
     response: reqwest::Response,
     max_body_bytes: usize,
     label: &str,
@@ -4014,7 +4022,7 @@ async fn all_compatible_accounts_usage_limited_error(
     ))
 }
 
-fn account_selection_health(
+pub(super) fn account_selection_health(
     state: &AppState,
     account: &EffectiveAccount,
     usage_windows: Option<&[UsageWindow]>,
@@ -4298,7 +4306,7 @@ fn mainroom_peer_passthrough_matches_path(account: &EffectiveAccount, path: &str
     openai_api_key_passthrough_matches_path(account, path)
 }
 
-async fn record_account_http_status(
+pub(super) async fn record_account_http_status(
     state: &AppState,
     account: &EffectiveAccount,
     status: StatusCode,
@@ -4684,7 +4692,7 @@ fn record_websocket_request_metrics(
     );
 }
 
-fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
+pub(super) fn require_auth(state: &AppState, headers: &HeaderMap) -> Result<(), TokenproxyError> {
     let bearer_authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -7401,6 +7409,128 @@ data: {"type":"response.custom.future_event"}
 
         assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
         assert_eq!(error.code, ErrorCode::BodyTooLarge);
+    }
+
+    async fn fake_body_limit_upstream(captured_bodies: Arc<StdMutex<Vec<Bytes>>>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().fallback(move |request: Request<Body>| {
+            let captured_bodies = Arc::clone(&captured_bodies);
+            async move {
+                let body = to_bytes(request.into_body(), usize::MAX).await.unwrap();
+                captured_bodies.lock().unwrap().push(body);
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    [("x-request-id", "provider-body-limit")],
+                    r#"{"error":{"message":"provider payload limit","code":"provider_body_too_large"}}"#,
+                )
+            }
+        });
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        address
+    }
+
+    #[tokio::test]
+    async fn should_forward_large_http_bodies_and_preserve_provider_errors_by_default() {
+        let captured_bodies = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_body_limit_upstream(Arc::clone(&captured_bodies)).await;
+        let state = AppState::new(effective_config(vec![account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        )]))
+        .unwrap();
+        let body = Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "model": "gpt-5.5",
+                "input": "x".repeat(11 * 1024 * 1024)
+            }))
+            .unwrap(),
+        );
+        for (path, encoding) in [
+            ("/v1/responses", "identity"),
+            ("/v1/responses", "zstd"),
+            ("/v1/responses/compact", "identity"),
+            ("/v1/embeddings", "identity"),
+        ] {
+            let encoded = if encoding == "zstd" {
+                Bytes::from(zstd::stream::encode_all(Cursor::new(&body), 0).unwrap())
+            } else {
+                body.clone()
+            };
+            let response = app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("authorization", "Bearer client-key")
+                        .header("content-type", "application/json")
+                        .header("content-encoding", encoding)
+                        .body(Body::from(encoded))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(response.headers()["x-request-id"], "provider-body-limit");
+            let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(
+                response_body,
+                r#"{"error":{"message":"provider payload limit","code":"provider_body_too_large"}}"#
+            );
+        }
+        let captured = captured_bodies.lock().unwrap();
+        assert_eq!(captured.len(), 4);
+        assert!(captured.iter().all(|received| received == &body));
+    }
+
+    #[tokio::test]
+    async fn should_enforce_explicit_http_body_limits_before_forwarding() {
+        let captured_bodies = Arc::new(StdMutex::new(Vec::new()));
+        let upstream = fake_body_limit_upstream(Arc::clone(&captured_bodies)).await;
+        let mut effective = effective_config(vec![account(
+            "primary",
+            format!("http://{upstream}/v1"),
+            "upstream-token",
+            100,
+        )]);
+        effective.config.server.max_body_bytes = 1024;
+        let state = AppState::new(effective).unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "gpt-5.5",
+            "input": "x".repeat(2048)
+        }))
+        .unwrap();
+        for (path, encoding) in [
+            ("/v1/responses", "identity"),
+            ("/v1/responses", "zstd"),
+            ("/v1/embeddings", "identity"),
+        ] {
+            let encoded = if encoding == "zstd" {
+                zstd::stream::encode_all(Cursor::new(&body), 0).unwrap()
+            } else {
+                body.clone()
+            };
+            let response = app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("authorization", "Bearer client-key")
+                        .header("content-type", "application/json")
+                        .header("content-encoding", encoding)
+                        .body(Body::from(encoded))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            let response_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&response_body).unwrap();
+            assert_eq!(value["error"]["code"], "body_too_large");
+        }
+        assert!(captured_bodies.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -34,6 +34,19 @@ Start it with inline config; no config file needed:
 
 Binds to `127.0.0.1:8787` by default; to serve remote clients, set a public `server.bind` and `server.allow_non_loopback = true`. OpenAI and ChatGPT accounts discover their available models at startup; an optional `models = [...]` list acts as an allowlist over discovered models, with unknown IDs ignored. Clients authenticate with the bearer token from `TOKENPROXY_CLIENT_KEY`. Set `TOKENPROXY_CONFIG_UPDATE_ENDPOINT` only when refreshed ChatGPT auth JSON should be posted to a compatible config service; local `auth_json_path` files are still rewritten directly. For a persistent setup use `--config tokenproxy.toml`; `-c key=value` overrides any config value with dotted TOML paths, Codex CLI style.
 
+## HTTP body limits
+
+HTTP request bodies have no configured size cap by default, including decoded zstd requests and passthrough routes. Providers enforce their own request limits, and their HTTP 413 status and error body are forwarded to the client.
+
+To impose a local cap, set `server.max_body_bytes` in bytes:
+
+```toml
+[server]
+max_body_bytes = 67108864
+```
+
+This example sets a 64 MiB cap. Omit the setting to leave HTTP bodies unlimited. The setting also bounds buffered JSON and compact responses and accumulated Cerebras output. Bodies are still buffered in memory; Codex Live control-message limits are separate.
+
 ## Cerebras and Codex
 
 Cerebras accounts accept native Chat Completions and translate HTTP Responses requests inside Tokenproxy, including streaming text, reasoning, and function-tool calls. No companion proxy or Python package is required.
@@ -77,6 +90,35 @@ After a successful redemption, Tokenproxy clears cached quota health and retries
 Redemptions are serialized per backend and ChatGPT account identity, with a 30-second cooldown and a total timeout capped at 10 seconds by `timeouts.request_header_ms`. Ambiguous failures retain the same redemption key across retries and config reloads; when no account is eligible, a later request can reconcile the pending redemption after the cooldown. This coordination is local to one process and does not survive restart. Reloading config can enable or disable the option.
 
 See [validation and upstream API references](docs/auto-use-reset-validation.md) for the mock experiments.
+
+## Codex Live voice
+
+Enable subscription voice on a ChatGPT account:
+
+```toml
+[[accounts]]
+id = "chatgpt"
+kind = "chatgpt_codex_auth_json"
+auth_json_path = "~/.codex/auth.json"
+supports_responses = true
+supports_responses_ws = true
+supports_realtime = true
+```
+
+For Codex CLI v0.157.1, put these overrides at the root of its `config.toml`, before any table, while retaining your existing Tokenproxy provider and client credential:
+
+```toml
+experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:8787/backend-api/codex"
+experimental_realtime_ws_base_url = "ws://127.0.0.1:8787/v1/live"
+```
+
+Tokenproxy forwards JSON call setup and the continuous control WebSocket using the same ChatGPT account. WebRTC audio travels directly between Codex and OpenAI. Native `/voice` uses V3; programmatic app-server clients must initialize with `experimentalApi = true` and explicitly request `version = "v3"` with a WebRTC SDP offer. Access still depends on the upstream account's voice entitlement.
+
+Voice is opt-in and independent of the text-model discovery allowlist. New calls choose the highest-priority eligible voice account. A call never fails over or replays: only an explicit 401 can trigger one same-account credential refresh and retry. Voice 403 responses do not disable otherwise-working text credentials. Call ownership survives sideband disconnects for five minutes, allowing reconnection to the original account; config changes that remove that account or change its identity/backend block reconnection. Restarting Tokenproxy loses call bindings.
+
+The process admits at most 1,024 pending or connected calls, including in-flight setup requests. Expired disconnected bindings are removed on subsequent call operations. Setup bodies and WebSocket messages are limited to the smaller of `server.max_body_bytes` and 1 MiB. Setup and handshake use the existing request/connection timeouts; `websocket_idle_ms` bounds stalled writes, while quiet control connections remain open because audio uses WebRTC. Only one sideband can attach to a call at a time.
+
+The default upstream sideband is `wss://api.openai.com/v1/live`; an account can override `realtime_ws_base_url` for a compatible backend. The upstream `Location` supplies only the call ID, never the connection destination. See [implementation choices, protocol references, and validation](docs/realtime-validation.md).
 
 ## Credits
 
